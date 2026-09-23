@@ -176,25 +176,32 @@ void draw_triangle(const Vtx* v0, const Vtx* v1, const Vtx* v2, bool gouraud, bo
     const Vtx *A0 = v1, *B0 = v2, *A1 = v2, *B1 = v0, *A2 = v0, *B2 = v1;
     int bias0 = bias(A0, B0), bias1 = bias(A1, B1), bias2 = bias(A2, B2);
 
-    double inv = 1.0 / (double)area;
+    // Attributes are interpolated exactly with the integer edge weights (w0+w1+w2 == area).
+    // Floating point here produced values like 31.99999 for texel 32, sampling the
+    // neighbouring texel/texture along polygon edges.
+    auto interp = [&](int64_t w0, int64_t w1, int64_t w2, int a0, int a1, int a2) {
+        return (int)((w0 * a0 + w1 * a1 + w2 * a2) / area);
+    };
+    auto interp_round = [&](int64_t w0, int64_t w1, int64_t w2, int a0, int a1, int a2) {
+        return (int)((w0 * a0 + w1 * a1 + w2 * a2 + area / 2) / area);
+    };
     bool dither = S.dither && (gouraud || (textured && !raw));
     int fr = v0->r, fg = v0->g, fb = v0->b;
     for (int y = miny; y < maxy; y++) {
         for (int x = minx; x < maxx; x++) {
             int64_t w0 = edge(A0, B0, x, y), w1 = edge(A1, B1, x, y), w2 = edge(A2, B2, x, y);
             if (w0 + bias0 < 0 || w1 + bias1 < 0 || w2 + bias2 < 0) continue;
-            double l0 = (double)w0 * inv, l1 = (double)w1 * inv, l2 = (double)w2 * inv;
             int r = fr, g = fg, b = fb;
             if (gouraud) {
-                r = (int)(l0 * v0->r + l1 * v1->r + l2 * v2->r + 0.5);
-                g = (int)(l0 * v0->g + l1 * v1->g + l2 * v2->g + 0.5);
-                b = (int)(l0 * v0->b + l1 * v1->b + l2 * v2->b + 0.5);
+                r = interp_round(w0, w1, w2, v0->r, v1->r, v2->r);
+                g = interp_round(w0, w1, w2, v0->g, v1->g, v2->g);
+                b = interp_round(w0, w1, w2, v0->b, v1->b, v2->b);
             }
             uint16_t out;
             bool px_semi = semi;
             if (textured) {
-                int u = (int)(l0 * v0->u + l1 * v1->u + l2 * v2->u);
-                int vv = (int)(l0 * v0->v + l1 * v1->v + l2 * v2->v);
+                int u = interp(w0, w1, w2, v0->u, v1->u, v2->u);
+                int vv = interp(w0, w1, w2, v0->v, v1->v, v2->v);
                 uint16_t t = texel(tex, u, vv);
                 if (t == 0) continue;
                 px_semi = semi && (t & 0x8000);
