@@ -1,5 +1,6 @@
 # Copyrighted game data and anything derived from it never goes in the repo.
-rom/
+asset/*
+!asset/README.txt
 extracted/
 generated/
 build/
@@ -9,3 +10,4 @@ saves/
 *.bmp
 __pycache__/
 *.pyc
+dist/

@@ -33,7 +33,7 @@ uint32_t fnv1a(const uint8_t* p, size_t n) {
 void usage() {
     std::printf(
         "usage: apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--log cats]\n"
-        "  --cue PATH         disc image cue sheet (default: rom/Apocalypse (USA).cue)\n"
+        "  --cue PATH         disc image cue sheet (default: asset/Apocalypse (USA).cue)\n"
         "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
         "  --scale N          initial window scale (default 3)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
@@ -65,7 +65,7 @@ uint32_t load_exe_from_disc(R3000* c) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string cue = "rom/Apocalypse (USA).cue";
+    std::string cue = "asset/Apocalypse (USA).cue";
     std::string card_dir = "saves";
     int scale = 3;
     bool interp_only = false;  // debugging: run everything in the interpreter

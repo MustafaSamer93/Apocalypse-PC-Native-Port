@@ -16,9 +16,9 @@ executable from your disc image, and the program reads everything else from it a
 | FMV (MDEC + CD streaming) | working |
 | 2D (title, HUD, menus) | working |
 | 3D gameplay (GTE + software rasterizer) | working in attract demos and new games |
-| Controller (keyboard / gamepad via SDL3) | working |
+| Controller (keyboard / XInput gamepads via SDL3; F1 = settings) | working |
 | Sound effects, XA speech/music, CD audio | working; SPU reverb not implemented yet |
-| Memory card (`saves/card1.mcr`, emulator-compatible) | implemented, not yet tested in play |
+| Memory card (`saves/card1.mcr`, emulator-compatible) | working |
 | Linux | deferred (the code is portable; build scripts are Windows-only for now) |
 
 ## Building (Windows)
@@ -26,7 +26,7 @@ executable from your disc image, and the program reads everything else from it a
 Requirements: Visual Studio 2022+ with the C++ workload and the **C++ Clang tools**,
 Python 3.10+, Git (CMake fetches SDL3).
 
-1. Put `Apocalypse (USA).cue` and its two `.bin` tracks in `rom\`.
+1. Put `Apocalypse (USA).cue` and its two `.bin` tracks in `asset\`.
 2. Run `build.bat`.
 3. Run `build-clang\apocalypse.exe` from the project folder.
 

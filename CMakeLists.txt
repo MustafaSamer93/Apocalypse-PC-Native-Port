@@ -7,6 +7,9 @@ set(CMAKE_C_STANDARD 11)
 
 option(RECOMP_RA_CHECK "Report functions that return to an unexpected address" ON)
 
+# Static C/C++ runtime: the released exe then runs without the VC++ redistributable.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # ---------------------------------------------------------------- SDL3
 include(FetchContent)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
