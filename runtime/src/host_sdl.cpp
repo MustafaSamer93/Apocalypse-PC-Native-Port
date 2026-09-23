@@ -310,8 +310,10 @@ bool host_parse_press_script(const char* spec) {
 
 uint64_t host_frame_count() { return g_frame; }
 
-PadState host_pad(int port) {
+PadState host_pad(int port, bool analog) {
     uint16_t pressed = 0;
+    PadState s;
+    auto to8 = [](int v) { return (uint8_t)std::clamp((v + 32768) >> 8, 0, 255); };
     if (port == 0) {
         const bool* k = SDL_GetKeyboardState(nullptr);
         struct { SDL_Scancode sc; uint16_t bit; } map[] = {
@@ -371,20 +373,48 @@ PadState host_pad(int port) {
             if (SDL_GetGamepadButton(p, m.b)) pressed |= m.bit;
         if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) pressed |= B_L2;
         if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) pressed |= B_R2;
-        // left stick doubles as the d-pad (the game predates analog pads)
         int lx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
-        if (lx < -16000) pressed |= B_LEFT;
-        if (lx > 16000) pressed |= B_RIGHT;
-        if (ly < -16000) pressed |= B_UP;
-        if (ly > 16000) pressed |= B_DOWN;
+        int rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY);
+        if (!s.has_sticks) {  // first gamepad provides the sticks
+            s.has_sticks = true;
+            s.lx = to8(lx); s.ly = to8(ly); s.rx = to8(rx); s.ry = to8(ry);
+        }
+        // in digital mode the left stick doubles as the d-pad, and the right stick aims:
+        // it presses the shape button(s) in its direction (twin-stick style)
+        if (!analog) {
+            if (lx < -16000) pressed |= B_LEFT;
+            if (lx > 16000) pressed |= B_RIGHT;
+            if (ly < -16000) pressed |= B_UP;
+            if (ly > 16000) pressed |= B_DOWN;
+            if (rx * rx + ry * ry > 20000 * 20000) {
+                if (ry < -12000) pressed |= B_TRIANGLE;
+                if (ry > 12000) pressed |= B_CROSS;
+                if (rx < -12000) pressed |= B_SQUARE;
+                if (rx > 12000) pressed |= B_CIRCLE;
+            }
+        }
     }
     if (port == 0)
         for (auto& sp : g_script)
             if (g_frame >= sp.from && g_frame < sp.to) pressed |= sp.bit;
-    PadState s;
     s.buttons = (uint16_t)~pressed;
     s.connected = port == 0;
     return s;
+}
+
+void host_rumble(int port, uint8_t small_motor, uint8_t large_motor) {
+    if (port != 0) return;
+    static uint8_t last_small = 0, last_large = 0;
+    static uint64_t last_ns = 0;
+    uint64_t now = SDL_GetTicksNS();
+    // refresh at least every 50 ms so a held rumble keeps going (each call lasts 100 ms)
+    if (small_motor == last_small && large_motor == last_large && now - last_ns < 50000000ull) return;
+    last_small = small_motor;
+    last_large = large_motor;
+    last_ns = now;
+    Uint16 low = (Uint16)(large_motor * 257), high = (Uint16)(small_motor ? 0xFFFF : 0);
+    for (auto& d : g_devices)
+        if (d.pad) SDL_RumbleGamepad(d.pad, low, high, (low || high) ? 100 : 0);
 }
 
 // --dump-vram FRAME PATH : writes all of VRAM (1024x512, 15-bit -> 24-bit) as a BMP.

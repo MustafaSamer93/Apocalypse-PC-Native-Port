@@ -111,8 +111,13 @@ void sio_event(R3000* c);
 struct PadState {
     uint16_t buttons = 0xFFFF;  // active low, PS1 digital pad bit order
     bool connected = true;
+    uint8_t lx = 0x80, ly = 0x80, rx = 0x80, ry = 0x80;  // analog sticks, 0x80 = centre
+    bool has_sticks = false;    // a real gamepad with sticks is connected
 };
-PadState host_pad(int port);
+// `analog` tells the host the game switched the pad to analog mode, so the left stick
+// should stop doubling as the d-pad.
+PadState host_pad(int port, bool analog = false);
+void host_rumble(int port, uint8_t small_motor, uint8_t large_motor);
 void host_poll();                    // pump OS events
 uint64_t host_frame_count();
 bool host_quit_requested();

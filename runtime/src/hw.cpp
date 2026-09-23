@@ -329,20 +329,109 @@ enum class SioPhase { Idle, Transferring, AckPending } g_sio_phase = SioPhase::I
 uint8_t g_sio_next_rx = 0xFF;
 bool g_sio_next_ack = false;
 
+// DualShock (SCPH-1200) emulation on port 1: digital mode (ID 41), analog mode (ID 73),
+// config mode (ID F3) and the rumble motors.
+struct DualShock {
+    bool analog = false, config = false;
+    uint8_t motor_map[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // 0x4D mapping
+    uint8_t small = 0, large = 0;
+    // current transaction
+    uint8_t cmd = 0;
+    uint8_t resp[16] = {};
+    uint8_t txb[16] = {};
+    int len = 0;  // bytes after the 0x01 address byte
+} g_ds;
+
+// Builds the reply for a command; called when the command byte arrives.
+void ds_begin(uint8_t cmd, const PadState& p) {
+    DualShock& d = g_ds;
+    d.cmd = cmd;
+    std::memset(d.resp, 0, sizeof d.resp);
+    std::memset(d.txb, 0, sizeof d.txb);
+    uint8_t id = d.config ? 0xF3 : d.analog ? 0x73 : 0x41;
+    d.resp[0] = id;
+    d.resp[1] = 0x5A;
+    auto buttons = [&] {
+        d.resp[2] = (uint8_t)p.buttons;
+        d.resp[3] = (uint8_t)(p.buttons >> 8);
+        d.resp[4] = p.rx; d.resp[5] = p.ry; d.resp[6] = p.lx; d.resp[7] = p.ly;
+    };
+    int payload = (id & 0xF) * 2;  // 41 -> 2 bytes, 73/F3 -> 6 bytes
+    if (cmd == 0x42 || (cmd == 0x43 && !d.config)) {
+        buttons();
+    } else if (d.config) {
+        switch (cmd) {
+            case 0x45: {  // status: controller type, current mode
+                const uint8_t r[6] = {0x01, 0x02, (uint8_t)(d.analog ? 1 : 0), 0x02, 0x01, 0x00};
+                std::memcpy(d.resp + 2, r, 6);
+                break;
+            }
+            case 0x47: { const uint8_t r[6] = {0, 0, 2, 0, 1, 0}; std::memcpy(d.resp + 2, r, 6); break; }
+            case 0x4D: std::memcpy(d.resp + 2, d.motor_map, 6); break;
+            default: break;  // 0x43 (exit), 0x44 (set mode), 0x46/0x4C (answered on the param byte)
+        }
+    } else {
+        payload = 0;  // unknown command outside config mode
+    }
+    d.len = 2 + payload;
+}
+
+// Called for every payload byte; some replies depend on the parameter just sent.
+void ds_param(int idx, uint8_t tx) {
+    DualShock& d = g_ds;
+    d.txb[idx] = tx;
+    if (d.config && idx == 2) {
+        if (d.cmd == 0x46) {
+            const uint8_t r0[6] = {0, 0, 1, 2, 0, 0x0A}, r1[6] = {0, 0, 1, 1, 1, 0x14};
+            std::memcpy(d.resp + 3, (tx ? r1 : r0) + 1, 5);
+        } else if (d.cmd == 0x4C) {
+            d.resp[5] = tx ? 0x07 : 0x04;
+        }
+    }
+}
+
+// Applies the effects of a completed transaction.
+void ds_end() {
+    DualShock& d = g_ds;
+    const uint8_t* a = d.txb + 2;  // parameter bytes
+    if (d.cmd == 0x42 && !d.config) {
+        // motor bytes routed by the 0x4D mapping: 00 = small motor (on/off), 01 = large motor
+        uint8_t small = 0, large = 0;
+        for (int i = 0; i < 6; i++) {
+            if (d.motor_map[i] == 0x00) small = a[i] == 0xFF || a[i] == 1 ? 1 : 0;
+            if (d.motor_map[i] == 0x01) large = a[i];
+        }
+        if (small != d.small || large != d.large) LOG(Pad, "rumble small=%u large=%u", small, large);
+        d.small = small;
+        d.large = large;
+        host_rumble(0, small ? 255 : 0, large);
+    } else if (d.cmd == 0x43) {
+        bool was = d.config;
+        d.config = a[0] == 1;
+        if (was != d.config) LOG(Pad, "DualShock %s config mode", d.config ? "entered" : "left");
+    } else if (d.config && d.cmd == 0x44) {
+        d.analog = a[0] == 1;
+        LOG(Pad, "DualShock set to %s mode", d.analog ? "analog" : "digital");
+    } else if (d.config && d.cmd == 0x4D) {
+        std::memcpy(d.motor_map, a, 6);
+        LOG(Pad, "rumble mapping %02X %02X %02X %02X %02X %02X", a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
+}
+
 void sio_transfer(R3000* c, uint8_t tx) {
     int port = (g_sio_ctrl >> 13) & 1;
-    PadState p = host_pad(port);
     uint8_t rx = 0xFF;
     bool ack = false;
-    switch (g_sio_step) {
-        case 0:
-            g_sio_device_pad = tx == 0x01 && p.connected;
-            ack = g_sio_device_pad;
-            break;
-        case 1: if (g_sio_device_pad) { rx = 0x41; ack = true; } break;
-        case 2: if (g_sio_device_pad) { rx = 0x5A; ack = true; } break;
-        case 3: if (g_sio_device_pad) { rx = (uint8_t)p.buttons; ack = true; } break;
-        case 4: if (g_sio_device_pad) { rx = (uint8_t)(p.buttons >> 8); } break;
+    if (g_sio_step == 0) {
+        g_sio_device_pad = tx == 0x01 && port == 0 && host_pad(0).connected;
+        ack = g_sio_device_pad;
+    } else if (g_sio_device_pad) {
+        int idx = g_sio_step - 1;  // 0 = command byte
+        if (idx == 0) ds_begin(tx, host_pad(0, g_ds.analog));
+        else ds_param(idx, tx);
+        rx = g_ds.resp[idx];
+        ack = idx + 1 < g_ds.len;
+        if (!ack) ds_end();
     }
     LOG(Pad, "sio port%d step%d tx=%02X rx=%02X ack=%d ctrl=%04X", port, g_sio_step, tx, rx, ack, g_sio_ctrl);
     g_sio_step = ack ? g_sio_step + 1 : 0;
