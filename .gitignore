@@ -11,3 +11,4 @@ saves/
 __pycache__/
 *.pyc
 dist/
+settings.ini

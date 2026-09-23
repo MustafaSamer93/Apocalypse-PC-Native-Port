@@ -9,6 +9,12 @@ namespace {
 
 R3000* C;  // current context, set on every entry point (single-threaded)
 
+}  // namespace
+
+float g_gte_widescreen = 1.0f;
+
+namespace {
+
 // ---------------------------------------------------------------- register access
 
 int32_t& D(int r) { return C->gte_data[r]; }
@@ -156,10 +162,11 @@ void rtp(int n, const Cmd& c, bool last) {
     push_sz((int32_t)(mac3_full >> 12));
     uint32_t h = (uint16_t)K(26);
     int64_t q = gte_divide(h, (uint32_t)D(19));
-    int64_t sx = chk_mac0(q * IR(1) + K(24)) ;
-    int64_t sy = chk_mac0(q * IR(2) + K(25));
-    push_sxy((int32_t)((q * IR(1) + K(24)) >> 16), (int32_t)((q * IR(2) + K(25)) >> 16));
-    (void)sx; (void)sy;
+    int64_t sx_num = q * IR(1);
+    if (g_gte_widescreen != 1.0f) sx_num = (int64_t)((double)sx_num * g_gte_widescreen);  // widescreen hack
+    MAC(0) = chk_mac0(sx_num + K(24));
+    MAC(0) = chk_mac0(q * IR(2) + K(25));
+    push_sxy((int32_t)((sx_num + K(24)) >> 16), (int32_t)((q * IR(2) + K(25)) >> 16));
     if (last) {
         int64_t dq = q * (int16_t)K(27) + K(28);
         MAC(0) = chk_mac0(dq);

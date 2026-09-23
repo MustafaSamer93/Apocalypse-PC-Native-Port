@@ -9,6 +9,7 @@
 bool log_enabled(LogCat) { return false; }
 void log_msg(LogCat, const char*, ...) {}
 uint64_t host_frame_count() { return 0; }
+void trace(const char*, ...) {}
 
 static int g_fail = 0;
 #define EXPECT_EQ(a, b)                                                                                  \

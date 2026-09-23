@@ -74,6 +74,10 @@ struct GpuDisplay {
     bool enabled;
 };
 GpuDisplay gpu_display();
+int gpu_set_renderer(int scale);  // 0 = software, 1..8 = OpenGL at that scale
+
+// Widescreen hack: horizontal scale applied to GTE screen coordinates (1 = off).
+extern float g_gte_widescreen;
 
 void cdrom_init(const std::string& cue_path);
 uint8_t cdrom_read(R3000* c, uint32_t reg);

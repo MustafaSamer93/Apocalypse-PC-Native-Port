@@ -58,13 +58,17 @@ add_executable(apocalypse
     runtime/src/cdrom.cpp
     runtime/src/spu.cpp
     runtime/src/mdec.cpp
-    runtime/src/host_sdl.cpp)
+    runtime/src/host_sdl.cpp
+    runtime/src/gl_api.cpp
+    runtime/src/gpu_hw.cpp
+    runtime/src/present.cpp)
 target_include_directories(apocalypse PRIVATE runtime/include runtime/src)
 
 # GTE known-answer tests (no game code needed)
 add_executable(gte_test runtime/tests/gte_test.cpp runtime/src/gte.cpp)
 target_include_directories(gte_test PRIVATE runtime/include runtime/src)
-target_link_libraries(apocalypse PRIVATE game_code SDL3::SDL3-static)
+find_package(OpenGL REQUIRED)
+target_link_libraries(apocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL)
 if(MSVC)
     target_compile_options(apocalypse PRIVATE /W3 /permissive- $<$<NOT:$<CXX_COMPILER_ID:Clang>>:/Zc:preprocessor>)
     target_compile_definitions(apocalypse PRIVATE _CRT_SECURE_NO_WARNINGS)

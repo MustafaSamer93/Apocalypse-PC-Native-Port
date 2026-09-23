@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "memcard.h"
 #include "psx.h"
@@ -87,6 +88,18 @@ int main(int argc, char** argv) {
         }
         else if (a == "--turbo") host_set_turbo(true);
         else if (a == "--interp") interp_only = true;
+        else if (a == "--screenshot") {  // --screenshot FRAME[,FRAME...] PREFIX
+            extern std::vector<uint64_t> g_shot_frames;
+            extern std::string g_shot_prefix;
+            std::string list = next();
+            for (size_t p = 0; p < list.size();) {
+                size_t e = list.find(',', p);
+                if (e == std::string::npos) e = list.size();
+                g_shot_frames.push_back(std::strtoull(list.substr(p, e - p).c_str(), nullptr, 10));
+                p = e + 1;
+            }
+            g_shot_prefix = next();
+        }
         else if (a == "--wav") {
             if (!host_open_wav(next().c_str())) { std::fprintf(stderr, "cannot write wav\n"); return 1; }
         }

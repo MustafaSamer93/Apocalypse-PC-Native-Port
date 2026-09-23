@@ -8,15 +8,26 @@
 #include <string>
 #include <vector>
 
+#include "gpu_hw.h"
+#include "present.h"
 #include "psx.h"
 
 namespace {
 
 SDL_Window* g_window = nullptr;
-SDL_Renderer* g_renderer = nullptr;
-SDL_Texture* g_texture = nullptr;
-int g_tex_w = 0, g_tex_h = 0;
+SDL_Renderer* g_renderer = nullptr;  // the settings overlay's software renderer while it draws
+bool g_gl_ok = false;
 SDL_AudioStream* g_audio = nullptr;
+
+// Graphics settings (settings screen, saved in settings.ini).
+struct GfxSettings {
+    int scale = 2;          // 0 = software renderer, 1..8 = OpenGL internal resolution
+    Aspect aspect = Aspect::A4_3;
+    bool crt = false;
+    bool texture_filter = false;
+};
+GfxSettings g_gfx;
+int g_active_scale = -1;    // renderer actually in use
 
 // Every connected controller drives player 1 (Apocalypse is single-player). Devices SDL
 // has a mapping for are opened as gamepads; anything else (e.g. some 8BitDo modes) as a
@@ -53,23 +64,23 @@ enum : uint16_t {
     B_TRIANGLE = 1 << 12, B_CIRCLE = 1 << 13, B_CROSS = 1 << 14, B_SQUARE = 1 << 15,
 };
 
-void ensure_texture(int w, int h) {
-    if (g_texture && w == g_tex_w && h == g_tex_h) return;
-    if (g_texture) SDL_DestroyTexture(g_texture);
-    g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
-    SDL_SetTextureScaleMode(g_texture, SDL_SCALEMODE_NEAREST);
-    g_tex_w = w;
-    g_tex_h = h;
-    g_pixels.assign((size_t)w * h, 0);
+PresentOptions present_options() {
+    PresentOptions o;
+    o.aspect = g_gfx.aspect;
+    o.crt = g_gfx.crt;
+    return o;
 }
 
-// Draws the most recent game frame (without presenting it).
-void draw_game_frame() {
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
-    SDL_RenderClear(g_renderer);
-    if (!g_texture) return;
-    SDL_FRect dst{0, 0, 640, 480};  // stretch to 4:3 regardless of PS1 video mode
-    SDL_RenderTexture(g_renderer, g_texture, nullptr, &dst);
+// Applies graphics settings that affect emulation (renderer, widescreen projection).
+void apply_graphics() {
+    if (g_gl_ok && g_gfx.scale != g_active_scale) g_active_scale = gpu_set_renderer(g_gfx.scale);
+    if (!g_gl_ok) g_active_scale = 0;
+    hw_set_texture_filter(g_gfx.texture_filter);
+    switch (g_gfx.aspect) {
+        case Aspect::A16_9: g_gte_widescreen = 0.75f; break;       // (4/3) / (16/9)
+        case Aspect::A16_10: g_gte_widescreen = 5.0f / 6.0f; break; // (4/3) / (16/10)
+        default: g_gte_widescreen = 1.0f; break;
+    }
 }
 
 // ---------------------------------------------------------------- custom button layouts
@@ -132,6 +143,8 @@ void save_settings() {
     FILE* f = std::fopen(kSettingsFile, "w");
     if (!f) return;
     std::fprintf(f, "# Written by the game's settings screen (F1). Safe to delete to reset.\n");
+    std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d\n", g_gfx.scale, (int)g_gfx.aspect, g_gfx.crt ? 1 : 0,
+                 g_gfx.texture_filter ? 1 : 0);
     if (g_key_custom) {
         std::fprintf(f, "keys");
         for (int i = 0; i < 16; i++)
@@ -156,6 +169,14 @@ void load_settings() {
     if (!f) return;
     char line[1024];
     while (std::fgets(line, sizeof line, f)) {
+        int sc, as, crt, filt;
+        if (std::sscanf(line, "gfx scale=%d aspect=%d crt=%d filter=%d", &sc, &as, &crt, &filt) == 4) {
+            g_gfx.scale = std::clamp(sc, 0, 8);
+            g_gfx.aspect = (Aspect)std::clamp(as, 0, 3);
+            g_gfx.crt = crt != 0;
+            g_gfx.texture_filter = filt != 0;
+            continue;
+        }
         if (std::strncmp(line, "keys", 4) == 0) {
             g_key_custom = true;
             const char* p = line + 4;
@@ -230,11 +251,17 @@ bool host_init(const char* title, int scale) {
     if (SDL_AddGamepadMappingsFromFile("gamecontrollerdb.txt") > 0)
         log_msg(LogCat::Host, "loaded extra controller mappings from gamecontrollerdb.txt");
     load_settings();
-    g_window = SDL_CreateWindow(title, 320 * scale, 240 * scale, SDL_WINDOW_RESIZABLE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    g_window = SDL_CreateWindow(title, 320 * scale, 240 * scale, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
     if (!g_window) return false;
-    g_renderer = SDL_CreateRenderer(g_window, nullptr);
-    if (!g_renderer) return false;
-    SDL_SetRenderLogicalPresentation(g_renderer, 640, 480, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    g_gl_ok = present_init(g_window);
+    if (!g_gl_ok) {
+        log_msg(LogCat::Host, "OpenGL 3.3 is required for display");
+        return false;
+    }
     // On a ~60 Hz display, pace the emulation by vsync: one emulated frame per refresh
     // gives perfectly even frame times (the game's 30 fps then shows each frame for
     // exactly two refreshes). Other refresh rates fall back to a timer.
@@ -243,8 +270,9 @@ bool host_init(const char* title, int scale) {
         log_msg(LogCat::Host, "display refresh %.2f Hz: %s", mode->refresh_rate,
                 g_vsync_pacing ? "pacing by vsync" : "pacing by timer");
     }
-    SDL_SetRenderVSync(g_renderer, g_vsync_pacing ? 1 : 0);
+    present_set_vsync(g_vsync_pacing);
     g_vsync_active = g_vsync_pacing;
+    apply_graphics();
 
     SDL_AudioSpec spec{SDL_AUDIO_S16, 2, 44100};
     g_audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
@@ -256,8 +284,7 @@ bool host_init(const char* title, int scale) {
 
 void host_shutdown() {
     if (g_audio) SDL_DestroyAudioStream(g_audio);
-    if (g_texture) SDL_DestroyTexture(g_texture);
-    if (g_renderer) SDL_DestroyRenderer(g_renderer);
+    present_shutdown();
     if (g_window) SDL_DestroyWindow(g_window);
     SDL_Quit();
 }
@@ -294,7 +321,7 @@ void host_poll() {
     uint16_t held = (uint16_t)~host_pad(0).buttons;
     combo_frames = ((held & B_SELECT) && (held & B_START)) ? combo_frames + 1 : 0;
     if (combo_frames == 90) open_menu = true;
-    if (open_menu && g_renderer) run_settings_menu();
+    if (open_menu && g_gl_ok) run_settings_menu();
 }
 
 void host_set_turbo(bool on) { g_force_turbo = on; }
@@ -372,14 +399,14 @@ uint16_t gamepad_sticks(SDL_Gamepad* p, bool analog, PadState& s) {
 // Mouse: holding the left button fires toward the cursor (the shape button(s) in the
 // direction from the screen centre, where the player usually is); right button = R1.
 uint16_t mouse_buttons() {
-    if (!g_renderer || !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS)) return 0;
+    if (!g_window || !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS)) return 0;
     float wx, wy;
     SDL_MouseButtonFlags b = SDL_GetMouseState(&wx, &wy);
     uint16_t pressed = 0;
     if (b & SDL_BUTTON_RMASK) pressed |= B_R1;
     if (b & SDL_BUTTON_LMASK) {
         float x, y;
-        SDL_RenderCoordinatesFromWindow(g_renderer, wx, wy, &x, &y);  // 640x480 logical space
+        present_window_to_game(wx, wy, &x, &y);  // 640x480 space over the game image
         float dx = x - 320.0f, dy = y - 270.0f;
         float len = std::sqrt(dx * dx + dy * dy);
         if (len > 8.0f) {
@@ -481,6 +508,14 @@ void host_rumble(int port, uint8_t small_motor, uint8_t large_motor) {
 }
 
 // --dump-vram FRAME PATH : writes all of VRAM (1024x512, 15-bit -> 24-bit) as a BMP.
+std::vector<uint64_t> g_shot_frames;  // --screenshot F1,F2,... PREFIX
+std::string g_shot_prefix;
+
+static void maybe_screenshot() {
+    for (uint64_t f : g_shot_frames)
+        if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
+}
+
 uint64_t g_dump_vram_frame = 0;
 std::string g_dump_vram_path;
 
@@ -514,7 +549,7 @@ void host_present(const GpuDisplay& d) {
         log_msg(LogCat::Host, "VRAM dumped to %s (display at %d,%d %dx%d%s)", g_dump_vram_path.c_str(), d.x, d.y,
                 d.w, d.h, d.rgb24 ? " 24-bit" : "");
     }
-    if (!g_renderer) return;
+    if (!g_gl_ok) return;
     static uint64_t fps_t0 = SDL_GetTicksNS(), fps_frames = 0, last_present = 0, dt_min = ~0ull, dt_max = 0;
     uint64_t t_now = SDL_GetTicksNS();
     if (last_present) {
@@ -536,7 +571,18 @@ void host_present(const GpuDisplay& d) {
         fps_frames = 0;
     }
     int w = std::clamp(d.w, 1, 1024), h = std::clamp(d.h, 1, 512);
-    ensure_texture(w, h);
+    PresentOptions opt = present_options();
+    // 15-bit images drawn by the OpenGL renderer are shown straight from its VRAM;
+    // 24-bit movie frames (and the software renderer) go through the CPU copy.
+    if (d.enabled && !d.rgb24 && hw_active()) {
+        int px, py, pw, ph;
+        unsigned tex = hw_display_texture(d.x, d.y, w, h, &px, &py, &pw, &ph);
+        present_game_texture(tex, 1024 * hw_scale(), 512 * hw_scale(), px, py, pw, ph, h, opt);
+        maybe_screenshot();
+        present_swap();
+        return;
+    }
+    g_pixels.resize((size_t)w * h);
     if (d.enabled) {
         for (int y = 0; y < h; y++) {
             uint32_t* row = &g_pixels[(size_t)y * w];
@@ -559,9 +605,9 @@ void host_present(const GpuDisplay& d) {
     } else {
         std::fill(g_pixels.begin(), g_pixels.end(), 0);
     }
-    SDL_UpdateTexture(g_texture, nullptr, g_pixels.data(), w * 4);
-    draw_game_frame();
-    SDL_RenderPresent(g_renderer);
+    present_game_pixels(g_pixels.data(), w, h, opt);
+    maybe_screenshot();
+    present_swap();
 }
 
 // ================================================================ settings screen (F1)
@@ -611,7 +657,7 @@ bool any_input_held(SDL_Joystick* j) {
 }
 
 void draw_panel(const std::vector<std::string>& lines, int highlight) {
-    draw_game_frame();
+    g_renderer = present_overlay_begin();
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 200);
     SDL_FRect bg{0, 0, 640, 480};
@@ -628,7 +674,9 @@ void draw_panel(const std::vector<std::string>& lines, int highlight) {
         SDL_RenderDebugText(g_renderer, 16, y, lines[i].c_str());
     }
     SDL_SetRenderScale(g_renderer, 1.0f, 1.0f);
-    SDL_RenderPresent(g_renderer);
+    present_redraw(present_options());
+    present_overlay_end();
+    present_swap();
 }
 
 enum class MenuResult { Continue, Close, Quit };
@@ -726,12 +774,14 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
+    enum Row { R_RES, R_ASPECT, R_CRT, R_FILTER, R_DEVICE, R_REMAP, R_RESET, R_BACK, R_COUNT };
     size_t dev_index = 0;
     int sel = 0;
     std::string status;
     // buttons held when the menu opens (e.g. SELECT+START) must not count as presses
     uint16_t prev_pad = host_pad(0).buttons;
     bool quit = false;
+    static const char* kAspect[] = {"4:3", "16:9", "16:10", "Stretch"};
     for (bool open = true; open && !quit;) {
         std::vector<SDL_Scancode> keys;
         if (pump_menu_events(keys) == MenuResult::Quit) { quit = true; break; }
@@ -745,64 +795,93 @@ static void run_settings_menu() {
         if (pressed & (B_CROSS | B_START)) keys.push_back(SDL_SCANCODE_RETURN);
         if (pressed & B_CIRCLE) keys.push_back(SDL_SCANCODE_ESCAPE);
 
-        // entry 0 is the keyboard, entries 1.. are the connected controllers
+        // controls device: entry 0 is the keyboard, entries 1.. are the connected controllers
         const size_t entries = 1 + g_devices.size();
         if (dev_index >= entries) dev_index = 0;
         const bool is_keyboard = dev_index == 0;
-        const int items = 3;  // remap, reset, back
+        bool gfx_changed = false;
         for (auto k : keys) {
-            switch (k) {
-                case SDL_SCANCODE_UP: sel = (sel + items - 1) % items; break;
-                case SDL_SCANCODE_DOWN: sel = (sel + 1) % items; break;
-                case SDL_SCANCODE_LEFT: dev_index = (dev_index + entries - 1) % entries; break;
-                case SDL_SCANCODE_RIGHT: dev_index = (dev_index + 1) % entries; break;
-                case SDL_SCANCODE_ESCAPE:
-                case SDL_SCANCODE_F1: open = false; break;
-                case SDL_SCANCODE_RETURN:
-                case SDL_SCANCODE_KP_ENTER:
-                    if (sel == 2) { open = false; break; }
-                    if (sel == 0 && is_keyboard) {
-                        SDL_Scancode keys_new[16];
-                        if (remap_keyboard(keys_new, &quit)) {
-                            std::memcpy(g_keys, keys_new, sizeof g_keys);
-                            g_key_custom = true;
-                            save_settings();
-                            status = "Saved. This layout is used every time.";
-                        } else if (!quit) {
-                            status = "Cancelled, layout unchanged.";
-                        }
-                    } else if (sel == 0) {
-                        InputDevice dev = g_devices[dev_index - 1];
-                        Layout lay;
-                        if (remap_device(dev, &lay, &quit)) {
-                            g_layouts[device_guid(dev)] = lay;
-                            save_settings();
-                            status = "Saved. This layout is used every time.";
-                        } else if (!quit) {
-                            status = "Cancelled, layout unchanged.";
-                        }
-                    } else if (sel == 1) {
-                        if (is_keyboard) g_key_custom = false;
-                        else g_layouts.erase(device_guid(g_devices[dev_index - 1]));
-                        save_settings();
-                        status = "Restored the default layout.";
-                    }
-                    prev_pad = host_pad(0).buttons;
-                    break;
-                default: break;
+            int dir = k == SDL_SCANCODE_LEFT ? -1 : k == SDL_SCANCODE_RIGHT ? 1 : 0;
+            if (k == SDL_SCANCODE_UP) sel = (sel + R_COUNT - 1) % R_COUNT;
+            if (k == SDL_SCANCODE_DOWN) sel = (sel + 1) % R_COUNT;
+            if (k == SDL_SCANCODE_ESCAPE || k == SDL_SCANCODE_F1) open = false;
+            bool enter = k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER;
+            if (dir || enter) {
+                int step = dir ? dir : 1;
+                switch (sel) {
+                    case R_RES: g_gfx.scale = (g_gfx.scale + step + 9) % 9; gfx_changed = true; break;
+                    case R_ASPECT: g_gfx.aspect = (Aspect)(((int)g_gfx.aspect + step + 4) % 4); gfx_changed = true; break;
+                    case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
+                    case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
+                    case R_DEVICE: dev_index = (dev_index + entries + step) % entries; break;
+                    default: break;
+                }
+            }
+            if (!enter) continue;
+            if (sel == R_BACK) {
+                open = false;
+            } else if (sel == R_REMAP && is_keyboard) {
+                SDL_Scancode keys_new[16];
+                if (remap_keyboard(keys_new, &quit)) {
+                    std::memcpy(g_keys, keys_new, sizeof g_keys);
+                    g_key_custom = true;
+                    save_settings();
+                    status = "Saved. This layout is used every time.";
+                } else if (!quit) {
+                    status = "Cancelled, layout unchanged.";
+                }
+                prev_pad = host_pad(0).buttons;
+            } else if (sel == R_REMAP) {
+                InputDevice dev = g_devices[dev_index - 1];
+                Layout lay;
+                if (remap_device(dev, &lay, &quit)) {
+                    g_layouts[device_guid(dev)] = lay;
+                    save_settings();
+                    status = "Saved. This layout is used every time.";
+                } else if (!quit) {
+                    status = "Cancelled, layout unchanged.";
+                }
+                prev_pad = host_pad(0).buttons;
+            } else if (sel == R_RESET) {
+                if (is_keyboard) g_key_custom = false;
+                else g_layouts.erase(device_guid(g_devices[dev_index - 1]));
+                save_settings();
+                status = "Restored the default layout.";
             }
         }
+        if (gfx_changed) {
+            apply_graphics();
+            save_settings();
+            if (g_gfx.scale > 0 && g_active_scale == 0) status = "OpenGL renderer unavailable.";
+            else status = "";
+        }
         if (!open || quit) break;
+
+        std::string res = g_gfx.scale == 0 ? std::string("Original (software)")
+                                           : std::to_string(g_gfx.scale) + "x  (" + std::to_string(512 * g_gfx.scale) +
+                                                 "x" + std::to_string(240 * g_gfx.scale) + ")";
         std::string dev_line = is_keyboard ? std::string("Keyboard & mouse")
-                                           : std::string(device_name(g_devices[dev_index - 1])).substr(0, 30);
-        dev_line = "< " + dev_line + " >";
+                                           : std::string(device_name(g_devices[dev_index - 1])).substr(0, 22);
         bool custom = is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 1])) > 0;
-        draw_panel({"SETTINGS", "", "Device (left/right to change):", dev_line,
-                    custom ? "Layout: custom" : "Layout: default", "",
-                    "Set up buttons", "Reset to default layout", "Back to game", "", status, "", "",
-                    "Keys: arrows, Enter, Esc", "Pad:  d-pad, X select, O back", "Open anytime: F1, or hold",
-                    "      SELECT + START"},
-                   6 + sel);
+        auto row = [](const char* label, const std::string& value) {
+            std::string s = label;
+            s.resize(15, ' ');
+            return s + "< " + value + " >";
+        };
+        draw_panel({"SETTINGS", "",
+                    row("Resolution", res),
+                    row("Aspect ratio", kAspect[(int)g_gfx.aspect]),
+                    row("CRT filter", g_gfx.crt ? "On" : "Off"),
+                    row("Smooth textures", g_gfx.texture_filter ? "On" : "Off"),
+                    row("Controls", dev_line),
+                    std::string("Set up buttons") + (custom ? "  (custom)" : "  (default)"),
+                    "Reset buttons to default",
+                    "Back to game",
+                    "", status, "",
+                    "Up/down: choose   Left/right: change",
+                    "Enter / X: select   Esc / O: back",
+                    "Open anytime: F1 or hold SELECT+START"},
+                   2 + sel);
         SDL_Delay(15);
     }
     if (quit) g_quit = true;
@@ -813,7 +892,7 @@ static void run_settings_menu() {
 void host_throttle_frame() {
     bool want_vsync = g_vsync_pacing && !g_turbo;
     if (want_vsync != g_vsync_active) {
-        SDL_SetRenderVSync(g_renderer, want_vsync ? 1 : 0);
+        present_set_vsync(want_vsync);
         g_vsync_active = want_vsync;
     }
     if (g_turbo || g_vsync_active) {  // vsync: SDL_RenderPresent already waited

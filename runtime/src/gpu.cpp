@@ -3,6 +3,7 @@
 #include <cstring>
 #include <vector>
 
+#include "gpu_hw.h"
 #include "psx.h"
 
 namespace {
@@ -214,6 +215,22 @@ void draw_triangle(const Vtx* v0, const Vtx* v1, const Vtx* v2, bool gouraud, bo
     }
 }
 
+HwState hw_state() {
+    HwState s;
+    s.area_x1 = S.area_x1; s.area_y1 = S.area_y1; s.area_x2 = S.area_x2; s.area_y2 = S.area_y2;
+    s.tw_mask_x = S.tw_mask_x; s.tw_mask_y = S.tw_mask_y; s.tw_off_x = S.tw_off_x; s.tw_off_y = S.tw_off_y;
+    s.set_mask = S.set_mask; s.check_mask = S.check_mask;
+    return s;
+}
+
+HwVtx hw_vtx(const Vtx& v) { return HwVtx{v.x, v.y, v.r, v.g, v.b, v.u, v.v}; }
+
+// Hardware drops triangles whose bounding box is 1024x512 or larger.
+bool oversized(const Vtx& a, const Vtx& b, const Vtx& c) {
+    return std::max({a.x, b.x, c.x}) - std::min({a.x, b.x, c.x}) >= 1024 ||
+           std::max({a.y, b.y, c.y}) - std::min({a.y, b.y, c.y}) >= 512;
+}
+
 // Scanline-accurate rasterization would need the exact hardware edge walker; the
 // edge-function rasterizer above follows the same fill convention (top/left inclusive).
 void draw_polygon(const uint32_t* w) {
@@ -249,6 +266,19 @@ void draw_polygon(const uint32_t* w) {
     tex.page_y = S.tpage_y;
     tex.depth = S.tex_depth;
     if (textured && S.tex_disable) textured = false;
+    if (hw_active()) {
+        HwPrim p;
+        p.textured = textured; p.raw = raw; p.semi = semi; p.gouraud = gouraud;
+        p.semi_mode = S.semi_mode;
+        p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;
+        p.clut_x = tex.clut_x; p.clut_y = tex.clut_y;
+        HwState st = hw_state();
+        HwVtx h[4];
+        for (int i = 0; i < nv; i++) h[i] = hw_vtx(v[i]);
+        if (!oversized(v[0], v[1], v[2])) hw_triangle(&h[0], &h[1], &h[2], p, st);
+        if (quad && !oversized(v[1], v[2], v[3])) hw_triangle(&h[1], &h[2], &h[3], p, st);
+        return;
+    }
     draw_triangle(&v[0], &v[1], &v[2], gouraud, textured, raw, semi, tex);
     if (quad) draw_triangle(&v[1], &v[2], &v[3], gouraud, textured, raw, semi, tex);
 }
@@ -258,6 +288,13 @@ void draw_polygon(const uint32_t* w) {
 void draw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, bool semi) {
     int dx = x1 - x0, dy = y1 - y0;
     if (std::abs(dx) >= 1024 || std::abs(dy) >= 512) return;
+    if (hw_active()) {
+        HwPrim p;
+        p.semi = semi;
+        p.semi_mode = S.semi_mode;
+        hw_line(x0, y0, c0, x1, y1, c1, gouraud, p, hw_state());
+        return;
+    }
     int steps = std::max(std::abs(dx), std::abs(dy));
     int r0 = c0 & 0xFF, g0 = (c0 >> 8) & 0xFF, b0 = (c0 >> 16) & 0xFF;
     int r1 = c1 & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = (c1 >> 16) & 0xFF;
@@ -302,6 +339,15 @@ void draw_rect(const uint32_t* w) {
         default: wdt = hgt = 16; break;
     }
     if (textured && S.tex_disable) textured = false;
+    if (hw_active()) {
+        HwPrim p;
+        p.textured = textured; p.raw = raw; p.semi = semi;
+        p.semi_mode = S.semi_mode;
+        p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;
+        p.clut_x = tex.clut_x; p.clut_y = tex.clut_y;
+        hw_rect(x, y, wdt, hgt, u0, v0, S.rect_flip_x, S.rect_flip_y, color, p, hw_state());
+        return;
+    }
     int r = color & 0xFF, g = (color >> 8) & 0xFF, b = (color >> 16) & 0xFF;
     uint16_t flat = rgb24_to_15(r, g, b);
     for (int j = 0; j < hgt; j++) {
@@ -405,6 +451,7 @@ void execute(const std::vector<uint32_t>& w) {
                 if (S.check_mask && (d & 0x8000)) continue;
                 d = tmp[(size_t)j * ww + i] | (S.set_mask ? 0x8000 : 0);
             }
+        if (hw_active()) hw_copy(sx, sy, dx, dy, ww, hh);
         return;
     }
     if (cmd >= 0xA0 && cmd < 0xC0) {  // CPU -> VRAM: data words follow
@@ -423,6 +470,7 @@ void execute(const std::vector<uint32_t>& w) {
         g_download.h = (((w[2] >> 16) - 1) & 0x1FF) + 1;
         g_download.cx = g_download.cy = 0;
         g_download.active = true;
+        if (hw_active()) hw_readback(g_download.x, g_download.y, g_download.w, g_download.h, g_vram);
         return;
     }
     switch (cmd) {
@@ -434,6 +482,7 @@ void execute(const std::vector<uint32_t>& w) {
             int ww = ((w[2] & 0x3FF) + 15) & ~15, hh = (w[2] >> 16) & 0x1FF;
             for (int j = 0; j < hh; j++)
                 for (int i = 0; i < ww; i++) vram(x + i, y + j) = c;
+            if (hw_active()) hw_fill(x, y, ww, hh, c);
             return;
         }
         case 0x1F: DS.irq = true; return;
@@ -477,7 +526,10 @@ void upload_word(uint32_t v) {
         if (!(S.check_mask && (d & 0x8000))) d = px | (S.set_mask ? 0x8000 : 0);
         if (++g_upload.cx >= g_upload.w) {
             g_upload.cx = 0;
-            if (++g_upload.cy >= g_upload.h) g_upload.active = false;
+            if (++g_upload.cy >= g_upload.h) {
+                g_upload.active = false;
+                if (hw_active()) hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
+            }
         }
     }
 }
@@ -603,6 +655,23 @@ uint32_t gpu_read_stat(R3000* c) {
     s |= (odd ? 1u : 0u) << 31;
     s |= (g_odd_line ? 1u : 0u) << 13;
     return s;
+}
+
+// 0 = software renderer, 1..8 = OpenGL renderer at that resolution scale. Needs the
+// window's GL context to be current. Returns the scale actually in use.
+int gpu_set_renderer(int scale) {
+    if (hw_active()) {
+        hw_readback(0, 0, 1024, 512, g_vram);  // keep what was drawn on the GPU
+        if (scale != hw_scale()) hw_shutdown();
+    }
+    if (scale > 0 && !hw_active()) {
+        if (!hw_init(scale)) {
+            log_msg(LogCat::Gpu, "OpenGL renderer unavailable, using the software renderer");
+            return 0;
+        }
+        hw_upload_all(g_vram);
+    }
+    return hw_active() ? hw_scale() : 0;
 }
 
 void gpu_vblank() {
