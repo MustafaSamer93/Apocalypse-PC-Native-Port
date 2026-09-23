@@ -181,6 +181,7 @@ static void scanline_event(R3000* c) {
     bool vbl_start = g_scanline == VBLANK_START_LINE;
     bool vbl_end = g_scanline == 0;
     timers_scanline(c, vbl_start, vbl_end);
+    spu_scanline();
     if (vbl_start) {
         irq_raise(c, IRQ_VBLANK);
         gpu_vblank();

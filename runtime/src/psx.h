@@ -90,7 +90,8 @@ uint16_t spu_read(uint32_t addr);
 void spu_write(R3000* c, uint32_t addr, uint16_t v);
 void spu_dma_write(uint32_t word);
 uint32_t spu_dma_read();
-void spu_end_frame(R3000* c);  // mixes this frame's samples and queues them to the host
+void spu_scanline();           // produces samples due so far (keeps sound events on time)
+void spu_end_frame(R3000* c);  // hands this frame's samples to the host
 void spu_push_cd_audio(const int16_t* stereo, int frames, int sample_rate);
 
 void mdec_init();
