@@ -1,2 +1,2 @@
 # Project_Repocalypse
-A static Recomplation of PSX Game Apocalypse
+A Static Recomplation of PSX Game Apocalypse
