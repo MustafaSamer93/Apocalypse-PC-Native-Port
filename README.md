@@ -1,4 +1,4 @@
-# Repocalypse
+# Project_Repocalypse
 
 A static recompilation of **Apocalypse** (PlayStation, Neversoft/Activision 1998, NTSC-U
 `SLUS-00373`) to native Windows code. The game's MIPS R3000A machine code is translated
