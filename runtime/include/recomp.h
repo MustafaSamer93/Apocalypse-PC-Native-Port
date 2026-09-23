@@ -1,0 +1,220 @@
+// Runtime ABI for statically recompiled PS1 code.
+// Generated C (generated/*.c) includes this; the runtime implements everything declared here.
+#pragma once
+
+#include <stdint.h>
+#include <string.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#if defined(_MSC_VER)
+#define RECOMP_INLINE static __forceinline
+#define RECOMP_LIKELY(x) (x)
+#define RECOMP_UNLIKELY(x) (x)
+#else
+#define RECOMP_INLINE static inline __attribute__((always_inline))
+#define RECOMP_LIKELY(x) __builtin_expect(!!(x), 1)
+#define RECOMP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#endif
+
+typedef struct R3000 {
+    uint32_t r[32];
+    uint32_t hi, lo;
+    uint64_t cycles;      // CPU cycles since boot (approximate: 1 per instruction + stalls)
+    uint64_t next_event;  // when cycles >= next_event the scheduler must run
+    uint32_t cop0[32];
+    int32_t gte_data[32];
+    int32_t gte_ctrl[32];
+} R3000;
+
+typedef void (*RecompFuncPtr)(R3000* c);
+typedef struct RecompFunc {
+    uint32_t addr;
+    RecompFuncPtr fn;
+} RecompFunc;
+
+// ---------------------------------------------------------------- memory
+
+#define PSX_RAM_SIZE 0x200000u
+#define PSX_SCRATCH_SIZE 0x400u
+
+extern uint8_t psx_ram[PSX_RAM_SIZE];
+extern uint8_t psx_scratch[PSX_SCRATCH_SIZE];
+extern int psx_cache_isolated;  // COP0 SR.IsC: stores go to the (unemulated) I-cache
+
+uint32_t mem_read_slow(R3000* c, uint32_t addr, int size);
+void mem_write_slow(R3000* c, uint32_t addr, uint32_t value, int size);
+
+// Debug write watchpoint (--watch): physical word address, 0 = off.
+extern uint32_t psx_watch_addr;
+void psx_watch_hit(R3000* c, uint32_t addr, uint32_t value, int size);
+#define PSX_WATCH_CHECK(c, a, v, n)                                                         \
+    do {                                                                                    \
+        if (RECOMP_UNLIKELY(psx_watch_addr) && (((a) & 0x1FFFFCu) == psx_watch_addr))      \
+            psx_watch_hit((c), (a), (v), (n));                                              \
+    } while (0)
+
+// RAM is 2 MB mirrored four times in the low 8 MB of each segment (KUSEG/KSEG0/KSEG1).
+#define PSX_IS_RAM(a) (((a) & 0x1F800000u) == 0)
+#define PSX_IS_SCRATCH(a) (((a) & 0x1FFFFC00u) == 0x1F800000u)
+
+#define DEFINE_MEM_READ(bits, type)                                              \
+    RECOMP_INLINE uint32_t MEM_R##bits(R3000* c, uint32_t a) {                   \
+        type v;                                                                  \
+        if (RECOMP_LIKELY(PSX_IS_RAM(a))) {                                      \
+            memcpy(&v, psx_ram + (a & (PSX_RAM_SIZE - 1)), sizeof v);            \
+            return v;                                                            \
+        }                                                                        \
+        if (PSX_IS_SCRATCH(a)) {                                                 \
+            memcpy(&v, psx_scratch + (a & (PSX_SCRATCH_SIZE - 1)), sizeof v);    \
+            return v;                                                            \
+        }                                                                        \
+        return mem_read_slow(c, a, bits / 8);                                    \
+    }
+#define DEFINE_MEM_WRITE(bits, type)                                             \
+    RECOMP_INLINE void MEM_W##bits(R3000* c, uint32_t a, uint32_t value) {       \
+        type v = (type)value;                                                    \
+        PSX_WATCH_CHECK(c, a, value, bits / 8);                                  \
+        if (RECOMP_LIKELY(PSX_IS_RAM(a) && !psx_cache_isolated)) {               \
+            memcpy(psx_ram + (a & (PSX_RAM_SIZE - 1)), &v, sizeof v);            \
+            return;                                                              \
+        }                                                                        \
+        if (PSX_IS_SCRATCH(a) && !psx_cache_isolated) {                          \
+            memcpy(psx_scratch + (a & (PSX_SCRATCH_SIZE - 1)), &v, sizeof v);    \
+            return;                                                              \
+        }                                                                        \
+        mem_write_slow(c, a, value, bits / 8);                                   \
+    }
+DEFINE_MEM_READ(8, uint8_t)
+DEFINE_MEM_READ(16, uint16_t)
+DEFINE_MEM_READ(32, uint32_t)
+DEFINE_MEM_WRITE(8, uint8_t)
+DEFINE_MEM_WRITE(16, uint16_t)
+DEFINE_MEM_WRITE(32, uint32_t)
+
+// Unaligned word access (little-endian semantics).
+RECOMP_INLINE uint32_t MEM_LWL(R3000* c, uint32_t a, uint32_t old) {
+    uint32_t w = MEM_R32(c, a & ~3u);
+    switch (a & 3) {
+        case 0: return (old & 0x00FFFFFFu) | (w << 24);
+        case 1: return (old & 0x0000FFFFu) | (w << 16);
+        case 2: return (old & 0x000000FFu) | (w << 8);
+        default: return w;
+    }
+}
+RECOMP_INLINE uint32_t MEM_LWR(R3000* c, uint32_t a, uint32_t old) {
+    uint32_t w = MEM_R32(c, a & ~3u);
+    switch (a & 3) {
+        case 0: return w;
+        case 1: return (old & 0xFF000000u) | (w >> 8);
+        case 2: return (old & 0xFFFF0000u) | (w >> 16);
+        default: return (old & 0xFFFFFF00u) | (w >> 24);
+    }
+}
+RECOMP_INLINE void MEM_SWL(R3000* c, uint32_t a, uint32_t v) {
+    uint32_t aa = a & ~3u, w = MEM_R32(c, aa);
+    switch (a & 3) {
+        case 0: w = (w & 0xFFFFFF00u) | (v >> 24); break;
+        case 1: w = (w & 0xFFFF0000u) | (v >> 16); break;
+        case 2: w = (w & 0xFF000000u) | (v >> 8); break;
+        default: w = v; break;
+    }
+    MEM_W32(c, aa, w);
+}
+RECOMP_INLINE void MEM_SWR(R3000* c, uint32_t a, uint32_t v) {
+    uint32_t aa = a & ~3u, w = MEM_R32(c, aa);
+    switch (a & 3) {
+        case 0: w = v; break;
+        case 1: w = (w & 0x000000FFu) | (v << 8); break;
+        case 2: w = (w & 0x0000FFFFu) | (v << 16); break;
+        default: w = (w & 0x00FFFFFFu) | (v << 24); break;
+    }
+    MEM_W32(c, aa, w);
+}
+
+// ---------------------------------------------------------------- arithmetic
+
+RECOMP_INLINE void MULT(R3000* c, int32_t a, int32_t b) {
+    int64_t p = (int64_t)a * (int64_t)b;
+    c->lo = (uint32_t)p;
+    c->hi = (uint32_t)((uint64_t)p >> 32);
+}
+RECOMP_INLINE void MULTU(R3000* c, uint32_t a, uint32_t b) {
+    uint64_t p = (uint64_t)a * (uint64_t)b;
+    c->lo = (uint32_t)p;
+    c->hi = (uint32_t)(p >> 32);
+}
+// R3000A results for division by zero and INT_MIN / -1 (no exception is raised).
+RECOMP_INLINE void DIV(R3000* c, int32_t n, int32_t d) {
+    if (d == 0) {
+        c->hi = (uint32_t)n;
+        c->lo = n >= 0 ? 0xFFFFFFFFu : 1u;
+    } else if ((uint32_t)n == 0x80000000u && d == -1) {
+        c->hi = 0;
+        c->lo = 0x80000000u;
+    } else {
+        c->lo = (uint32_t)(n / d);
+        c->hi = (uint32_t)(n % d);
+    }
+}
+RECOMP_INLINE void DIVU(R3000* c, uint32_t n, uint32_t d) {
+    if (d == 0) {
+        c->hi = n;
+        c->lo = 0xFFFFFFFFu;
+    } else {
+        c->lo = n / d;
+        c->hi = n % d;
+    }
+}
+
+// ---------------------------------------------------------------- timing / events
+
+void psx_run_events(R3000* c);
+#define ADD_CYCLES(n) (c->cycles += (uint64_t)(n) * PSX_CYCLES_PER_INSN)
+#define CHECK_EVENTS(c) do { if (RECOMP_UNLIKELY((c)->cycles >= (c)->next_event)) psx_run_events(c); } while (0)
+// Average cost of an instruction including cache/memory stalls. Recompiled code runs
+// far faster than this on the host; the value only paces emulated time.
+#define PSX_CYCLES_PER_INSN 2
+
+// ---------------------------------------------------------------- control flow
+
+void call_indirect(R3000* c, uint32_t addr);
+// `jr reg` that is not a known switch: a tail call if `addr` is a function or BIOS
+// vector, otherwise a jump inside the current function (interpreted until it returns
+// to `func_ra`, the address the current function was called with).
+void jump_indirect(R3000* c, uint32_t addr, uint32_t func_ra);
+void psx_bad_jump(R3000* c, uint32_t pc, uint32_t target);
+void psx_fell_off(R3000* c, uint32_t pc);
+void psx_ra_mismatch(R3000* c, uint32_t pc, uint32_t expected, uint32_t actual);
+void psx_sp_mismatch(R3000* c, uint32_t pc, uint32_t expected, uint32_t actual);
+#ifdef RECOMP_RA_CHECK
+// On `jr ra`: the function should return where it was called from, with sp restored.
+#define CHECK_RET(c, entry_ra, entry_sp, pc)                                                        \
+    do {                                                                                            \
+        if ((c)->r[31] != (entry_ra)) psx_ra_mismatch((c), (pc), (entry_ra), (c)->r[31]);          \
+        if ((c)->r[29] != (entry_sp)) psx_sp_mismatch((c), (pc), (entry_sp), (c)->r[29]);          \
+    } while (0)
+#else
+#define CHECK_RET(c, entry_ra, entry_sp, pc) ((void)0)
+#endif
+
+// ---------------------------------------------------------------- coprocessors / traps
+
+uint32_t cop0_read(R3000* c, int reg);
+void cop0_write(R3000* c, int reg, uint32_t value);
+void cop0_rfe(R3000* c);
+
+uint32_t gte_read_data(R3000* c, int reg);
+uint32_t gte_read_ctrl(R3000* c, int reg);
+void gte_write_data(R3000* c, int reg, uint32_t value);
+void gte_write_ctrl(R3000* c, int reg, uint32_t value);
+void gte_command(R3000* c, uint32_t cmd);
+
+void psx_syscall(R3000* c, uint32_t pc);
+void psx_break(R3000* c, uint32_t pc, uint32_t code);
+
+#ifdef __cplusplus
+}
+#endif

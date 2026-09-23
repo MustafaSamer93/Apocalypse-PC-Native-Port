@@ -1,0 +1,11 @@
+# Copyrighted game data and anything derived from it never goes in the repo.
+rom/
+extracted/
+generated/
+build/
+build-clang/
+saves/
+*.wav
+*.bmp
+__pycache__/
+*.pyc
