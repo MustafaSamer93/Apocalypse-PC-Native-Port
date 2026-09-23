@@ -2,6 +2,8 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -84,6 +86,9 @@ struct Layout {
 };
 std::map<std::string, Layout> g_layouts;
 const char* kSettingsFile = "settings.ini";
+// Remapped keyboard: one key per PS1 button (bit number), used when g_key_custom.
+SDL_Scancode g_keys[16] = {};
+bool g_key_custom = false;
 
 // Order the settings screen asks for buttons in.
 const struct { uint16_t bit; const char* name; } kRemapOrder[] = {
@@ -127,6 +132,12 @@ void save_settings() {
     FILE* f = std::fopen(kSettingsFile, "w");
     if (!f) return;
     std::fprintf(f, "# Written by the game's settings screen (F1). Safe to delete to reset.\n");
+    if (g_key_custom) {
+        std::fprintf(f, "keys");
+        for (int i = 0; i < 16; i++)
+            if (g_keys[i] != SDL_SCANCODE_UNKNOWN) std::fprintf(f, " %d=%d", i, (int)g_keys[i]);
+        std::fprintf(f, "\n");
+    }
     for (auto& [guid, lay] : g_layouts) {
         std::fprintf(f, "pad %s", guid.c_str());
         for (int i = 0; i < 16; i++) {
@@ -145,6 +156,16 @@ void load_settings() {
     if (!f) return;
     char line[1024];
     while (std::fgets(line, sizeof line, f)) {
+        if (std::strncmp(line, "keys", 4) == 0) {
+            g_key_custom = true;
+            const char* p = line + 4;
+            int bit, sc, used;
+            while (std::sscanf(p, " %d=%d%n", &bit, &sc, &used) == 2) {
+                if (bit >= 0 && bit < 16) g_keys[bit] = (SDL_Scancode)sc;
+                p += used;
+            }
+            continue;
+        }
         char guid[64];
         int n = 0;
         if (std::sscanf(line, "pad %63s%n", guid, &n) != 1) continue;
@@ -310,22 +331,82 @@ bool host_parse_press_script(const char* spec) {
 
 uint64_t host_frame_count() { return g_frame; }
 
+namespace {
+
+// Default keyboard layout (used until the keyboard is remapped in the settings screen).
+// WASD/arrows move; I/J/K/L are the shape buttons laid out like the pad (aim/fire).
+const struct { SDL_Scancode sc; uint16_t bit; } kDefaultKeys[] = {
+    {SDL_SCANCODE_UP, B_UP}, {SDL_SCANCODE_DOWN, B_DOWN}, {SDL_SCANCODE_LEFT, B_LEFT}, {SDL_SCANCODE_RIGHT, B_RIGHT},
+    {SDL_SCANCODE_W, B_UP}, {SDL_SCANCODE_S, B_DOWN}, {SDL_SCANCODE_A, B_LEFT}, {SDL_SCANCODE_D, B_RIGHT},
+    {SDL_SCANCODE_I, B_TRIANGLE}, {SDL_SCANCODE_L, B_CIRCLE}, {SDL_SCANCODE_K, B_CROSS}, {SDL_SCANCODE_J, B_SQUARE},
+    {SDL_SCANCODE_Q, B_L1}, {SDL_SCANCODE_E, B_R1}, {SDL_SCANCODE_Z, B_L2}, {SDL_SCANCODE_C, B_R2},
+    {SDL_SCANCODE_RETURN, B_START}, {SDL_SCANCODE_BACKSPACE, B_SELECT},
+};
+
+uint8_t to8(int v) { return (uint8_t)std::clamp((v + 32768) >> 8, 0, 255); }
+
+// Sticks of an SDL gamepad. In digital mode the left stick doubles as the d-pad and the
+// right stick aims: it presses the shape button(s) in its direction (twin-stick style).
+uint16_t gamepad_sticks(SDL_Gamepad* p, bool analog, PadState& s) {
+    uint16_t pressed = 0;
+    int lx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
+    int rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY);
+    if (!s.has_sticks) {  // first gamepad provides the analog values
+        s.has_sticks = true;
+        s.lx = to8(lx); s.ly = to8(ly); s.rx = to8(rx); s.ry = to8(ry);
+    }
+    if (analog) return 0;
+    if (lx < -16000) pressed |= B_LEFT;
+    if (lx > 16000) pressed |= B_RIGHT;
+    if (ly < -16000) pressed |= B_UP;
+    if (ly > 16000) pressed |= B_DOWN;
+    if ((int64_t)rx * rx + (int64_t)ry * ry > 20000LL * 20000) {
+        if (ry < -12000) pressed |= B_TRIANGLE;
+        if (ry > 12000) pressed |= B_CROSS;
+        if (rx < -12000) pressed |= B_SQUARE;
+        if (rx > 12000) pressed |= B_CIRCLE;
+    }
+    return pressed;
+}
+
+// Mouse: holding the left button fires toward the cursor (the shape button(s) in the
+// direction from the screen centre, where the player usually is); right button = R1.
+uint16_t mouse_buttons() {
+    if (!g_renderer || !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS)) return 0;
+    float wx, wy;
+    SDL_MouseButtonFlags b = SDL_GetMouseState(&wx, &wy);
+    uint16_t pressed = 0;
+    if (b & SDL_BUTTON_RMASK) pressed |= B_R1;
+    if (b & SDL_BUTTON_LMASK) {
+        float x, y;
+        SDL_RenderCoordinatesFromWindow(g_renderer, wx, wy, &x, &y);  // 640x480 logical space
+        float dx = x - 320.0f, dy = y - 270.0f;
+        float len = std::sqrt(dx * dx + dy * dy);
+        if (len > 8.0f) {
+            if (dy < -0.38f * len) pressed |= B_TRIANGLE;
+            if (dy > 0.38f * len) pressed |= B_CROSS;
+            if (dx < -0.38f * len) pressed |= B_SQUARE;
+            if (dx > 0.38f * len) pressed |= B_CIRCLE;
+        }
+    }
+    return pressed;
+}
+
+}  // namespace
+
 PadState host_pad(int port, bool analog) {
     uint16_t pressed = 0;
     PadState s;
-    auto to8 = [](int v) { return (uint8_t)std::clamp((v + 32768) >> 8, 0, 255); };
     if (port == 0) {
         const bool* k = SDL_GetKeyboardState(nullptr);
-        struct { SDL_Scancode sc; uint16_t bit; } map[] = {
-            {SDL_SCANCODE_UP, B_UP}, {SDL_SCANCODE_DOWN, B_DOWN}, {SDL_SCANCODE_LEFT, B_LEFT},
-            {SDL_SCANCODE_RIGHT, B_RIGHT}, {SDL_SCANCODE_Z, B_CROSS}, {SDL_SCANCODE_X, B_CIRCLE},
-            {SDL_SCANCODE_A, B_SQUARE}, {SDL_SCANCODE_S, B_TRIANGLE}, {SDL_SCANCODE_Q, B_L1},
-            {SDL_SCANCODE_W, B_R1}, {SDL_SCANCODE_1, B_L2}, {SDL_SCANCODE_2, B_R2},
-            {SDL_SCANCODE_RETURN, B_START}, {SDL_SCANCODE_BACKSPACE, B_SELECT},
-            {SDL_SCANCODE_RSHIFT, B_SELECT},
-        };
-        for (auto& m : map)
-            if (k[m.sc]) pressed |= m.bit;
+        if (g_key_custom) {
+            for (int i = 0; i < 16; i++)
+                if (g_keys[i] != SDL_SCANCODE_UNKNOWN && k[g_keys[i]]) pressed |= (uint16_t)(1u << i);
+        } else {
+            for (auto& m : kDefaultKeys)
+                if (k[m.sc]) pressed |= m.bit;
+        }
+        pressed |= mouse_buttons();
     }
     for (auto& dev : g_devices) {
         if (port != 0) break;
@@ -333,6 +414,7 @@ PadState host_pad(int port, bool analog) {
             SDL_Joystick* j = device_joystick(dev);
             for (int i = 0; i < 16; i++)
                 if (bind_active(j, it->second.bind[i])) pressed |= (uint16_t)(1u << i);
+            if (dev.pad) pressed |= gamepad_sticks(dev.pad, analog, s);
             continue;
         }
         if (SDL_Joystick* j = dev.joy) {
@@ -373,26 +455,7 @@ PadState host_pad(int port, bool analog) {
             if (SDL_GetGamepadButton(p, m.b)) pressed |= m.bit;
         if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) pressed |= B_L2;
         if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) pressed |= B_R2;
-        int lx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
-        int rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY);
-        if (!s.has_sticks) {  // first gamepad provides the sticks
-            s.has_sticks = true;
-            s.lx = to8(lx); s.ly = to8(ly); s.rx = to8(rx); s.ry = to8(ry);
-        }
-        // in digital mode the left stick doubles as the d-pad, and the right stick aims:
-        // it presses the shape button(s) in its direction (twin-stick style)
-        if (!analog) {
-            if (lx < -16000) pressed |= B_LEFT;
-            if (lx > 16000) pressed |= B_RIGHT;
-            if (ly < -16000) pressed |= B_UP;
-            if (ly > 16000) pressed |= B_DOWN;
-            if (rx * rx + ry * ry > 20000 * 20000) {
-                if (ry < -12000) pressed |= B_TRIANGLE;
-                if (ry > 12000) pressed |= B_CROSS;
-                if (rx < -12000) pressed |= B_SQUARE;
-                if (rx > 12000) pressed |= B_CIRCLE;
-            }
-        }
+        pressed |= gamepad_sticks(p, analog, s);
     }
     if (port == 0)
         for (auto& sp : g_script)
@@ -626,6 +689,37 @@ bool remap_device(const InputDevice& dev, Layout* out, bool* quit) {
     return true;
 }
 
+// Keyboard version of remap_device: the next key pressed is taken for each button.
+// Delete skips a button (keeps it unbound), Esc cancels.
+bool remap_keyboard(SDL_Scancode* out, bool* quit) {
+    SDL_Scancode keys_out[16] = {};
+    const int total = (int)(sizeof kRemapOrder / sizeof *kRemapOrder);
+    for (int step = 0; step < total; step++) {
+        for (bool got = false; !got;) {
+            std::vector<SDL_Scancode> keys;
+            if (pump_menu_events(keys) == MenuResult::Quit) { *quit = true; return false; }
+            for (auto k : keys) {
+                if (k == SDL_SCANCODE_ESCAPE) return false;
+                if (k == SDL_SCANCODE_DELETE) { got = true; break; }
+                if (k == SDL_SCANCODE_F1) continue;
+                keys_out[bit_index(kRemapOrder[step].bit)] = k;
+                got = true;
+                break;
+            }
+            if (got) break;
+            char progress[48];
+            std::snprintf(progress, sizeof progress, "Step %d of %d", step + 1, total);
+            draw_panel({"KEYBOARD SETUP", "", progress, "", "Press the key for:", "",
+                        std::string("   ") + kRemapOrder[step].name, "", "", "Delete: leave unbound",
+                        "Esc: cancel"},
+                       -1);
+            SDL_Delay(10);
+        }
+    }
+    std::memcpy(out, keys_out, sizeof keys_out);
+    return true;
+}
+
 }  // namespace
 
 // Modal settings screen. The game is paused while it is open (this runs inside the
@@ -651,27 +745,34 @@ static void run_settings_menu() {
         if (pressed & (B_CROSS | B_START)) keys.push_back(SDL_SCANCODE_RETURN);
         if (pressed & B_CIRCLE) keys.push_back(SDL_SCANCODE_ESCAPE);
 
-        if (dev_index >= g_devices.size()) dev_index = 0;
-        const bool have_dev = !g_devices.empty();
+        // entry 0 is the keyboard, entries 1.. are the connected controllers
+        const size_t entries = 1 + g_devices.size();
+        if (dev_index >= entries) dev_index = 0;
+        const bool is_keyboard = dev_index == 0;
         const int items = 3;  // remap, reset, back
         for (auto k : keys) {
             switch (k) {
                 case SDL_SCANCODE_UP: sel = (sel + items - 1) % items; break;
                 case SDL_SCANCODE_DOWN: sel = (sel + 1) % items; break;
-                case SDL_SCANCODE_LEFT:
-                    if (have_dev) dev_index = (dev_index + g_devices.size() - 1) % g_devices.size();
-                    break;
-                case SDL_SCANCODE_RIGHT:
-                    if (have_dev) dev_index = (dev_index + 1) % g_devices.size();
-                    break;
+                case SDL_SCANCODE_LEFT: dev_index = (dev_index + entries - 1) % entries; break;
+                case SDL_SCANCODE_RIGHT: dev_index = (dev_index + 1) % entries; break;
                 case SDL_SCANCODE_ESCAPE:
                 case SDL_SCANCODE_F1: open = false; break;
                 case SDL_SCANCODE_RETURN:
                 case SDL_SCANCODE_KP_ENTER:
                     if (sel == 2) { open = false; break; }
-                    if (!have_dev) { status = "Connect a controller first."; break; }
-                    if (sel == 0) {
-                        InputDevice dev = g_devices[dev_index];
+                    if (sel == 0 && is_keyboard) {
+                        SDL_Scancode keys_new[16];
+                        if (remap_keyboard(keys_new, &quit)) {
+                            std::memcpy(g_keys, keys_new, sizeof g_keys);
+                            g_key_custom = true;
+                            save_settings();
+                            status = "Saved. This layout is used every time.";
+                        } else if (!quit) {
+                            status = "Cancelled, layout unchanged.";
+                        }
+                    } else if (sel == 0) {
+                        InputDevice dev = g_devices[dev_index - 1];
                         Layout lay;
                         if (remap_device(dev, &lay, &quit)) {
                             g_layouts[device_guid(dev)] = lay;
@@ -680,22 +781,24 @@ static void run_settings_menu() {
                         } else if (!quit) {
                             status = "Cancelled, layout unchanged.";
                         }
-                        prev_pad = host_pad(0).buttons;
                     } else if (sel == 1) {
-                        g_layouts.erase(device_guid(g_devices[dev_index]));
+                        if (is_keyboard) g_key_custom = false;
+                        else g_layouts.erase(device_guid(g_devices[dev_index - 1]));
                         save_settings();
                         status = "Restored the default layout.";
                     }
+                    prev_pad = host_pad(0).buttons;
                     break;
                 default: break;
             }
         }
         if (!open || quit) break;
-        std::string dev_line = have_dev ? std::string(device_name(g_devices[dev_index])).substr(0, 30)
-                                        : std::string("(no controller connected)");
-        if (g_devices.size() > 1) dev_line = "< " + dev_line + " >";
-        bool custom = have_dev && g_layouts.count(device_guid(g_devices[dev_index]));
-        draw_panel({"SETTINGS", "", "Controller:", dev_line, custom ? "Layout: custom" : "Layout: default", "",
+        std::string dev_line = is_keyboard ? std::string("Keyboard & mouse")
+                                           : std::string(device_name(g_devices[dev_index - 1])).substr(0, 30);
+        dev_line = "< " + dev_line + " >";
+        bool custom = is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 1])) > 0;
+        draw_panel({"SETTINGS", "", "Device (left/right to change):", dev_line,
+                    custom ? "Layout: custom" : "Layout: default", "",
                     "Set up buttons", "Reset to default layout", "Back to game", "", status, "", "",
                     "Keys: arrows, Enter, Esc", "Pad:  d-pad, X select, O back", "Open anytime: F1, or hold",
                     "      SELECT + START"},
