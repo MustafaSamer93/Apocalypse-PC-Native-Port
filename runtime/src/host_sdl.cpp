@@ -13,7 +13,16 @@ SDL_Renderer* g_renderer = nullptr;
 SDL_Texture* g_texture = nullptr;
 int g_tex_w = 0, g_tex_h = 0;
 SDL_AudioStream* g_audio = nullptr;
-SDL_Gamepad* g_pads[2] = {};
+
+// Every connected controller drives player 1 (Apocalypse is single-player). Devices SDL
+// has a mapping for are opened as gamepads; anything else (e.g. some 8BitDo modes) as a
+// raw joystick with a generic layout.
+struct InputDevice {
+    SDL_JoystickID id;
+    SDL_Gamepad* pad = nullptr;
+    SDL_Joystick* joy = nullptr;
+};
+std::vector<InputDevice> g_devices;
 bool g_quit = false;
 bool g_turbo = false;
 bool g_force_turbo = false;
@@ -48,13 +57,45 @@ void ensure_texture(int w, int h) {
     g_pixels.assign((size_t)w * h, 0);
 }
 
+void add_device(SDL_JoystickID id) {
+    for (auto& d : g_devices)
+        if (d.id == id) return;
+    InputDevice d{id};
+    if (SDL_IsGamepad(id)) {
+        d.pad = SDL_OpenGamepad(id);
+        if (!d.pad) return;
+        log_msg(LogCat::Host, "controller connected: %s", SDL_GetGamepadName(d.pad));
+    } else {
+        d.joy = SDL_OpenJoystick(id);
+        if (!d.joy) return;
+        log_msg(LogCat::Host,
+                "controller connected: %s (no SDL mapping, using a generic layout; a line for it in "
+                "gamecontrollerdb.txt gives exact buttons)",
+                SDL_GetJoystickName(d.joy));
+    }
+    g_devices.push_back(d);
+}
+
+void remove_device(SDL_JoystickID id) {
+    for (auto it = g_devices.begin(); it != g_devices.end(); ++it) {
+        if (it->id != id) continue;
+        if (it->pad) SDL_CloseGamepad(it->pad);
+        if (it->joy) SDL_CloseJoystick(it->joy);
+        g_devices.erase(it);
+        return;
+    }
+}
+
 }  // namespace
 
 bool host_init(const char* title, int scale) {
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
         log_msg(LogCat::Host, "SDL_Init failed: %s", SDL_GetError());
         return false;
     }
+    // Community mappings (https://github.com/mdqinc/SDL_GameControllerDB), if the user adds the file.
+    if (SDL_AddGamepadMappingsFromFile("gamecontrollerdb.txt") > 0)
+        log_msg(LogCat::Host, "loaded extra controller mappings from gamecontrollerdb.txt");
     g_window = SDL_CreateWindow(title, 320 * scale, 240 * scale, SDL_WINDOW_RESIZABLE);
     if (!g_window) return false;
     g_renderer = SDL_CreateRenderer(g_window, nullptr);
@@ -90,22 +131,12 @@ void host_poll() {
                     SDL_SetWindowFullscreen(g_window, !fs);
                 }
                 break;
-            case SDL_EVENT_GAMEPAD_ADDED:
-                for (auto& p : g_pads) {
-                    if (!p) {
-                        p = SDL_OpenGamepad(e.gdevice.which);
-                        break;
-                    }
-                }
-                break;
-            case SDL_EVENT_GAMEPAD_REMOVED:
-                for (auto& p : g_pads) {
-                    if (p && SDL_GetGamepadID(p) == e.gdevice.which) {
-                        SDL_CloseGamepad(p);
-                        p = nullptr;
-                    }
-                }
-                break;
+            // JOYSTICK_ADDED fires for every device (gamepads included); add_device
+            // decides between the gamepad and raw-joystick paths and ignores repeats.
+            case SDL_EVENT_JOYSTICK_ADDED: add_device(e.jdevice.which); break;
+            case SDL_EVENT_GAMEPAD_ADDED: add_device(e.gdevice.which); break;
+            case SDL_EVENT_JOYSTICK_REMOVED: remove_device(e.jdevice.which); break;
+            case SDL_EVENT_GAMEPAD_REMOVED: remove_device(e.gdevice.which); break;
         }
     }
     const bool* keys = SDL_GetKeyboardState(nullptr);
@@ -161,7 +192,33 @@ PadState host_pad(int port) {
         for (auto& m : map)
             if (k[m.sc]) pressed |= m.bit;
     }
-    if (SDL_Gamepad* p = g_pads[port]) {
+    for (auto& dev : g_devices) {
+        if (port != 0) break;
+        if (SDL_Joystick* j = dev.joy) {
+            // Generic DirectInput-style layout: hat = d-pad, left stick = d-pad,
+            // buttons 0-3 = face buttons, 4-7 = shoulders, 8/9 = select/start.
+            static const uint16_t btn_map[] = {B_CROSS, B_CIRCLE, B_SQUARE, B_TRIANGLE, B_L1, B_R1,
+                                               B_L2, B_R2, B_SELECT, B_START, B_L3, B_R3};
+            int nb = SDL_GetNumJoystickButtons(j);
+            for (int b = 0; b < nb && b < (int)(sizeof btn_map / sizeof *btn_map); b++)
+                if (SDL_GetJoystickButton(j, b)) pressed |= btn_map[b];
+            if (SDL_GetNumJoystickHats(j) > 0) {
+                Uint8 h = SDL_GetJoystickHat(j, 0);
+                if (h & SDL_HAT_UP) pressed |= B_UP;
+                if (h & SDL_HAT_DOWN) pressed |= B_DOWN;
+                if (h & SDL_HAT_LEFT) pressed |= B_LEFT;
+                if (h & SDL_HAT_RIGHT) pressed |= B_RIGHT;
+            }
+            if (SDL_GetNumJoystickAxes(j) >= 2) {
+                int x = SDL_GetJoystickAxis(j, 0), y = SDL_GetJoystickAxis(j, 1);
+                if (x < -16000) pressed |= B_LEFT;
+                if (x > 16000) pressed |= B_RIGHT;
+                if (y < -16000) pressed |= B_UP;
+                if (y > 16000) pressed |= B_DOWN;
+            }
+            continue;
+        }
+        SDL_Gamepad* p = dev.pad;
         struct { SDL_GamepadButton b; uint16_t bit; } map[] = {
             {SDL_GAMEPAD_BUTTON_DPAD_UP, B_UP}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN, B_DOWN},
             {SDL_GAMEPAD_BUTTON_DPAD_LEFT, B_LEFT}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, B_RIGHT},
@@ -187,7 +244,7 @@ PadState host_pad(int port) {
             if (g_frame >= sp.from && g_frame < sp.to) pressed |= sp.bit;
     PadState s;
     s.buttons = (uint16_t)~pressed;
-    s.connected = port == 0 || g_pads[port] != nullptr;
+    s.connected = port == 0;
     return s;
 }
 
