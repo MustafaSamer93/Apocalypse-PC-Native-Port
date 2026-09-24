@@ -1085,7 +1085,7 @@ static void run_settings_menu() {
         bool custom = is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 1])) > 0;
         auto row = [](const char* label, const std::string& value) {
             std::string s = label;
-            s.resize(15, ' ');
+            s.resize(16, ' ');
             return s + "< " + value + " >";
         };
         std::string slot_line = std::to_string(slot) + ": " + state_slot_label(slot);
