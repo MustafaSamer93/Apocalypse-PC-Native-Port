@@ -27,8 +27,8 @@ SDL_AudioStream* g_audio = nullptr;
 
 // Graphics settings (settings screen, saved in settings.ini).
 struct GfxSettings {
-    int scale = 2;          // 0 = software renderer, 1..8 = OpenGL internal resolution
-    Aspect aspect = Aspect::A4_3;
+    int scale = 5;          // 0 = software renderer, 1..8 = OpenGL internal resolution (5 = 1200 lines)
+    Aspect aspect = Aspect::A16_9;
     bool crt = false;
     bool texture_filter = false;
     int fps = 0;            // images per second: 0 = match the display, 30 = original, 60..150 (smooth.cpp)
@@ -329,8 +329,32 @@ bool host_init(const char* title, int scale) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    g_window = SDL_CreateWindow(title, 320 * scale, 240 * scale, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
+    // Window shaped like the picture. `scale` N asks for 240*N lines; 0 (the default) asks for
+    // 1080: a 1080p window if the desktop has room, else fullscreen on a 1080-line display,
+    // else the largest window that fits.
+    const float ratio = g_gfx.aspect == Aspect::A16_9 ? 16.0f / 9 : g_gfx.aspect == Aspect::A16_10 ? 16.0f / 10 : 4.0f / 3;
+    int win_h = scale > 0 ? 240 * scale : 1080;
+    bool fullscreen = false;
+    SDL_DisplayID display = SDL_GetPrimaryDisplay();
+    SDL_Rect usable{};
+    const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display);
+    if (SDL_GetDisplayUsableBounds(display, &usable)) {
+        const int frame = 40;  // title bar and borders
+        int fit_h = std::min(usable.h - frame, (int)((float)(usable.w - 16) / ratio));
+        if (win_h > fit_h) {
+            if (scale == 0 && desktop && desktop->h >= 1080 && (float)desktop->w >= 1080 * ratio - 1)
+                fullscreen = true;  // a 1080-line screen: use all of it
+            else
+                win_h = std::max(240, fit_h);
+        }
+    }
+    int win_w = (int)((float)win_h * ratio + 0.5f);
+    g_window = SDL_CreateWindow(title, win_w, win_h,
+                                SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
     if (!g_window) return false;
+    if (desktop)
+        log_msg(LogCat::Host, "desktop %dx%d; window %dx%d%s", desktop->w, desktop->h, win_w, win_h,
+                fullscreen ? " (fullscreen)" : "");
     g_gl_ok = present_init(g_window);
     if (!g_gl_ok) {
         log_msg(LogCat::Host, "OpenGL 3.3 is required for display");

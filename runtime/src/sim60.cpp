@@ -212,6 +212,15 @@ void trace_player(R3000* c, uint32_t t) {
                 line += b;
             }
             log_msg(LogCat::Host, "sim60dump f=%llu tick=%u%s", (unsigned long long)f, t, line.c_str());
+            uint32_t cam = MEM_R32(c, kCameraList);
+            if (valid_ptr(cam)) {
+                line.clear();
+                for (int i = 0; i < 0xA0; i += 4) {
+                    std::snprintf(b, sizeof b, " %d", (int32_t)MEM_R32(c, cam + i));
+                    line += b;
+                }
+                log_msg(LogCat::Host, "sim60cam f=%llu tick=%u%s", (unsigned long long)f, t, line.c_str());
+            }
         }
     }
 }

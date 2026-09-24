@@ -42,7 +42,7 @@ void usage() {
         "usage: apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--log cats]\n"
         "  --cue PATH         disc image cue sheet (default: asset/Apocalypse (USA).cue)\n"
         "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
-        "  --scale N          initial window scale (default 3)\n"
+        "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
         "  --smooth K         K images per game step (1 = original 30 fps; default: match the display)\n"
         "  --refresh HZ       display refresh rate to assume (if the detected one is wrong)\n"
@@ -77,7 +77,7 @@ uint32_t load_exe_from_disc(R3000* c) {
 int main(int argc, char** argv) {
     std::string cue = "asset/Apocalypse (USA).cue";
     std::string card_dir = "saves";
-    int scale = 3;
+    int scale = 0;  // window: 0 = 1080 lines or as much as fits
     bool interp_only = false;  // debugging: run everything in the interpreter
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];

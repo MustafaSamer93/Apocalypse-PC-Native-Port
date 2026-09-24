@@ -65,6 +65,9 @@ F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = qu
 apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N]
 ```
 
+Defaults: 16:9, rendered at 5x (1200 lines), in a 1080-line window, or fullscreen on a 1080p
+screen. `--scale N` asks for a window 240*N lines high instead.
+
 `--sim60` turns the 60 Hz simulation on in every level (default: level 1 only).
 `--smooth K` forces K images per game step (1 = the original 30 fps) and `--refresh HZ`
 overrides the detected display refresh rate. A frame rate above the display's refresh is
