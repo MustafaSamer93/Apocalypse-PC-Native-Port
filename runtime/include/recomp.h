@@ -191,7 +191,8 @@ void call_indirect(R3000* c, uint32_t addr);
 void psx_safepoint(R3000* c, uint32_t pc);
 void psx_hook_level_start(void);
 void psx_hook_progress(R3000* c);  // the game recorded a checkpoint (savestate.cpp)
-void psx_hook_2d(R3000* c, int stage);  // the render's 2D routines start (gpu.cpp)
+void psx_hook_2d(R3000* c, int stage);        // the render's 2D routines start (gpu.cpp)
+int psx_hook_2d_call(R3000* c, int which);  // nonzero: a 2D routine was run by the hook (gpu.cpp)
 int psx_hook_render(R3000* c);  // nonzero: the render was done by the hook
 int psx_hook_tick(R3000* c);  // nonzero: the tick was handled (sim60.cpp)
 

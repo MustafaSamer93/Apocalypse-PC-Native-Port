@@ -40,6 +40,10 @@ ENTRY_HOOKS = {
     0x80016884: "psx_hook_2d(c, 1);",
     0x8001B8BC: "psx_hook_2d(c, 2);",
     0x8001C004: "psx_hook_2d(c, 3);",  # full-screen tint
+    # menu / HUD drawing routines: their packets are 2D (gpu.cpp)
+    0x8001AA28: "if (psx_hook_2d_call(c, 0)) return;",  # text
+    0x8006D028: "if (psx_hook_2d_call(c, 1)) return;",  # icons (button symbols, ...)
+    0x8006D0D4: "if (psx_hook_2d_call(c, 2)) return;",
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.

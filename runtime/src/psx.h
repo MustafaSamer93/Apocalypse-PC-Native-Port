@@ -112,6 +112,7 @@ extern float g_gte_widescreen;
 // 4:3 as they were made, everything else in the chosen aspect (gpu.cpp, mdec.cpp).
 void gpu_note_movie_frame();
 bool gpu_movie_playing();
+void gpu_list_done();  // an ordering table was sent to the GPU (hw.cpp)
 extern uint32_t g_gpu_packet_addr;  // RAM address of the GPU packet being processed (hw.cpp)
 
 void cdrom_init(const std::string& cue_path);

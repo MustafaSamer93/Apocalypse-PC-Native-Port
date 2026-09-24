@@ -51,13 +51,21 @@ uint64_t g_vblanks = 0;
 // stretched to the wider screen. The level render's 2D (HUD, messages) would be stretched
 // with it, so it is narrowed by the same factor: it keeps its proportions. HUD pieces stay at
 // the screen edge of their side (the panel in the top right corner); the pause menu and
-// messages stay centred. The 2D is what the render's last
+// messages stay centred. Text and icons (the game's routines for them, also used by the
+// menus) are narrowed around the centre wherever they are drawn. The 2D is what the render's last
 // routines add; their packets come from one buffer in order (next free packet: 800FF668),
 // so the packet address tells what made a primitive. Near full-width shapes (the red damage
 // flash, fades) still cover the screen.
 constexpr uint32_t kNextPacket = 0x800FF668;
 uint32_t g_2d_from = 0, g_2d_mid = 0, g_2d_to = 0;  // packets: HUD from..mid, then menus/messages
                                                     // up to the tint's (phys)
+// Packets the text and icon routines made since the last frame was drawn (phys from, to).
+std::vector<std::pair<uint32_t, uint32_t>> g_text_packets;
+bool text_packet(uint32_t a) {
+    for (const auto& r : g_text_packets)
+        if (a >= r.first && a < r.second) return true;
+    return false;
+}
 uint64_t g_movie_vblank = 0;  // when the MDEC last decoded a movie frame (VBlank count)
 bool g_movie_seen = false;
 
@@ -65,12 +73,15 @@ bool g_movie_seen = false;
 // fix + (x - fix) * factor); 1 = leave it.
 float squeeze_2d(float x0, float x1, float* fix) {
     const uint32_t a = g_gpu_packet_addr;
-    if (g_gte_widescreen == 1.0f || !a || a < g_2d_from || a >= g_2d_to) return 1.0f;
+    if (g_gte_widescreen == 1.0f || !a) return 1.0f;
+    const bool text = text_packet(a);
+    if (!text && (a < g_2d_from || a >= g_2d_to)) return 1.0f;
     const float left = (float)S.area_x1, right = (float)(S.area_x2 + 1), width = right - left;
     if (x1 - x0 >= 0.9f * width) return 1.0f;  // full-screen shapes
     const float mid = (x0 + x1) * 0.5f;
-    if (a < g_2d_mid && mid < left + width / 3) *fix = left;         // HUD, left side
-    else if (a < g_2d_mid && mid > right - width / 3) *fix = right;  // HUD, right side
+    const bool hud = a >= g_2d_from && a < g_2d_mid;  // HUD text and icons too
+    if (hud && mid < left + width / 3) *fix = left;         // HUD, left side
+    else if (hud && mid > right - width / 3) *fix = right;  // HUD, right side
     else *fix = (left + right) * 0.5f;
     return g_gte_widescreen;
 }
@@ -777,6 +788,31 @@ extern "C" void psx_hook_2d(R3000* c, int stage) {
     } else if (stage == 3) {
         g_2d_to = next;
     }
+}
+
+// Entry hooks on the text routine (8001AA28, a2 = the text) and the icon routines: run the
+// routine and note the packets it made.
+extern "C" int psx_hook_2d_call(R3000* c, int which) {
+    static const uint32_t kFn[3] = {0x8001AA28, 0x8006D028, 0x8006D0D4};
+    static bool inside[3];
+    if (inside[which]) return 0;
+    const uint32_t ra = c->r[31], sp = c->r[29];
+    const uint32_t from = MEM_R32(c, kNextPacket) & 0x1FFFFC;
+    inside[which] = true;
+    call_indirect(c, kFn[which]);
+    inside[which] = false;
+    const uint32_t to = MEM_R32(c, kNextPacket) & 0x1FFFFC;
+    if (to > from && g_text_packets.size() < 256) g_text_packets.push_back({from, to});
+    c->r[31] = ra;
+    c->r[29] = sp;
+    return 1;
+}
+
+// A frame's ordering table was drawn: the packets noted so far are done with (each frame's
+// render notes its own; after a level, its HUD range must not apply to menu packets).
+void gpu_list_done() {
+    g_text_packets.clear();
+    g_2d_from = g_2d_mid = g_2d_to = 0;
 }
 
 void gpu_note_movie_frame() {
