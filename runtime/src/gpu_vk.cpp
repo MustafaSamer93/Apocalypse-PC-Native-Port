@@ -458,6 +458,29 @@ void vk_hw_upload_all(const uint16_t* vram) {
     g_dirty = false;
 }
 
+void vk_hw_draw_picture(int x, int y, int w, int h, const uint32_t* rgba) {
+    if (!S || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > 1024 || y + h > 512) return;
+    if (overlaps_dirty(x, y, x + w, y + h)) sync_read();
+    else flush();
+    VkImg pic;
+    if (!vkc::create_image(pic, w * S, h * S, VK_FORMAT_R8G8B8A8_UNORM,
+                           VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+        return;
+    const VkDeviceSize bytes = (VkDeviceSize)w * S * h * S * 4;
+    vkc::Staging st = vkc::stage(bytes);
+    std::memcpy(st.ptr, rgba, bytes);
+    vkc::end_rendering();
+    vkc::transition(pic, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy bic{};
+    bic.bufferOffset = st.offset;
+    bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    bic.imageExtent = {(uint32_t)(w * S), (uint32_t)(h * S), 1};
+    vkCmdCopyBufferToImage(cb(), st.buffer, pic.image, pic.layout, 1, &bic);
+    draw_copy(pic, x * S, y * S, 1, x, y, w, h);
+    vkc::destroy_image(pic);  // waits for the GPU (rare: when a replaced picture appears)
+    mark_dirty(x, y, x + w, y + h);
+}
+
 void vk_hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (overlaps_dirty(sx, sy, sx + w, sy + h)) sync_read();

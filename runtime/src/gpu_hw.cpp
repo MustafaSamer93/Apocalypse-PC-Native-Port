@@ -631,6 +631,23 @@ void gl_hw_upload_all(const uint16_t* vram) {
     g_dirty = false;
 }
 
+void gl_hw_draw_picture(int x, int y, int w, int h, const uint32_t* rgba) {
+    if (!S || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > 1024 || y + h > 512) return;
+    if (overlaps_dirty(x, y, x + w, y + h)) sync_read();
+    else flush();
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w * S, h * S, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    draw_copy(tex, x * S, y * S, 1, x, y, w, h);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteTextures(1, &tex);
+    mark_dirty(x, y, x + w, y + h);
+}
+
 void gl_hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (overlaps_dirty(sx, sy, sx + w, sy + h)) sync_read();

@@ -101,6 +101,7 @@ add_executable(apocalypse
     runtime/src/smooth.cpp
     runtime/src/sim60.cpp
     runtime/src/render_backend.cpp
+    runtime/src/replace.cpp
     runtime/src/vk_context.cpp
     runtime/src/gpu_vk.cpp
     runtime/src/present_vk.cpp
@@ -122,6 +123,9 @@ add_executable(gte_test runtime/tests/gte_test.cpp runtime/src/gte.cpp)
 target_include_directories(gte_test PRIVATE runtime/include runtime/src)
 find_package(OpenGL REQUIRED)
 target_link_libraries(apocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL Vulkan::Headers)
+if(WIN32)
+    target_link_libraries(apocalypse PRIVATE windowscodecs ole32)  # replacement pictures (replace.cpp)
+endif()
 if(MSVC)
     target_compile_options(apocalypse PRIVATE /W3 /permissive- $<$<NOT:$<CXX_COMPILER_ID:Clang>>:/Zc:preprocessor>)
     target_compile_definitions(apocalypse PRIVATE _CRT_SECURE_NO_WARNINGS)

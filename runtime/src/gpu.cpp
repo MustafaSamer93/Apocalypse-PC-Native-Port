@@ -520,6 +520,7 @@ void execute(const std::vector<uint32_t>& w) {
                 d = tmp[(size_t)j * ww + i] | (S.set_mask ? 0x8000 : 0);
             }
         if (hw_active()) hw_copy(sx, sy, dx, dy, ww, hh);
+        replace_note_copy(sx, sy, dx, dy, ww, hh);
         return;
     }
     if (cmd >= 0xA0 && cmd < 0xC0) {  // CPU -> VRAM: data words follow
@@ -597,6 +598,7 @@ void upload_word(uint32_t v) {
             if (++g_upload.cy >= g_upload.h) {
                 g_upload.active = false;
                 if (hw_active()) hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
+                replace_note_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
             }
         }
     }
@@ -740,6 +742,7 @@ int gpu_set_renderer(int scale, int samples) {
             return 0;
         }
         hw_upload_all(g_vram);
+        replace_note_vram_reset();
     }
     return hw_active() ? hw_scale() : 0;
 }
@@ -747,6 +750,7 @@ int gpu_set_renderer(int scale, int samples) {
 void gpu_vblank() {
     g_odd_line = !g_odd_line;
     g_vblanks++;
+    replace_check(g_vram);
     LOG(Gpu, "frame: polys=%u lines=%u rects=%u fills=%u uploads=%u area=(%d,%d)-(%d,%d) offset=(%d,%d)",
         g_stat_counts[0], g_stat_counts[1], g_stat_counts[2], g_stat_counts[3], g_stat_counts[4], S.area_x1,
         S.area_y1, S.area_x2, S.area_y2, S.off_x, S.off_y);
@@ -844,6 +848,7 @@ void gpu_state(StateIO& s) {
     s.raw(g_vram, sizeof g_vram);
     gpu_regs_state(s);
     if (s.loading() && hw_active()) hw_upload_all(g_vram);
+    if (s.loading()) replace_note_vram_reset();
 }
 
 // The CPU-side VRAM copy of a rectangle (fills and uploads land there even while the

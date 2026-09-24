@@ -35,7 +35,7 @@
     X(void, hw_upload, (int x, int y, int w, int h, const uint16_t* vram), (x, y, w, h, vram))                 \
     X(void, hw_copy, (int sx, int sy, int dx, int dy, int w, int h), (sx, sy, dx, dy, w, h))                   \
     X(void, hw_readback, (int x, int y, int w, int h, uint16_t* vram), (x, y, w, h, vram))                     \
-    X(void, hw_upload_all, (const uint16_t* vram), (vram))                                                     \
+    X(void, hw_upload_all, (const uint16_t* vram), (vram))                                                         X(void, hw_draw_picture, (int x, int y, int w, int h, const uint32_t* rgba), (x, y, w, h, rgba))           \
     X(unsigned, hw_display_texture, (int x, int y, int w, int h, int* px, int* py, int* pw, int* ph),          \
       (x, y, w, h, px, py, pw, ph))                                                                            \
     X(void, hw_capture, (int slot, int x, int y, int w, int h), (slot, x, y, w, h))                            \

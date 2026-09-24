@@ -54,6 +54,9 @@ void hw_copy(int sx, int sy, int dx, int dy, int w, int h);
 void hw_readback(int x, int y, int w, int h, uint16_t* vram_1024x512);
 // Writes the whole CPU VRAM copy to the GPU (when switching renderers).
 void hw_upload_all(const uint16_t* vram_1024x512);
+// Draws a picture over a native VRAM rectangle at full detail: `rgba` is (w * scale) x (h *
+// scale) pixels, R G B A bytes, top row first (replacement images, replace.cpp).
+void hw_draw_picture(int x, int y, int w, int h, const uint32_t* rgba);
 
 // Finishes pending draws; returns the VRAM texture and the display rectangle in its pixels.
 unsigned hw_display_texture(int x, int y, int w, int h, int* px, int* py, int* pw, int* ph);

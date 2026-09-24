@@ -113,6 +113,12 @@ extern float g_gte_widescreen;
 void gpu_note_movie_frame();
 bool gpu_movie_playing();
 void gpu_list_done();  // an ordering table was sent to the GPU (hw.cpp)
+// Replacement pictures (replace.cpp): uploads and copies in VRAM, the whole VRAM re-sent, and the
+// look for known pictures at each VBlank.
+void replace_note_upload(int x, int y, int w, int h);
+void replace_note_copy(int sx, int sy, int dx, int dy, int w, int h);
+void replace_note_vram_reset();
+void replace_check(const uint16_t* vram);
 extern uint32_t g_gpu_packet_addr;  // RAM address of the GPU packet being processed (hw.cpp)
 
 void cdrom_init(const std::string& cue_path);
