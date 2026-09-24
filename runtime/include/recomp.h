@@ -190,6 +190,7 @@ void call_indirect(R3000* c, uint32_t addr);
 // Entry hooks (see ENTRY_HOOKS in tools/recomp/emit.py).
 void psx_safepoint(R3000* c, uint32_t pc);
 void psx_hook_level_start(void);
+void psx_hook_progress(R3000* c);  // the game recorded a checkpoint (savestate.cpp)
 int psx_hook_render(R3000* c);  // nonzero: the render was done by the hook
 int psx_hook_tick(R3000* c);  // nonzero: the tick was handled (sim60.cpp)
 

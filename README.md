@@ -17,11 +17,11 @@ executable from your disc image, and the program reads everything else from it a
 | 2D (title, HUD, menus) | working |
 | 3D gameplay (GTE + OpenGL renderer, 1x-8x internal resolution) | working |
 | 4:3 / 16:9 / 16:10 (widescreen widens the 3D view), CRT filter, texture smoothing | working |
-| Anti-aliasing: supersampling (renders up to 8x, averaged down) and/or FXAA; setting "Anti-aliasing" | working |
+| Anti-aliasing: supersampling (renders up to 8x, averaged down), FXAA, and MSAA 1x/2x/4x/8x ("AA rate") | working |
 | Keyboard + mouse, XInput gamepads (twin-stick aiming, rumble), in-game button remapping | working |
 | Sound effects, XA speech/music, CD audio, SPU reverb | working |
 | Memory card (`saves/card1.mcr`, emulator-compatible) | working |
-| Save states (5 slots) and auto-save (level start + every 5 minutes) | working |
+| Save states (5 slots) and auto-save (at each checkpoint and when a level is finished) | working |
 | Frame rate 30 / 60 / 90 / 120 / 150 fps, or Auto (match the display); setting "Frame rate" | working; the game still simulates at 30 Hz |
 | 60 Hz simulation in level 1: player and camera update 60 times a second, everything moves every frame (setting "Simulation") | working in level 1; other levels: optional, untested |
 | HD texture packs | not implemented |

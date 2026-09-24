@@ -33,19 +33,37 @@ namespace {
 
 constexpr uint32_t kMagic = 0x53504F41;  // "AOPS"
 constexpr uint32_t kVersion = 2;  // 2: never taken inside an interrupt handler
-constexpr uint64_t kAutosaveIntervalFrames = 60ull * 60 * 5;  // 5 minutes of play
 
 int g_save_request = -1, g_load_request = -1;
 bool g_resume_pending = false;
 uint32_t g_resume_pc = 0;
 
-// auto-save state
-bool g_level_start_pending = false;
-uint64_t g_level_start_frame = 0;
+// Auto-save: when the game records progress (800189EC: a checkpoint, or the start of the
+// next level) with a level or restart point different from the last auto-save's. Dying and
+// restarting at the same checkpoint records the same point again and does not save.
+constexpr uint32_t kProgressLevel = 0x800A53D8;    // level file name ("prsn_t")
+constexpr uint32_t kProgressRestart = 0x800A53E1;  // restart point ("Re_Cat1_Prsn")
+bool g_progress_pending = false;
+uint64_t g_progress_frame = 0;
+std::string g_saved_level, g_saved_restart;  // the point of the last auto-save (or the start)
 bool g_demo_loaded = false;          // a .dem file was loaded since the last level start
-bool g_in_level = false;
-uint64_t g_last_autosave_frame = 0;
 uint64_t g_last_load_frame = 0;      // last time the game loaded a file
+
+std::string ram_string(uint32_t addr, size_t max) {
+    std::string s;
+    for (size_t i = 0; i < max; i++) {
+        char ch = (char)psx_ram[(addr + i) & (PSX_RAM_SIZE - 1)];
+        if (!ch) break;
+        s += ch;
+    }
+    return s;
+}
+
+// The progress point the game has recorded: "level/restart".
+void read_progress(std::string* level, std::string* restart) {
+    *level = ram_string(kProgressLevel, 9);
+    *restart = ram_string(kProgressRestart, 24);
+}
 
 std::string slot_path(int slot) {
     std::filesystem::create_directories("saves");
@@ -147,11 +165,10 @@ void state_poll_load(R3000* c) {
     host_toast(slot == kAutoSlot ? "Auto-save loaded" : "State " + std::to_string(slot) + " loaded");
     g_resume_pc = resume_pc;
     g_resume_pending = true;
-    // the loaded game is mid-play: keep the periodic auto-save going from here
-    g_level_start_pending = false;
+    // the loaded game's progress point is where auto-saves continue from
+    g_progress_pending = false;
     g_demo_loaded = false;
-    g_in_level = true;
-    g_last_autosave_frame = host_frame_count();
+    read_progress(&g_saved_level, &g_saved_restart);
     smooth_reset();
     std::longjmp(g_resume_jmp, 1);  // unwind the native stack; main() resumes
 }
@@ -172,21 +189,49 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
         host_toast(ok ? "State " + std::to_string(slot) + " saved" : "Saving failed");
     }
 
-    // Auto-save: once a level has started and finished loading (not for attract-mode
-    // demos), then every few minutes of play.
-    if (g_level_start_pending && frame >= std::max(g_level_start_frame, g_last_load_frame) + 90) {
-        g_level_start_pending = false;
-        if (!g_demo_loaded) {
-            g_in_level = true;
-            if (save_to(kAutoSlot, c, pc)) host_toast("Auto-saved");
-            g_last_autosave_frame = frame;
-        } else {
-            g_in_level = false;
+    {  // Debug: APOC_TEST_CHECKPOINT=FRAME:NODE makes the restart point trigger node NODE (level 1:
+       // 1 = start, 296 = Cat1, 52 = Trips) and records progress, as a checkpoint trigger does
+        static const char* t = std::getenv("APOC_TEST_CHECKPOINT");
+        static bool done = false;
+        unsigned long long tf = 0;
+        unsigned ti = 0;
+        if (t && !done && std::sscanf(t, "%llu:%u", &tf, &ti) == 2 && frame >= tf) {
+            done = true;
+            const R3000 saved = *c;
+            MEM_W32(c, 0x800FF620, ti);
+            c->r[31] = 0;
+            call_indirect(c, 0x800189EC);
+            *c = saved;
         }
-    } else if (g_in_level && frame >= g_last_autosave_frame + kAutosaveIntervalFrames) {
-        if (save_to(kAutoSlot, c, pc)) host_toast("Auto-saved");
-        g_last_autosave_frame = frame;
     }
+    // Auto-save a moment after the game records a new progress point (once any level
+    // loading has finished), never in attract-mode demos.
+    if (g_progress_pending && frame >= std::max(g_progress_frame, g_last_load_frame) + 90) {
+        g_progress_pending = false;
+        std::string level, restart;
+        read_progress(&level, &restart);
+        if (g_demo_loaded || level.empty() || restart.empty()) return;
+        if (g_saved_level.empty()) {  // the first point of this session (new game or loaded save)
+            g_saved_level = level;
+            g_saved_restart = restart;
+            return;
+        }
+        if (level == g_saved_level && restart == g_saved_restart) return;  // respawn at the same point
+        const bool new_level = level != g_saved_level;
+        if (save_to(kAutoSlot, c, pc)) {
+            host_toast(new_level ? "Level complete - auto-saved" : "Checkpoint - auto-saved");
+            log_msg(LogCat::Core, "auto-save: %s %s", level.c_str(), restart.c_str());
+            g_saved_level = level;
+            g_saved_restart = restart;
+        }
+    }
+}
+
+extern "C" void psx_hook_progress(R3000* c) {
+    if (core_in_ghost()) return;
+    LOG(Core, "game records progress (ra=%08X)", c->r[31]);
+    g_progress_pending = true;
+    g_progress_frame = host_frame_count();
 }
 
 void state_request_save(int slot) { g_save_request = slot; }
@@ -208,21 +253,14 @@ std::string state_slot_label(int slot) {
 
 extern "C" void psx_hook_level_start(void) { state_note_level_start(); }
 
-void state_note_level_start() {
-    smooth_reset();
-    g_level_start_pending = true;
-    g_level_start_frame = host_frame_count();
-}
+void state_note_level_start() { smooth_reset(); }
 
 void state_note_file_loaded(const std::string& name) {
     sim60_note_file(name);
     g_last_load_frame = host_frame_count();
     if (name.find(".dem") != std::string::npos || name.find(".DEM") != std::string::npos) g_demo_loaded = true;
     // level files (".trg" is loaded first for every level) start a new level context
-    if (name.find("_t.trg") != std::string::npos || name.find("_T.TRG") != std::string::npos) {
-        g_demo_loaded = false;
-        g_in_level = false;
-    }
+    if (name.find("_t.trg") != std::string::npos || name.find("_T.TRG") != std::string::npos) g_demo_loaded = false;
 }
 
 bool state_take_resume(uint32_t* pc) {
