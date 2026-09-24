@@ -15,7 +15,8 @@ executable from your disc image, and the program reads everything else from it a
 | Boot, BIOS (high-level reimplementation) | working |
 | FMV (MDEC + CD streaming) | working |
 | 2D (title, HUD, menus) | working |
-| 3D gameplay (GTE + OpenGL renderer, 1x-8x internal resolution) | working |
+| 3D gameplay (GTE + hardware renderer, 1x-8x internal resolution) | working |
+| Renderers: OpenGL 3.3 and Vulkan 1.3 (setting "Renderer"; falls back to OpenGL if Vulkan cannot start) | working |
 | 4:3 / 16:9 / 16:10 (widescreen widens the 3D view), CRT filter, texture smoothing | working |
 | Anti-aliasing: supersampling (renders up to 8x, averaged down), FXAA, and MSAA 1x/2x/4x/8x ("AA rate") | working |
 | Keyboard + mouse, XInput gamepads (twin-stick aiming, rumble), in-game button remapping | working |
@@ -30,7 +31,8 @@ executable from your disc image, and the program reads everything else from it a
 ## Building (Windows)
 
 Requirements: Visual Studio 2022+ with the C++ workload and the **C++ Clang tools**,
-Python 3.10+, Git (CMake fetches SDL3).
+Python 3.10+, Git (CMake fetches SDL3, the Vulkan headers, volk and glslang; no Vulkan SDK is
+needed, the Vulkan shaders are compiled during the build).
 
 1. Put `Apocalypse (USA).cue` and its two `.bin` tracks in `assets\`.
 2. Run `build.bat`.
@@ -57,7 +59,7 @@ cmake --build build-clang
 | Start / Select | Enter / Backspace | Start / Back |
 | fire toward a direction | left mouse button (toward the cursor) | right stick |
 
-F1 (or Select+Start held) = settings: save/load states, resolution, aspect ratio, CRT
+F1 (or Select+Start held) = settings: save/load states, renderer, resolution, anti-aliasing, aspect ratio, CRT
 filter, texture smoothing, frame rate (original 30 fps or smooth), simulation (60 Hz in
 level 1 by default), controller choice and button remapping.
 F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = quit.
@@ -65,12 +67,13 @@ F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = qu
 ## Command line
 
 ```
-apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N]
+apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--renderer opengl|vulkan]
 ```
 
 Defaults: 16:9, rendered at 5x (1200 lines; supersampling raises it to about twice the window's
 lines, at most 8x), with SSAA + FXAA anti-aliasing, in a 1080-line window, or fullscreen on a 1080p
-screen. `--scale N` asks for a window 240*N lines high instead.
+screen. `--scale N` asks for a window 240*N lines high instead. `--renderer` overrides the
+saved renderer for this run.
 
 `--sim60` turns the 60 Hz simulation on in every level (default: level 1 only).
 `--smooth K` forces K images per game step (1 = the original 30 fps) and `--refresh HZ`

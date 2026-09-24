@@ -101,8 +101,13 @@ add_executable(apocalypse
     runtime/src/smooth.cpp
     runtime/src/sim60.cpp
     runtime/src/render_backend.cpp
-    runtime/src/vk_stub.cpp)
-target_include_directories(apocalypse PRIVATE runtime/include runtime/src)
+    runtime/src/vk_context.cpp
+    runtime/src/gpu_vk.cpp
+    runtime/src/present_vk.cpp
+    ${volk_SOURCE_DIR}/volk.c)
+target_include_directories(apocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${SHADER_OUT})
+target_compile_definitions(apocalypse PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
+add_dependencies(apocalypse vk_shaders)
 # The game is a single self-contained exe (static SDL and C runtime) in the project folder,
 # next to assets\; a Windows app, so starting it opens no console window.
 set_target_properties(apocalypse PROPERTIES
@@ -116,7 +121,7 @@ set_target_properties(apocalypse PROPERTIES
 add_executable(gte_test runtime/tests/gte_test.cpp runtime/src/gte.cpp)
 target_include_directories(gte_test PRIVATE runtime/include runtime/src)
 find_package(OpenGL REQUIRED)
-target_link_libraries(apocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL)
+target_link_libraries(apocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL Vulkan::Headers)
 if(MSVC)
     target_compile_options(apocalypse PRIVATE /W3 /permissive- $<$<NOT:$<CXX_COMPILER_ID:Clang>>:/Zc:preprocessor>)
     target_compile_definitions(apocalypse PRIVATE _CRT_SECURE_NO_WARNINGS)

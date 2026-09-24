@@ -903,6 +903,10 @@ void draw_panel(const std::vector<std::string>& lines, int highlight) {
     SDL_SetRenderScale(g_renderer, 1.0f, 1.0f);
     present_redraw(present_options());
     present_overlay_end();
+    if (static const char* shot = std::getenv("APOC_MENU_SHOT"); shot && *shot) {  // tests: first menu image
+        present_save_bmp(shot);
+        shot = "";
+    }
     present_swap();
 }
 
@@ -1164,8 +1168,8 @@ static void run_settings_menu() {
                     "Reset buttons to default",
                     "Back to game",
                     status,
-                    "Arrows: change  Enter: select  Esc: back",
-                    "F5/F9: quick save/load  Pad: SELECT+START"},
+                    "Arrows: change  Enter: pick  Esc: back",
+                    "F5/F9: save/load  Pad: SELECT+START"},
                    1 + sel);
         SDL_Delay(15);
     }
