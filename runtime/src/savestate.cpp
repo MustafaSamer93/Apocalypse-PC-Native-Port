@@ -31,7 +31,7 @@ std::jmp_buf g_resume_jmp;  // set in main()
 namespace {
 
 constexpr uint32_t kMagic = 0x53504F41;  // "AOPS"
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;  // 2: never taken inside an interrupt handler
 constexpr uint64_t kAutosaveIntervalFrames = 60ull * 60 * 5;  // 5 minutes of play
 
 int g_save_request = -1, g_load_request = -1;

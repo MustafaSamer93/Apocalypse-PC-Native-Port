@@ -611,7 +611,10 @@ void host_present(const GpuDisplay& d) {
     if (++fps_frames == 60) {
         uint64_t now = SDL_GetTicksNS();
         double fps = 60.0 * 1e9 / (double)(now - fps_t0);
-        LOG(Host, "frame times: min %.2f ms, max %.2f ms", dt_min / 1e6, dt_max / 1e6);
+        extern int g_audio_underruns, g_audio_drops, g_audio_min_queued;
+        LOG(Host, "frame times: min %.2f ms, max %.2f ms; audio: queue min %d, underruns %d, drops %d",
+            dt_min / 1e6, dt_max / 1e6, g_audio_min_queued, g_audio_underruns, g_audio_drops);
+        g_audio_min_queued = 1 << 30;
         dt_min = ~0ull;
         dt_max = 0;
         char title[96];
@@ -1009,6 +1012,9 @@ void host_close_wav() {
     g_wav = nullptr;
 }
 
+// playback health, reported with the frame times (--log host)
+int g_audio_underruns = 0, g_audio_drops = 0, g_audio_min_queued = 1 << 30;
+
 void host_audio_push(const int16_t* stereo, int frames) {
     if (g_wav) {
         std::fwrite(stereo, 4, (size_t)frames, g_wav);
@@ -1023,7 +1029,12 @@ void host_audio_push(const int16_t* stereo, int frames) {
     // it underrun (clicks) or overflow (dropped chunks).
     const int target = 44100 * 60 / 1000;
     int queued = SDL_GetAudioStreamQueued(g_audio) / 4;
-    if (queued > target * 4) return;  // way behind (after a stall): drop rather than lag
+    g_audio_min_queued = std::min(g_audio_min_queued, queued);
+    if (queued == 0) g_audio_underruns++;  // the device ran dry since the last push: a gap
+    if (queued > target * 4) {  // way behind (after a stall): drop rather than lag
+        g_audio_drops++;
+        return;
+    }
     float ratio = 1.0f + 0.005f * std::clamp((float)(queued - target) / (float)target, -1.0f, 1.0f);
     SDL_SetAudioStreamFrequencyRatio(g_audio, ratio);
     SDL_PutAudioStreamData(g_audio, stereo, frames * 4);

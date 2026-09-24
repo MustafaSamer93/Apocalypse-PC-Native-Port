@@ -102,6 +102,15 @@ void sched_add(R3000* c, Ev ev, uint64_t cycles_from_now) {
     sched_update(c);
 }
 
+// For periodic events: the next occurrence counted from when this one was due, so the
+// lateness of each check point (events are only noticed at branches and calls) does not
+// accumulate into a slower clock.
+static void sched_next_period(R3000* c, Ev ev, uint64_t period) {
+    g_ev_time[(int)ev] += period;
+    g_ev_active[(int)ev] = true;
+    sched_update(c);
+}
+
 void sched_cancel(R3000* c, Ev ev) {
     g_ev_active[(int)ev] = false;
     sched_update(c);
@@ -192,7 +201,7 @@ static void scanline_event(R3000* c) {
         host_throttle_frame();
         if (host_quit_requested()) std::exit(0);
     }
-    sched_add(c, Ev::Scanline, CYCLES_PER_SCANLINE_NTSC);
+    sched_next_period(c, Ev::Scanline, CYCLES_PER_SCANLINE_NTSC);
 }
 
 uint32_t psx_current_scanline() { return g_scanline; }
