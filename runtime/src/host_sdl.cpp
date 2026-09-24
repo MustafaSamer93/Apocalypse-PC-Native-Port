@@ -10,12 +10,15 @@
 
 #include "gpu_hw.h"
 #include "present.h"
+#include "render_backend.h"
 #include "psx.h"
 #include "savestate.h"
 #include "smooth.h"
 
 constexpr const char* kVersion = "v0.1 beta";
 int g_force_smooth = 0;  // --smooth K: images per game step regardless of the display
+void host_toast(const std::string& text);
+int g_renderer_override = -1;  // --renderer opengl|vulkan: 0 / 1, -1 = the saved setting
 float g_refresh_override = 0;  // --refresh HZ: assume this display refresh rate
 
 namespace {
@@ -34,6 +37,7 @@ struct GfxSettings {
     int fps = 0;            // images per second: 0 = match the display, 30 = original, 60..150 (smooth.cpp)
     int aa = 3;             // anti-aliasing: bit 0 = FXAA pass, bit 1 = supersampling (SSAA)
     int msaa = 1;           // multisample anti-aliasing: samples per pixel (1, 2, 4, 8)
+    bool vulkan = false;    // renderer: Vulkan instead of OpenGL (applies at the next start)
 };
 int g_active_msaa = 1;      // MSAA samples the renderer was created with
 const char* const kAaNames[] = {"Off", "FXAA", "SSAA", "SSAA + FXAA"};
@@ -239,6 +243,7 @@ void save_settings() {
     std::fprintf(f, "sim %d\n", g_sim60_setting);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
     std::fprintf(f, "msaa %d\n", g_gfx.msaa);
+    std::fprintf(f, "renderer %s\n", g_gfx.vulkan ? "vulkan" : "opengl");
     if (g_key_custom) {
         std::fprintf(f, "keys");
         for (int i = 0; i < 16; i++)
@@ -273,6 +278,10 @@ void load_settings() {
             if (got == 5) g_gfx.fps = std::clamp(fps / 30 * 30, 0, 150);
             else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
                 g_gfx.fps = smooth ? 0 : 30;  // older settings file
+            continue;
+        }
+        if (char rn[16]; std::sscanf(line, "renderer %15s", rn) == 1) {
+            g_gfx.vulkan = std::strcmp(rn, "vulkan") == 0;
             continue;
         }
         if (int ms; std::sscanf(line, "msaa %d", &ms) == 1) {
@@ -361,10 +370,6 @@ bool host_init(const char* title, int scale) {
     if (SDL_AddGamepadMappingsFromFile("gamecontrollerdb.txt") > 0)
         log_msg(LogCat::Host, "loaded extra controller mappings from gamecontrollerdb.txt");
     load_settings();
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     // Window shaped like the picture. `scale` N asks for 240*N lines; 0 (the default) asks for
     // 1080: a 1080p window if the desktop has room, else fullscreen on a 1080-line display,
     // else the largest window that fits.
@@ -385,17 +390,37 @@ bool host_init(const char* title, int scale) {
         }
     }
     int win_w = (int)((float)win_h * ratio + 0.5f);
-    g_window = SDL_CreateWindow(title, win_w, win_h,
-                                SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
-    if (!g_window) return false;
     if (desktop)
         log_msg(LogCat::Host, "desktop %dx%d; window %dx%d%s", desktop->w, desktop->h, win_w, win_h,
                 fullscreen ? " (fullscreen)" : "");
-    g_gl_ok = present_init(g_window);
-    if (!g_gl_ok) {
-        log_msg(LogCat::Host, "OpenGL 3.3 is required for display");
+    // The renderer: Vulkan if chosen (and it starts), otherwise OpenGL.
+    auto open_window = [&](Backend b) {
+        render_select(b);
+        if (b == Backend::OpenGL) {
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+            SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        }
+        g_window = SDL_CreateWindow(title, win_w, win_h,
+                                    SDL_WINDOW_RESIZABLE | (b == Backend::Vulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL) |
+                                        (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+        if (!g_window) return false;
+        if (present_init(g_window)) return true;
+        present_shutdown();
+        SDL_DestroyWindow(g_window);
+        g_window = nullptr;
         return false;
+    };
+    const bool want_vulkan = g_renderer_override >= 0 ? g_renderer_override == 1 : g_gfx.vulkan;
+    g_gl_ok = want_vulkan && open_window(Backend::Vulkan);
+    if (want_vulkan && !g_gl_ok) {
+        log_msg(LogCat::Host, "Vulkan did not start; using OpenGL");
+        host_toast("Vulkan unavailable - using OpenGL");
     }
+    if (!g_gl_ok) g_gl_ok = open_window(Backend::OpenGL);
+    if (!g_gl_ok) fatal("Could not start the graphics: this needs OpenGL 3.3 or Vulkan 1.3.");
+    log_msg(LogCat::Host, "renderer: %s", render_backend_name(render_backend()));
     // On a ~60 Hz display, pace the emulation by vsync: one emulated frame per refresh
     // gives perfectly even frame times (the game's 30 fps then shows each frame for
     // exactly two refreshes). Other refresh rates fall back to a timer.
@@ -866,10 +891,10 @@ void draw_panel(const std::vector<std::string>& lines, int highlight) {
     SDL_RenderFillRect(g_renderer, &bg);
     SDL_SetRenderScale(g_renderer, 2.0f, 2.0f);  // 8x8 debug font -> 16x16; 40x30 character grid
     for (int i = 0; i < (int)lines.size(); i++) {
-        float y = 12.0f + 12.0f * (float)i;
+        float y = 10.0f + 11.0f * (float)i;
         if (i == highlight) {
             SDL_SetRenderDrawColor(g_renderer, 200, 60, 20, 255);
-            SDL_FRect r{12, y - 2, 296, 12};
+            SDL_FRect r{12, y - 2, 296, 11};
             SDL_RenderFillRect(g_renderer, &r);
         }
         SDL_SetRenderDrawColor(g_renderer, 255, 230, 180, 255);
@@ -976,7 +1001,7 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DEVICE, R_REMAP,
+    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DEVICE, R_REMAP,
                R_RESET, R_BACK, R_COUNT };
     static int slot = 1;
     size_t dev_index = 0;
@@ -1015,6 +1040,11 @@ static void run_settings_menu() {
                 switch (sel) {
                     case R_RES: g_gfx.scale = (g_gfx.scale + step + 9) % 9; gfx_changed = true; break;
                     case R_AA: g_gfx.aa = (g_gfx.aa + step + 4) % 4; gfx_changed = true; break;
+                    case R_RENDERER:  // saved; takes effect when the game is started again
+                        g_gfx.vulkan = !g_gfx.vulkan;
+                        save_settings();
+                        status = "Renderer changes on the next start.";
+                        break;
                     case R_MSAA: {
                         static const int rates[] = {1, 2, 4, 8};
                         int i = 0;
@@ -1096,7 +1126,7 @@ static void run_settings_menu() {
         if (gfx_changed) {
             apply_graphics();
             save_settings();
-            if (g_gfx.scale > 0 && g_active_scale == 0) status = "OpenGL renderer unavailable.";
+            if (g_gfx.scale > 0 && g_active_scale == 0) status = "Hardware renderer unavailable.";
             else status = "";
         }
         if (!open || quit) break;
@@ -1119,6 +1149,8 @@ static void run_settings_menu() {
                     row("Save state", slot_line),
                     row("Load state", slot_line),
                     row("Load auto-save", state_slot_label(kAutoSlot)),
+                    row("Renderer", std::string(g_gfx.vulkan ? "Vulkan" : "OpenGL") +
+                                        ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)")),
                     row("Resolution", res),
                     row("Anti-aliasing", kAaNames[g_gfx.aa]),
                     row("AA rate (MSAA)", msaa_label()),

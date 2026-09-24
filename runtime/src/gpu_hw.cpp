@@ -6,6 +6,7 @@
 // 15-bit colours are stored as (r5,g5,b5)/31 plus alpha = bit 15, which the shaders turn
 // back into exact 16-bit values for palette lookups.
 #include "gpu_hw.h"
+#include "render_backend.h"
 
 #include <algorithm>
 #include <cstring>
@@ -351,7 +352,7 @@ void draw_area_dirty(int x0, int y0, int x1, int y1, const HwState& s) {
 
 // ================================================================ lifecycle
 
-bool hw_init(int scale) {
+bool gl_hw_init(int scale) {
     if (!g_prog) {
         g_prog = gl_program(kVS, kFS);
         g_copy_prog = gl_program(kCopyVS, kCopyFS);
@@ -379,7 +380,7 @@ bool hw_init(int scale) {
         glVertexAttribIPointer(3, 2, GL_UNSIGNED_INT, sizeof(GLVtx), (void*)offsetof(GLVtx, info0));
         g_stage_tex = make_vram_texture(1024, 512);
     }
-    hw_shutdown();
+    gl_hw_shutdown();
     S = std::clamp(scale, 1, 8);
     g_read_tex = make_vram_texture(1024 * S, 512 * S);
     g_read_fbo = make_fbo(g_read_tex);
@@ -416,7 +417,7 @@ bool hw_init(int scale) {
     }
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         log_msg(LogCat::Gpu, "hardware renderer: %dx VRAM framebuffer not supported", S);
-        hw_shutdown();
+        gl_hw_shutdown();
         return false;
     }
     g_dirty = false;
@@ -466,7 +467,7 @@ static bool clip_rect(int& x, int& y, int& w, int& h) {
     return w > 0 && h > 0;
 }
 
-void hw_shutdown() {
+void gl_hw_shutdown() {
     if (!S) return;
     for (auto& c : g_caps) free_capture(c);
     free_capture(g_stash);
@@ -479,19 +480,19 @@ void hw_shutdown() {
     S = 0;
 }
 
-bool hw_active() { return S != 0; }
-int hw_scale() { return S; }
-int hw_samples() { return S ? g_samples : 0; }
-void hw_set_samples(int n) { g_samples_wanted = std::clamp(n, 1, 8); }
-int hw_samples_wanted() { return g_samples_wanted; }
-void hw_set_texture_filter(bool on) {
+bool gl_hw_active() { return S != 0; }
+int gl_hw_scale() { return S; }
+int gl_hw_samples() { return S ? g_samples : 0; }
+void gl_hw_set_samples(int n) { g_samples_wanted = std::clamp(n, 1, 8); }
+int gl_hw_samples_wanted() { return g_samples_wanted; }
+void gl_hw_set_texture_filter(bool on) {
     if (on != g_filter) flush();
     g_filter = on;
 }
 
 // ================================================================ primitives
 
-void hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim& p, const HwState& s) {
+void gl_hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim& p, const HwState& s) {
     begin_prim(p, s);
     for (const HwVtx* v : {a, b, c}) {
         const HwVtx* col = p.gouraud ? v : a;
@@ -501,7 +502,7 @@ void hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim& p
                     std::max({a->y, b->y, c->y}) + 1, s);
 }
 
-void hw_rect(int x, int y, int w, int h, int u0, int v0, bool flip_x, bool flip_y, uint32_t color, const HwPrim& p,
+void gl_hw_rect(int x, int y, int w, int h, int u0, int v0, bool flip_x, bool flip_y, uint32_t color, const HwPrim& p,
              const HwState& s) {
     if (w <= 0 || h <= 0) return;
     begin_prim(p, s);
@@ -518,7 +519,7 @@ void hw_rect(int x, int y, int w, int h, int u0, int v0, bool flip_x, bool flip_
     draw_area_dirty(x, y, x + w, y + h, s);
 }
 
-void hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, const HwPrim& p,
+void gl_hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, const HwPrim& p,
              const HwState& s) {
     begin_prim(p, s);
     if (!gouraud) c1 = c0;
@@ -541,7 +542,7 @@ void hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gour
 
 // ================================================================ VRAM operations
 
-void hw_fill(int x, int y, int w, int h, uint16_t color) {
+void gl_hw_fill(int x, int y, int w, int h, uint16_t color) {
     if (w <= 0 || h <= 0) return;
     flush();
     uint32_t c = rgba_of(color & 0x7FFF);
@@ -606,7 +607,7 @@ static void upload_rect(int x, int y, int w, int h, const uint16_t* vram) {
     }
 }
 
-void hw_upload(int x, int y, int w, int h, const uint16_t* vram) {
+void gl_hw_upload(int x, int y, int w, int h, const uint16_t* vram) {
     flush();
     // the region may wrap around the edges of VRAM
     for (int yy = y; yy < y + h;) {
@@ -623,13 +624,13 @@ void hw_upload(int x, int y, int w, int h, const uint16_t* vram) {
     }
 }
 
-void hw_upload_all(const uint16_t* vram) {
+void gl_hw_upload_all(const uint16_t* vram) {
     flush();
     upload_rect(0, 0, 1024, 512, vram);
     g_dirty = false;
 }
 
-void hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
+void gl_hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (overlaps_dirty(sx, sy, sx + w, sy + h)) sync_read();
     else flush();
@@ -647,7 +648,7 @@ void hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
     mark_dirty(dx, dy, dx + w, dy + h);
 }
 
-void hw_readback(int x, int y, int w, int h, uint16_t* vram) {
+void gl_hw_readback(int x, int y, int w, int h, uint16_t* vram) {
     flush();
     w = std::min(w, 1024 - x);
     h = std::min(h, 512 - y);
@@ -668,19 +669,19 @@ void hw_readback(int x, int y, int w, int h, uint16_t* vram) {
     }
 }
 
-void hw_capture(int slot, int x, int y, int w, int h) {
+void gl_hw_capture(int slot, int x, int y, int w, int h) {
     if (!S || slot < 0 || slot >= 16 || !clip_rect(x, y, w, h)) return;
     copy_out(g_caps[slot], x, y, w, h);
 }
 
-unsigned hw_capture_texture(int slot, int* tex_w, int* tex_h) {
+unsigned gl_hw_capture_texture(int slot, int* tex_w, int* tex_h) {
     if (!S || slot < 0 || slot >= 16 || !g_caps[slot].tex) return 0;
     *tex_w = g_caps[slot].w;
     *tex_h = g_caps[slot].h;
     return g_caps[slot].tex;
 }
 
-void hw_stash(int x, int y, int w, int h) {
+void gl_hw_stash(int x, int y, int w, int h) {
     g_stash_w = 0;
     if (!S || !clip_rect(x, y, w, h)) return;
     copy_out(g_stash, x, y, w, h);
@@ -690,7 +691,7 @@ void hw_stash(int x, int y, int w, int h) {
     g_stash_h = h;
 }
 
-void hw_unstash() {
+void gl_hw_unstash() {
     if (!S || !g_stash_w) return;
     flush();
     if (g_samples > 1) {
@@ -706,7 +707,7 @@ void hw_unstash() {
     g_stash_w = 0;
 }
 
-unsigned hw_display_texture(int x, int y, int w, int h, int* px, int* py, int* pw, int* ph) {
+unsigned gl_hw_display_texture(int x, int y, int w, int h, int* px, int* py, int* pw, int* ph) {
     if (g_samples > 1) sync_read();  // show the resolved image
     else flush();
     *px = x * S;

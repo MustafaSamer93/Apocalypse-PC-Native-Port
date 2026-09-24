@@ -21,6 +21,41 @@ FetchContent_Declare(SDL3
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(SDL3)
 
+# ---------------------------------------------------------------- Vulkan (optional backend)
+# Headers and the volk loader are enough to build (the driver's vulkan-1.dll is loaded at run
+# time); glslang is built once as a host tool to compile the Vulkan shaders to SPIR-V.
+FetchContent_Declare(VulkanHeaders
+    URL https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.275.tar.gz)
+FetchContent_Declare(volk  # used as a plain source file (SOURCE_SUBDIR skips its CMake)
+    URL https://github.com/zeux/volk/archive/refs/tags/1.3.270.tar.gz
+    SOURCE_SUBDIR none)
+set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
+FetchContent_Declare(glslang
+    URL https://github.com/KhronosGroup/glslang/archive/refs/tags/14.0.0.tar.gz)
+FetchContent_MakeAvailable(VulkanHeaders glslang volk)
+
+# Vulkan shaders (runtime/shaders/*.vert|frag) -> SPIR-V as C arrays in the build tree.
+set(SHADER_OUT ${CMAKE_BINARY_DIR}/shaders)
+file(GLOB VK_SHADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/shaders/*.vert ${CMAKE_SOURCE_DIR}/runtime/shaders/*.frag)
+set(VK_SHADER_HEADERS)
+foreach(src ${VK_SHADERS})
+    get_filename_component(name ${src} NAME)
+    string(REPLACE "." "_" var ${name})
+    set(out ${SHADER_OUT}/${name}.h)
+    add_custom_command(OUTPUT ${out}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
+        COMMAND glslang-standalone -V --target-env vulkan1.2 --vn kSpv_${var} -o ${out} ${src}
+        DEPENDS ${src} glslang-standalone
+        COMMENT "SPIR-V ${name}")
+    list(APPEND VK_SHADER_HEADERS ${out})
+endforeach()
+add_custom_target(vk_shaders DEPENDS ${VK_SHADER_HEADERS})
+
 # ---------------------------------------------------------------- generated code
 # Produced by tools/recomp/main.py from the user's own disc; never committed.
 set(GEN_DIR ${CMAKE_SOURCE_DIR}/generated)
@@ -64,7 +99,9 @@ add_executable(apocalypse
     runtime/src/present.cpp
     runtime/src/savestate.cpp
     runtime/src/smooth.cpp
-    runtime/src/sim60.cpp)
+    runtime/src/sim60.cpp
+    runtime/src/render_backend.cpp
+    runtime/src/vk_stub.cpp)
 target_include_directories(apocalypse PRIVATE runtime/include runtime/src)
 # The game is a single self-contained exe (static SDL and C runtime) in the project folder,
 # next to assets\; a Windows app, so starting it opens no console window.

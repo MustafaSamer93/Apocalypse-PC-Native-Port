@@ -56,6 +56,7 @@ void usage() {
         "  --smooth K         K images per game step (1 = original 30 fps; default: match the display)\n"
         "  --refresh HZ       display refresh rate to assume (if the detected one is wrong)\n"
         "  --sim60            60 Hz simulation in every level (default: level 1 only; F1 menu)\n"
+        "  --renderer R       opengl or vulkan (default: the F1 setting, OpenGL at first)\n"
         "keys: arrows, Z=Cross X=Circle A=Square S=Triangle Q/W=L1/R1 1/2=L2/R2\n"
         "      Enter=Start Backspace=Select Tab=fast-forward F11=fullscreen Esc=quit\n");
 }
@@ -131,6 +132,11 @@ int main(int argc, char** argv) {
         else if (a == "--sim60") {  // 60 Hz simulation in any level (sim60.cpp)
             g_sim60_force = true;
             sim60_apply();
+        }
+        else if (a == "--renderer") {  // --renderer opengl|vulkan (default: the saved setting)
+            extern int g_renderer_override;
+            std::string r = next();
+            g_renderer_override = r == "vulkan" ? 1 : r == "opengl" ? 0 : -1;
         }
         else if (a == "--refresh") {  // --refresh HZ: display refresh rate to assume
             extern float g_refresh_override;

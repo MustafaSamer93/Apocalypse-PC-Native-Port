@@ -1,4 +1,5 @@
 #include "present.h"
+#include "render_backend.h"
 
 #include <algorithm>
 #include <cmath>
@@ -245,7 +246,7 @@ void draw_image(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, 
 
 }  // namespace
 
-bool present_init(SDL_Window* window) {
+bool gl_present_init(SDL_Window* window) {
     g_win = window;
     g_ctx = SDL_GL_CreateContext(window);
     if (!g_ctx) {
@@ -276,15 +277,15 @@ bool present_init(SDL_Window* window) {
     return g_ov_surf && g_ov_ren;
 }
 
-void present_shutdown() {
+void gl_present_shutdown() {
     if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren);
     if (g_ov_surf) SDL_DestroySurface(g_ov_surf);
     if (g_ctx) SDL_GL_DestroyContext(g_ctx);
 }
 
-void present_set_vsync(bool on) { SDL_GL_SetSwapInterval(on ? 1 : 0); }
+void gl_present_set_vsync(bool on) { SDL_GL_SetSwapInterval(on ? 1 : 0); }
 
-void present_game_pixels(const uint32_t* pixels, int w, int h, const PresentOptions& o) {
+void gl_present_game_pixels(const uint32_t* pixels, int w, int h, const PresentOptions& o) {
     if (!g_sw_tex || w != g_sw_w || h != g_sw_h) {
         if (g_sw_tex) glDeleteTextures(1, &g_sw_tex);
         g_sw_tex = make_texture(w, h, GL_LINEAR);
@@ -298,13 +299,13 @@ void present_game_pixels(const uint32_t* pixels, int w, int h, const PresentOpti
     draw_image(g_sw_tex, w, h, 0, 0, w, h, h, o);
 }
 
-void present_game_texture(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, int native_h,
+void gl_present_game_texture(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, int native_h,
                           const PresentOptions& o) {
     g_last = {true, tex, tex_w, tex_h, x, y, w, h, native_h};
     draw_image(tex, tex_w, tex_h, x, y, w, h, native_h, o);
 }
 
-void present_redraw(const PresentOptions& o) {
+void gl_present_redraw(const PresentOptions& o) {
     if (!g_last.valid) {
         int ww, wh;
         SDL_GetWindowSizeInPixels(g_win, &ww, &wh);
@@ -317,14 +318,14 @@ void present_redraw(const PresentOptions& o) {
     draw_image(g_last.tex, g_last.tex_w, g_last.tex_h, g_last.x, g_last.y, g_last.w, g_last.h, g_last.native_h, o);
 }
 
-SDL_Renderer* present_overlay_begin() {
+SDL_Renderer* gl_present_overlay_begin() {
     SDL_SetRenderDrawColor(g_ov_ren, 0, 0, 0, 0);
     SDL_SetRenderDrawBlendMode(g_ov_ren, SDL_BLENDMODE_NONE);
     SDL_RenderClear(g_ov_ren);
     return g_ov_ren;
 }
 
-void present_overlay_end() {
+void gl_present_overlay_end() {
     SDL_RenderPresent(g_ov_ren);  // software renderer: flushes into the surface
     glBindTexture(GL_TEXTURE_2D, g_ov_tex);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, g_ov_surf->pitch / 4);
@@ -348,7 +349,7 @@ void present_overlay_end() {
 }
 
 // --screenshot FRAME PATH support: saves the back buffer as a BMP before swapping.
-void present_save_bmp(const char* path) {
+void gl_present_save_bmp(const char* path) {
     int w, h;
     SDL_GetWindowSizeInPixels(g_win, &w, &h);
     std::vector<uint8_t> px((size_t)w * h * 4);
@@ -365,9 +366,9 @@ void present_save_bmp(const char* path) {
     if (s) SDL_DestroySurface(s);
 }
 
-void present_swap() { SDL_GL_SwapWindow(g_win); }
+void gl_present_swap() { SDL_GL_SwapWindow(g_win); }
 
-bool present_window_to_game(float wx, float wy, float* x, float* y) {
+bool gl_present_window_to_game(float wx, float wy, float* x, float* y) {
     // SDL reports window coordinates; the viewport was set in pixels
     int ww, wh, pw, ph;
     SDL_GetWindowSize(g_win, &ww, &wh);
