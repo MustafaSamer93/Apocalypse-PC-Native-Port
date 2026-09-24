@@ -1,27 +1,28 @@
-// 60 Hz simulation prototype (--sim60).
+// 60 Hz simulation (level 1 by default; F1 -> Simulation; --sim60 for every level).
 //
 // The level loop (80030AD4) normally calls the tick (8002FF90) twice per rendered frame
 // and waits for two VBlanks; the tick advances a 60 Hz counter (gp+0x438) and updates
 // the whole world only when that counter is even, so the game simulates and renders at
-// 30 Hz. With psx_opt_sim60 the loop does one tick, one render and one VBlank wait per
-// iteration (OPTIONAL_CALLS in tools/recomp/emit.py), the emulated CPU runs 4x faster so
-// that fits in a VBlank (main.cpp), and:
+// 30 Hz. In 60 Hz mode the loop does one tick, one render and one VBlank wait per
+// iteration (OPTIONAL_CALLS in tools/recomp/emit.py), the emulated CPU runs 8x faster so
+// that fits in a VBlank, and:
 //   even ticks: the game's own full update (everything, as before);
-//   odd ticks:  the player and the cameras only (they did nothing before).
-// So the player and cameras update 60 times a second and everything else 30.
+//   odd ticks:  the player and the cameras (which did nothing before).
+// So the player and cameras - what the controls act on - update 60 times a second.
 //
-// Their per-update amounts still assume 30 Hz. Measured on the player (level 1): position
-// += velocity; forward/strafe speed ramps 25,600 per update to 204,800 through a step
-// counter (+0x260); sideways drift halves every update; animation and age counters +1.
-// Retiming, per 60 Hz update:
-//   - continuous state (position, velocity vectors, camera vectors) moves by half of
-//     the change the update made; integrated motion (speed from acceleration, position
-//     from speed) then covers the same distance in the same time as at 30 Hz;
-//   - whole-number counters (animation frame, speed-ramp step, age) keep their 30 Hz
-//     rate: an odd-tick +1 is undone.
-// Everything else still moves at 30 Hz; so that it moves evenly on a 60 fps display, the
-// render right after a world update draws those objects half way from where they were
-// before it (half a step behind), and the next render draws them where they are.
+// Their per-update amounts assume 30 Hz. Measured on the player (level 1): position +=
+// velocity; forward/strafe speed ramps 25,600 per update to 204,800 through a step counter
+// (+0x260); the animation frame (+0x18, copied to +0x134/+0x136) advances by one. Retiming,
+// per 60 Hz update:
+//   - continuous state (position, velocity vectors, camera vectors) moves by half of the
+//     change the update made, so motion covers the same distance in the same time;
+//   - whole-number counters (animation frame, speed step) keep their 30 Hz rate: an
+//     odd-tick +1 is undone;
+//   - damage only lands on world-update ticks (shots move at 30 Hz and would count twice).
+// Enemies, items and shots keep their 30 Hz logic; so they move evenly at 60 fps, the render
+// right after a world update draws them half way (position and rotation) from where they
+// were before it, and the next render draws them where they are.
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -30,6 +31,40 @@
 #include "psx.h"
 
 int psx_opt_sim60 = 0;
+
+// Setting: 0 = 30 Hz everywhere (original), 1 = 60 Hz in level 1 (the tested level),
+// 2 = 60 Hz in every level (untested). Attract-mode demos always run at 30 Hz: they replay
+// input recorded per 30 Hz update.
+int g_sim60_setting = 1;
+bool g_sim60_force = false;  // --sim60: on in any level, even when it is not known yet
+std::string g_sim60_level;  // base name of the level's trigger file ("prsn" = level 1)
+bool g_sim60_demo = false;
+
+void sim60_apply() {
+    bool on = !g_sim60_demo &&
+              (g_sim60_force || (!g_sim60_level.empty() && (g_sim60_setting == 2 ||
+                                                            (g_sim60_setting == 1 && g_sim60_level == "prsn"))));
+    if ((on ? 1 : 0) != psx_opt_sim60)
+        log_msg(LogCat::Host, "60 Hz simulation %s (level \"%s\"%s)", on ? "on" : "off", g_sim60_level.c_str(),
+                g_sim60_demo ? ", demo" : "");
+    psx_opt_sim60 = on ? 1 : 0;
+    psx_cpi_q = on ? 1 : 4 * PSX_CYCLES_PER_INSN;  // 8x CPU: an update and a render per VBlank
+}
+
+// Every file the game loads (bios.cpp): a level starts with its "<name>_t.trg".
+void sim60_note_file(const std::string& file) {
+    // the game prints a newline, then the name: keep just the name, lower case
+    std::string f;
+    for (char ch : file)
+        if (!std::isspace((unsigned char)ch)) f += (char)std::tolower((unsigned char)ch);
+    size_t t = f.find("_t.trg");
+    if (t != std::string::npos) {
+        g_sim60_level = f.substr(0, t);
+        g_sim60_demo = false;
+    }
+    if (f.find(".dem") != std::string::npos) g_sim60_demo = true;
+    sim60_apply();
+}
 
 namespace {
 
@@ -48,9 +83,15 @@ constexpr uint32_t kContactsEnd = 0x80063CF0;
 constexpr uint32_t kUpdateCameras = 0x80037258;  // update one small-object list (a0 = head)
 
 // Player object fields (vectors are x, y, z).
-constexpr int kPlayerVecs[] = {0x04, 0x68, 0x98};  // position, world velocity, local velocity
-constexpr int kPlayerCounters[] = {0x018, 0x134, 0x136, 0x260};  // age, animation (2 halves), speed step
+// position, world and local velocity. The velocities are mostly recomputed each update
+// (from the speed step and facing); halving them matters where they are integrated (falls).
+constexpr int kPlayerVecs[] = {0x04, 0x68, 0x98};
+constexpr int kPlayerCounters[] = {0x018, 0x134, 0x136, 0x260};  // animation frame (+ 2 copies), speed step
 constexpr int kCameraVecs[] = {0x18, 0x48, 0x54, 0x60};
+// Health (16-bit). Enemy shots and hazards move only on the 30 Hz world update, so one
+// still touching the player during the extra update would count twice: the player only
+// takes damage on world-update ticks.
+constexpr int kPlayerHealth = 0xDA;
 
 struct Vec3 {
     int32_t v[3];
@@ -62,8 +103,19 @@ bool g_in_render = false;
 // Positions of the other objects before the last world update (for the render after it).
 struct ObjPos {
     uint32_t obj;
-    int32_t before[3], after[3];
+    int32_t before[3], after[3];      // position (+0x04)
+    int16_t rot_before[3], rot_after[3];  // rotation (+0x10), 12-bit angles
 };
+
+constexpr int kObjRot = 0x10;
+
+// Half way between two 12-bit angles, the short way round; large turns snap.
+int16_t mid_angle(int16_t a, int16_t b, bool* ok) {
+    int d = ((b - a) & 0xFFF);
+    if (d >= 0x800) d -= 0x1000;
+    if (d > 0x400 || d < -0x400) *ok = false;
+    return (int16_t)(a + d / 2);
+}
 std::vector<ObjPos> g_moved;
 bool g_mid_pending = false;
 
@@ -83,6 +135,7 @@ struct Before {
     uint32_t player = 0;
     Vec3 pv[std::size(kPlayerVecs)];
     uint16_t counters[std::size(kPlayerCounters)];
+    int16_t health = 0;
     uint32_t cams[8] = {};
     Vec3 cv[8][std::size(kCameraVecs)];
     int ncams = 0;
@@ -95,6 +148,7 @@ Before capture(R3000* c) {
         for (size_t i = 0; i < std::size(kPlayerVecs); i++) b.pv[i] = rd(c, b.player + kPlayerVecs[i]);
         for (size_t i = 0; i < std::size(kPlayerCounters); i++)
             b.counters[i] = (uint16_t)MEM_R16(c, b.player + kPlayerCounters[i]);
+        b.health = (int16_t)MEM_R16(c, b.player + kPlayerHealth);
     }
     uint32_t cam = MEM_R32(c, kCameraList);
     for (; valid_ptr(cam) && b.ncams < 8; cam = MEM_R32(c, cam + 4)) {
@@ -125,6 +179,7 @@ void retime(R3000* c, const Before& b, bool odd) {
                 uint32_t a = p + kPlayerCounters[i];
                 if ((uint16_t)(MEM_R16(c, a) - b.counters[i]) == 1) MEM_W16(c, a, b.counters[i]);
             }
+            if ((int16_t)MEM_R16(c, p + kPlayerHealth) < b.health) MEM_W16(c, p + kPlayerHealth, (uint16_t)b.health);
         }
     }
     uint32_t cam = MEM_R32(c, kCameraList);
@@ -171,6 +226,11 @@ int sim60_render(R3000* c) {
     for (const ObjPos& op : g_moved) {
         if (rd(c, op.obj + 4).v[0] != op.after[0]) continue;  // moved again or gone
         for (int k = 0; k < 3; k++) MEM_W32(c, op.obj + 4 + 4 * k, (uint32_t)(op.before[k] + (op.after[k] - op.before[k]) / 2));
+        bool turn = true;
+        int16_t mid[3];
+        for (int k = 0; k < 3; k++) mid[k] = mid_angle(op.rot_before[k], op.rot_after[k], &turn);
+        if (turn)
+            for (int k = 0; k < 3; k++) MEM_W16(c, op.obj + kObjRot + 2 * k, (uint16_t)mid[k]);
         set.push_back(&op);
     }
     const uint32_t ra = c->r[31], sp = c->r[29];
@@ -179,8 +239,10 @@ int sim60_render(R3000* c) {
     g_in_render = false;
     c->r[31] = ra;
     c->r[29] = sp;
-    for (const ObjPos* op : set)
+    for (const ObjPos* op : set) {
         for (int k = 0; k < 3; k++) MEM_W32(c, op->obj + 4 + 4 * k, (uint32_t)op->after[k]);
+        for (int k = 0; k < 3; k++) MEM_W16(c, op->obj + kObjRot + 2 * k, (uint16_t)op->rot_after[k]);
+    }
     return 1;
 }
 
@@ -199,7 +261,9 @@ extern "C" int psx_hook_tick(R3000* c) {
             uint32_t o = MEM_R32(c, head);
             for (int n = 0; valid_ptr(o) && n < 4096; n++, o = MEM_R32(c, o + 0x1C)) {
                 Vec3 p = rd(c, o + 4);
-                objs.push_back({o, {p.v[0], p.v[1], p.v[2]}, {}});
+                ObjPos op{o, {p.v[0], p.v[1], p.v[2]}, {}, {}, {}};
+                for (int k = 0; k < 3; k++) op.rot_before[k] = (int16_t)MEM_R16(c, o + kObjRot + 2 * k);
+                objs.push_back(op);
             }
         }
         g_in_tick = true;
@@ -214,6 +278,8 @@ extern "C" int psx_hook_tick(R3000* c) {
                 int64_t d = (int64_t)p.v[k] - op.before[k];
                 if (d) moved = true;
                 if (d > 0x400000 || d < -0x400000) near = false;
+                op.rot_after[k] = (int16_t)MEM_R16(c, op.obj + kObjRot + 2 * k);
+                if (op.rot_after[k] != op.rot_before[k]) moved = true;
             }
             if (moved && near) g_moved.push_back(op);
         }

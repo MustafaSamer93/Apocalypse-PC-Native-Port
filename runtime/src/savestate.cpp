@@ -71,6 +71,13 @@ void serialize(StateIO& s, R3000* c, uint32_t& pc) {
     spu_state(s);
     mdec_state(s);
     s.marker(0x454E4421);  // "END!"
+    // optional trailer (absent in older files): which level is running, for the 60 Hz mode
+    if (!s.loading() || !s.at_end()) {
+        s.marker(0x53363020);  // "S60 "
+        s.str(g_sim60_level);
+        s(g_sim60_demo);
+        if (s.loading()) sim60_apply();
+    }
 }
 
 bool save_to(int slot, R3000* c, uint32_t pc) {
@@ -208,6 +215,7 @@ void state_note_level_start() {
 }
 
 void state_note_file_loaded(const std::string& name) {
+    sim60_note_file(name);
     g_last_load_frame = host_frame_count();
     if (name.find(".dem") != std::string::npos || name.find(".DEM") != std::string::npos) g_demo_loaded = true;
     // level files (".trg" is loaded first for every level) start a new level context

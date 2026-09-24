@@ -14,6 +14,7 @@
 #include "savestate.h"
 #include "smooth.h"
 
+constexpr const char* kVersion = "v0.1.0 beta";
 int g_force_smooth = 0;  // --smooth K: images per game step regardless of the display
 float g_refresh_override = 0;  // --refresh HZ: assume this display refresh rate
 
@@ -99,6 +100,14 @@ PresentOptions present_options() {
     o.aspect = g_gfx.aspect;
     o.crt = g_gfx.crt;
     return o;
+}
+
+// Settings screen text for the simulation rate choice.
+std::string sim60_label() {
+    const char* names[] = {"30 Hz original", "60 Hz level 1", "60 Hz all (beta)"};
+    std::string s = names[std::clamp(g_sim60_setting, 0, 2)];
+    if (psx_opt_sim60) s += " ON";  // active in the current level
+    return s;
 }
 
 // Settings screen text for the frame rate choice.
@@ -201,6 +210,7 @@ void save_settings() {
     std::fprintf(f, "# Written by the game's settings screen (F1). Safe to delete to reset.\n");
     std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d\n", g_gfx.scale, (int)g_gfx.aspect,
                  g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
+    std::fprintf(f, "sim %d\n", g_sim60_setting);
     if (g_key_custom) {
         std::fprintf(f, "keys");
         for (int i = 0; i < 16; i++)
@@ -235,6 +245,10 @@ void load_settings() {
             if (got == 5) g_gfx.fps = std::clamp(fps / 30 * 30, 0, 150);
             else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
                 g_gfx.fps = smooth ? 0 : 30;  // older settings file
+            continue;
+        }
+        if (int sim; std::sscanf(line, "sim %d", &sim) == 1) {
+            g_sim60_setting = std::clamp(sim, 0, 2);
             continue;
         }
         if (std::strncmp(line, "keys", 4) == 0) {
@@ -724,7 +738,8 @@ void host_present(const GpuDisplay& d) {
         dt_min = ~0ull;
         dt_max = 0;
         char title[96];
-        std::snprintf(title, sizeof title, "Apocalypse - %.0f fps%s", images, g_turbo ? " (fast-forward)" : "");
+        std::snprintf(title, sizeof title, "Apocalypse %s - %.0f fps%s", kVersion, images,
+                      g_turbo ? " (fast-forward)" : "");
         SDL_SetWindowTitle(g_window, title);
         LOG(Host, "frame %llu: %.1f Hz emulated, %.1f images/s", (unsigned long long)g_frame, fps, images);
         fps_t0 = now;
@@ -948,11 +963,15 @@ static void run_settings_menu() {
                         gfx_changed = true;
                         break;
                     }
-                    case R_SIM:  // 60 Hz simulation prototype (sim60.cpp); not saved
-                        psx_opt_sim60 = !psx_opt_sim60;
-                        psx_cpi_q = psx_opt_sim60 ? 2 : 4 * PSX_CYCLES_PER_INSN;
+                    case R_SIM: {  // 60 Hz simulation (sim60.cpp)
+                        static const int order[] = {1, 0, 2};  // level 1, off, all levels
+                        int i = 0;
+                        while (i < 2 && order[i] != g_sim60_setting) i++;
+                        g_sim60_setting = order[(i + step + 3) % 3];
+                        sim60_apply();
                         gfx_changed = true;
                         break;
+                    }
                     case R_DEVICE: dev_index = (dev_index + entries + step) % entries; break;
                     case R_SAVE:
                     case R_LOAD:
@@ -1033,7 +1052,7 @@ static void run_settings_menu() {
                     row("CRT filter", g_gfx.crt ? "On" : "Off"),
                     row("Smooth textures", g_gfx.texture_filter ? "On" : "Off"),
                     row("Frame rate", fps_label()),
-                    row("Simulation", psx_opt_sim60 ? "60 Hz (prototype)" : "30 Hz (original)"),
+                    row("Simulation", sim60_label()),
                     row("Controls", dev_line),
                     std::string("Set up buttons") + (custom ? "  (custom)" : "  (default)"),
                     "Reset buttons to default",

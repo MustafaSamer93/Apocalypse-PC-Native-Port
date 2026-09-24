@@ -86,6 +86,14 @@ void core_ghost_begin(R3000* c, uint64_t cycle_budget, std::jmp_buf* abort);
 int core_ghost_end(R3000* c);  // returns how many sound/CD/movie writes were dropped
 bool core_in_ghost();
 void smooth_on_flip();         // the game showed a new frame (GP1 display start)
+
+// 60 Hz simulation (sim60.cpp)
+extern int g_sim60_setting;    // 0 = 30 Hz, 1 = 60 Hz in level 1, 2 = 60 Hz in every level
+extern bool g_sim60_force;     // --sim60
+extern std::string g_sim60_level;
+extern bool g_sim60_demo;
+void sim60_apply();
+void sim60_note_file(const std::string& file);
 int gpu_set_renderer(int scale);  // 0 = software, 1..8 = OpenGL at that scale
 
 // Widescreen hack: horizontal scale applied to GTE screen coordinates (1 = off).

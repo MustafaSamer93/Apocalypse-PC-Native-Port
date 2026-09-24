@@ -16,6 +16,7 @@ public:
 
     bool loading() const { return loading_; }
     bool ok() const { return ok_; }
+    bool at_end() const { return pos_ >= buf_.size(); }
     std::vector<uint8_t>& data() { return buf_; }
 
     void raw(void* p, size_t n) {

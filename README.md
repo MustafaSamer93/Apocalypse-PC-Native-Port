@@ -22,6 +22,7 @@ executable from your disc image, and the program reads everything else from it a
 | Memory card (`saves/card1.mcr`, emulator-compatible) | working |
 | Save states (5 slots) and auto-save (level start + every 5 minutes) | working |
 | Frame rate 30 / 60 / 90 / 120 / 150 fps, or Auto (match the display); setting "Frame rate" | working; the game still simulates at 30 Hz |
+| 60 Hz simulation in level 1: player and camera update 60 times a second, everything moves every frame (setting "Simulation") | working in level 1; other levels: optional, untested |
 | HD texture packs | not implemented |
 | Linux | deferred (the code is portable; build scripts are Windows-only for now) |
 
@@ -54,8 +55,8 @@ cmake --build build-clang
 | fire toward a direction | left mouse button (toward the cursor) | right stick |
 
 F1 (or Select+Start held) = settings: save/load states, resolution, aspect ratio, CRT
-filter, texture smoothing, frame rate (original 30 fps or smooth), controller choice and
-button remapping.
+filter, texture smoothing, frame rate (original 30 fps or smooth), simulation (60 Hz in
+level 1 by default), controller choice and button remapping.
 F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = quit.
 
 ## Command line
@@ -64,6 +65,7 @@ F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = qu
 apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N]
 ```
 
+`--sim60` turns the 60 Hz simulation on in every level (default: level 1 only).
 `--smooth K` forces K images per game step (1 = the original 30 fps) and `--refresh HZ`
 overrides the detected display refresh rate. A frame rate above the display's refresh is
 presented on a timer with vsync off (the counter in the window title shows it).
@@ -97,6 +99,7 @@ runtime/
   src/mdec.cpp         movie decoder
   src/hw.cpp           DMA, root counters, controller port (SIO0)
   src/smooth.cpp       extra frames between the game's 30 Hz steps (smooth frame rate)
+  src/sim60.cpp        60 Hz simulation (player and camera) for level 1
   src/host_sdl.cpp     window, audio, input, frame pacing (SDL3)
 ```
 
@@ -116,5 +119,10 @@ Things the game does that the tools have to handle:
   two steps (it did so when the PS1 fell behind). `runtime/src/smooth.cpp` runs that render again
   for fractions of a step, outside emulated time and with the machine rolled back afterwards, and
   shows those images between the game's own.
+- **A 60 Hz simulation for level 1.** `runtime/src/sim60.cpp` makes the level loop tick and
+  render every VBlank, updates the player and cameras on the ticks that did nothing, and retimes
+  their per-update amounts (half of each update's change for positions and velocities; whole-
+  number counters such as animation frames keep their 30 Hz rate). Enemies and shots keep their
+  30 Hz logic and are drawn half a step behind so they move every frame.
 - **The game reads controllers directly over SIO.** Byte and `/ACK` timing are modelled,
   because the driver clears IRQ flags between the reply and the `/ACK`.
