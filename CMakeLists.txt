@@ -66,6 +66,14 @@ add_executable(apocalypse
     runtime/src/smooth.cpp
     runtime/src/sim60.cpp)
 target_include_directories(apocalypse PRIVATE runtime/include runtime/src)
+# The game is a single self-contained exe (static SDL and C runtime) in the project folder,
+# next to assets\; a Windows app, so starting it opens no console window.
+set_target_properties(apocalypse PROPERTIES
+    WIN32_EXECUTABLE TRUE
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_SOURCE_DIR}
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR})
 
 # GTE known-answer tests (no game code needed)
 add_executable(gte_test runtime/tests/gte_test.cpp runtime/src/gte.cpp)

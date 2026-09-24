@@ -1,6 +1,7 @@
 # Copyrighted game data and anything derived from it never goes in the repo.
-asset/*
-!asset/README.txt
+assets/*
+!assets/README.txt
+/apocalypse.exe
 extracted/
 generated/
 build/

@@ -31,9 +31,11 @@ executable from your disc image, and the program reads everything else from it a
 Requirements: Visual Studio 2022+ with the C++ workload and the **C++ Clang tools**,
 Python 3.10+, Git (CMake fetches SDL3).
 
-1. Put `Apocalypse (USA).cue` and its two `.bin` tracks in `asset\`.
+1. Put `Apocalypse (USA).cue` and its two `.bin` tracks in `assets\`.
 2. Run `build.bat`.
-3. Run `build-clang\apocalypse.exe` from the project folder.
+3. Run `apocalypse.exe`, which the build puts in the project folder. It needs nothing else
+   installed: SDL and the C runtime are built in. It finds `assets\` next to itself, and
+   keeps `saves\` and `settings.ini` there too.
 
 What `build.bat` does:
 

@@ -8,6 +8,15 @@
 
 #include <csetjmp>
 
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>  // the Windows entry point for a windowed (non-console) exe
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include "memcard.h"
 #include "psx.h"
 #include "savestate.h"
@@ -40,7 +49,7 @@ uint32_t fnv1a(const uint8_t* p, size_t n) {
 void usage() {
     std::printf(
         "usage: apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--log cats]\n"
-        "  --cue PATH         disc image cue sheet (default: asset/Apocalypse (USA).cue)\n"
+        "  --cue PATH         disc image cue sheet (default: assets/Apocalypse (USA).cue)\n"
         "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
         "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
@@ -74,8 +83,29 @@ uint32_t load_exe_from_disc(R3000* c) {
 
 }  // namespace
 
+// The exe is a Windows app (no console window of its own). Its log output still reaches a
+// file or pipe it is redirected to; started from a terminal, it writes there instead.
+void attach_console() {
+#ifdef _WIN32
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    if (err && err != INVALID_HANDLE_VALUE && GetFileType(err) != FILE_TYPE_UNKNOWN) return;  // redirected
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* f;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+    }
+#endif
+}
+
 int main(int argc, char** argv) {
-    std::string cue = "asset/Apocalypse (USA).cue";
+    attach_console();
+    // Everything the game uses sits next to the exe (the assets and saves folders,
+    // settings.ini), wherever it was started from.
+    if (const char* base = SDL_GetBasePath()) {
+        std::error_code ec;
+        std::filesystem::current_path(std::filesystem::u8path(base), ec);
+    }
+    std::string cue = "assets/Apocalypse (USA).cue";
     std::string card_dir = "saves";
     int scale = 0;  // window: 0 = 1080 lines or as much as fits
     bool interp_only = false;  // debugging: run everything in the interpreter
