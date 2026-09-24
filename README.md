@@ -15,10 +15,14 @@ executable from your disc image, and the program reads everything else from it a
 | Boot, BIOS (high-level reimplementation) | working |
 | FMV (MDEC + CD streaming) | working |
 | 2D (title, HUD, menus) | working |
-| 3D gameplay (GTE + software rasterizer) | working in attract demos and new games |
-| Controller (keyboard / XInput gamepads via SDL3; F1 = settings) | working |
-| Sound effects, XA speech/music, CD audio | working; SPU reverb not implemented yet |
+| 3D gameplay (GTE + OpenGL renderer, 1x-8x internal resolution) | working |
+| 4:3 / 16:9 / 16:10 (widescreen widens the 3D view), CRT filter, texture smoothing | working |
+| Keyboard + mouse, XInput gamepads (twin-stick aiming, rumble), in-game button remapping | working |
+| Sound effects, XA speech/music, CD audio, SPU reverb | working |
 | Memory card (`saves/card1.mcr`, emulator-compatible) | working |
+| Save states (5 slots) and auto-save (level start + every 5 minutes) | working |
+| Higher frame rates | not possible: the game logic advances one step per rendered frame (30 fps) |
+| HD texture packs | not implemented |
 | Linux | deferred (the code is portable; build scripts are Windows-only for now) |
 
 ## Building (Windows)
@@ -43,12 +47,15 @@ cmake --build build-clang
 
 | PlayStation | Keyboard | Gamepad |
 |---|---|---|
-| D-pad | arrow keys | D-pad / left stick |
-| Cross / Circle / Square / Triangle | Z / X / A / S | South / East / West / North |
-| L1 / R1 / L2 / R2 | Q / W / 1 / 2 | shoulders / triggers |
+| D-pad | WASD / arrow keys | D-pad / left stick |
+| Cross / Circle / Square / Triangle | K / L / J / I | South / East / West / North |
+| L1 / R1 / L2 / R2 | Q / E / Z / C | shoulders / triggers |
 | Start / Select | Enter / Backspace | Start / Back |
+| fire toward a direction | left mouse button (toward the cursor) | right stick |
 
-Tab = fast-forward, F11 = fullscreen, Esc = quit.
+F1 (or Select+Start held) = settings: save/load states, resolution, aspect ratio, CRT
+filter, texture smoothing, controller choice and button remapping.
+F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = quit.
 
 ## Command line
 
