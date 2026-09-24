@@ -30,11 +30,14 @@ struct GfxSettings {
     Aspect aspect = Aspect::A4_3;
     bool crt = false;
     bool texture_filter = false;
-    bool smooth = true;     // extra frames between the game's 30 Hz steps (smooth.cpp)
+    int fps = 0;            // images per second: 0 = match the display, 30 = original, 60..150 (smooth.cpp)
 };
 GfxSettings g_gfx;
 float g_refresh_hz = 60.0f;  // display refresh rate
-bool g_multi_present = false;  // display faster than 60 Hz: several refreshes per emulated vblank
+bool g_multi_present = false;  // not one image per emulated vblank: host_throttle_frame presents
+bool g_present_vsync = true;   // ...paced by the display (else by a timer, for rates above its refresh)
+uint64_t g_next_present_ns = 0;
+constexpr int kFpsChoices[] = {0, 30, 60, 90, 120, 150};
 int g_active_scale = -1;    // renderer actually in use
 
 // Every connected controller drives player 1 (Apocalypse is single-player). Devices SDL
@@ -98,12 +101,23 @@ PresentOptions present_options() {
     return o;
 }
 
+// Settings screen text for the frame rate choice.
+std::string fps_label() {
+    if (g_gfx.fps == 30) return "30 (original)";
+    if (g_active_scale <= 0) return "30 (others need 1x+)";
+    int rate = g_gfx.fps ? g_gfx.fps : 30 * smooth_factor_for_refresh(g_refresh_hz);
+    std::string s = g_gfx.fps ? std::to_string(rate) : "Auto: " + std::to_string(rate);
+    if ((float)rate > g_refresh_hz + 2.0f) s += " (no vsync)";
+    return s;
+}
+
 // Applies graphics settings that affect emulation (renderer, widescreen projection).
 // Images per game step for the current settings and display (1 = the original 30 fps).
 int smooth_target() {
     if (g_force_smooth) return g_force_smooth;
-    if (!g_gfx.smooth || g_active_scale <= 0) return 1;  // needs the OpenGL renderer
-    return smooth_factor_for_refresh(g_refresh_hz);
+    if (g_active_scale <= 0) return 1;  // extra images need the OpenGL renderer
+    if (g_gfx.fps == 0) return smooth_factor_for_refresh(g_refresh_hz);
+    return std::clamp(g_gfx.fps / 30, 1, 5);
 }
 
 void apply_graphics() {
@@ -111,7 +125,12 @@ void apply_graphics() {
     if (!g_gl_ok) g_active_scale = 0;
     hw_set_texture_filter(g_gfx.texture_filter);
     smooth_set_factor(smooth_target());
-    g_multi_present = smooth_factor() >= 2 && g_refresh_hz > 61.5f;
+    // A 60 Hz display at 60 images/s shows one image per emulated vblank (vsync pacing);
+    // other combinations present from host_throttle_frame: in step with the display when
+    // it is at least as fast as the image rate, otherwise on a timer without vsync.
+    const float rate = 30.0f * (float)smooth_factor();
+    g_multi_present = smooth_factor() >= 2 && !(g_vsync_pacing && smooth_factor() == 2);
+    g_present_vsync = rate <= g_refresh_hz + 2.0f;
     switch (g_gfx.aspect) {
         case Aspect::A16_9: g_gte_widescreen = 0.75f; break;       // (4/3) / (16/9)
         case Aspect::A16_10: g_gte_widescreen = 5.0f / 6.0f; break; // (4/3) / (16/10)
@@ -179,8 +198,8 @@ void save_settings() {
     FILE* f = std::fopen(kSettingsFile, "w");
     if (!f) return;
     std::fprintf(f, "# Written by the game's settings screen (F1). Safe to delete to reset.\n");
-    std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d smooth=%d\n", g_gfx.scale, (int)g_gfx.aspect,
-                 g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.smooth ? 1 : 0);
+    std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d\n", g_gfx.scale, (int)g_gfx.aspect,
+                 g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
     if (g_key_custom) {
         std::fprintf(f, "keys");
         for (int i = 0; i < 16; i++)
@@ -205,14 +224,16 @@ void load_settings() {
     if (!f) return;
     char line[1024];
     while (std::fgets(line, sizeof line, f)) {
-        int sc, as, crt, filt, smooth;
-        int got = std::sscanf(line, "gfx scale=%d aspect=%d crt=%d filter=%d smooth=%d", &sc, &as, &crt, &filt, &smooth);
+        int sc, as, crt, filt, fps, smooth;
+        int got = std::sscanf(line, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d", &sc, &as, &crt, &filt, &fps);
         if (got >= 4) {
             g_gfx.scale = std::clamp(sc, 0, 8);
             g_gfx.aspect = (Aspect)std::clamp(as, 0, 3);
             g_gfx.crt = crt != 0;
             g_gfx.texture_filter = filt != 0;
-            if (got == 5) g_gfx.smooth = smooth != 0;
+            if (got == 5) g_gfx.fps = std::clamp(fps / 30 * 30, 0, 150);
+            else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
+                g_gfx.fps = smooth ? 0 : 30;  // older settings file
             continue;
         }
         if (std::strncmp(line, "keys", 4) == 0) {
@@ -919,7 +940,13 @@ static void run_settings_menu() {
                     case R_ASPECT: g_gfx.aspect = (Aspect)(((int)g_gfx.aspect + step + 4) % 4); gfx_changed = true; break;
                     case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
                     case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
-                    case R_FPS: g_gfx.smooth = !g_gfx.smooth; gfx_changed = true; break;
+                    case R_FPS: {
+                        int n = (int)std::size(kFpsChoices), i = 0;
+                        while (i < n - 1 && kFpsChoices[i] != g_gfx.fps) i++;
+                        g_gfx.fps = kFpsChoices[(i + step + n) % n];
+                        gfx_changed = true;
+                        break;
+                    }
                     case R_DEVICE: dev_index = (dev_index + entries + step) % entries; break;
                     case R_SAVE:
                     case R_LOAD:
@@ -999,10 +1026,7 @@ static void run_settings_menu() {
                     row("Aspect ratio", kAspect[(int)g_gfx.aspect]),
                     row("CRT filter", g_gfx.crt ? "On" : "Off"),
                     row("Smooth textures", g_gfx.texture_filter ? "On" : "Off"),
-                    row("Frame rate", !g_gfx.smooth ? std::string("Original (30 fps)")
-                                      : g_active_scale <= 0 ? std::string("Smooth (needs 1x+)")
-                                      : "Smooth (" + std::to_string(30 * smooth_factor_for_refresh(g_refresh_hz)) +
-                                            " fps)"),
+                    row("Frame rate", fps_label()),
                     row("Controls", dev_line),
                     std::string("Set up buttons") + (custom ? "  (custom)" : "  (default)"),
                     "Reset buttons to default",
@@ -1021,7 +1045,7 @@ static void run_settings_menu() {
 
 void host_throttle_frame() {
     bool multi = g_multi_present && !g_turbo && g_gl_ok;
-    bool want_vsync = (g_vsync_pacing || multi) && !g_turbo;
+    bool want_vsync = (multi ? g_present_vsync : g_vsync_pacing) && !g_turbo;
     if (want_vsync != g_vsync_active) {
         present_set_vsync(want_vsync);
         g_vsync_active = want_vsync;
@@ -1033,16 +1057,31 @@ void host_throttle_frame() {
     uint64_t now = SDL_GetTicksNS();
     g_next_frame_ns += FRAME_NS;
     if (multi) {
-        // Display faster than 60 Hz: show this emulated vblank on as many refreshes as fit
-        // before the next one is due (each swap waits for the display), each picking the
-        // image for its moment in time.
+        // Several images per emulated vblank, each picking the image for its moment in time.
         const uint64_t start = g_next_frame_ns - FRAME_NS;
-        const uint64_t refresh = (uint64_t)(1e9 / g_refresh_hz);
-        for (bool drawn = false;; drawn = true) {
-            now = SDL_GetTicksNS();
-            if (drawn && now + refresh / 2 > g_next_frame_ns) break;
-            double frac = std::clamp((double)(int64_t)(now - start) / (double)FRAME_NS, 0.0, 0.999);
-            draw_game(g_last_display, frac);
+        auto frac_at = [&](uint64_t t) {
+            return std::clamp((double)(int64_t)(t - start) / (double)FRAME_NS, 0.0, 0.999);
+        };
+        if (g_present_vsync) {
+            // As many display refreshes as fit before the next vblank is due (each swap
+            // waits for the display).
+            const uint64_t refresh = (uint64_t)(1e9 / g_refresh_hz);
+            for (bool drawn = false;; drawn = true) {
+                now = SDL_GetTicksNS();
+                if (drawn && now + refresh / 2 > g_next_frame_ns) break;
+                draw_game(g_last_display, frac_at(now));
+            }
+        } else {
+            // The image rate is above the display refresh: present on our own clock.
+            const uint64_t period = (uint64_t)(1e9 / (30.0 * smooth_factor()));
+            if (g_next_present_ns + 4 * period < start || g_next_present_ns > g_next_frame_ns + period)
+                g_next_present_ns = start;  // (re)start in step with emulated time
+            while (g_next_present_ns < g_next_frame_ns) {
+                now = SDL_GetTicksNS();
+                if (g_next_present_ns > now) SDL_DelayPrecise(g_next_present_ns - now);
+                draw_game(g_last_display, frac_at(g_next_present_ns));
+                g_next_present_ns += period;
+            }
         }
         now = SDL_GetTicksNS();
     }

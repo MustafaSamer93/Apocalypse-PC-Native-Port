@@ -21,7 +21,7 @@ executable from your disc image, and the program reads everything else from it a
 | Sound effects, XA speech/music, CD audio, SPU reverb | working |
 | Memory card (`saves/card1.mcr`, emulator-compatible) | working |
 | Save states (5 slots) and auto-save (level start + every 5 minutes) | working |
-| Smooth frame rate: 60 / 90 / 120 / 150 fps to match the display (setting "Frame rate") | working; the game still simulates at 30 Hz |
+| Frame rate 30 / 60 / 90 / 120 / 150 fps, or Auto (match the display); setting "Frame rate" | working; the game still simulates at 30 Hz |
 | HD texture packs | not implemented |
 | Linux | deferred (the code is portable; build scripts are Windows-only for now) |
 
@@ -65,7 +65,8 @@ apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N]
 ```
 
 `--smooth K` forces K images per game step (1 = the original 30 fps) and `--refresh HZ`
-overrides the detected display refresh rate.
+overrides the detected display refresh rate. A frame rate above the display's refresh is
+presented on a timer with vsync off (the counter in the window title shows it).
 
 Debugging options: `--log core,bios,cd,gpu,spu,dma,irq,pad,mdec,host`, `--turbo`,
 `--press START@600+10,...` (scripted input), `--watch ADDR` (log writes to a RAM word, including DMA),
