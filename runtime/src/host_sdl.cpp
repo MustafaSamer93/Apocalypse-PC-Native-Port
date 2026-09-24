@@ -106,8 +106,6 @@ void draw_toast() {
 PresentOptions present_options() {
     PresentOptions o;
     o.aspect = g_gfx.aspect;
-    // movies are pictures made for 4:3: shown as they are, with bars at the sides
-    if ((o.aspect == Aspect::A16_9 || o.aspect == Aspect::A16_10) && gpu_movie_playing()) o.aspect = Aspect::A4_3;
     o.crt = g_gfx.crt;
     o.fxaa = g_gfx.aa & 1;
     return o;
@@ -739,10 +737,19 @@ GpuDisplay g_last_display{};
 uint64_t g_images = 0;      // distinct images shown (for the fps in the title)
 uint64_t g_last_image = ~0ull;
 
+// Lines to cut off at the top and at the bottom of an image `h` lines high: in widescreen a
+// movie (made for 4:3, with black bands in the picture) is enlarged to the full width, keeping
+// its proportions, and loses what no longer fits (1/8 at each edge for 16:9).
+static int movie_crop(int h) {
+    if ((g_gfx.aspect != Aspect::A16_9 && g_gfx.aspect != Aspect::A16_10) || !gpu_movie_playing()) return 0;
+    return (int)((float)h * (1.0f - g_gte_widescreen) * 0.5f);
+}
+
 // Draws the game image for `frac` of the way into the current emulated vblank, then swaps.
 static void draw_game(const GpuDisplay& d, double frac) {
     int w = std::clamp(d.w, 1, 1024), h = std::clamp(d.h, 1, 512);
     PresentOptions opt = present_options();
+    const int crop = movie_crop(h);
     // 15-bit images drawn by the OpenGL renderer are shown straight from its VRAM (or an
     // extra frame in between the game's own, see smooth.cpp); 24-bit movie frames (and
     // the software renderer) go through the CPU copy.
@@ -756,7 +763,8 @@ static void draw_game(const GpuDisplay& d, double frac) {
         } else {
             int px, py, pw, ph;
             unsigned vram = hw_display_texture(d.x, d.y, w, h, &px, &py, &pw, &ph);
-            present_game_texture(vram, 1024 * hw_scale(), 512 * hw_scale(), px, py, pw, ph, h, opt);
+            const int cs = crop * hw_scale();
+            present_game_texture(vram, 1024 * hw_scale(), 512 * hw_scale(), px, py + cs, pw, ph - 2 * cs, h - 2 * crop, opt);
             image = smooth_flips() << 8;
         }
         if (image != g_last_image) g_images++;
@@ -791,7 +799,7 @@ static void draw_game(const GpuDisplay& d, double frac) {
     } else {
         std::fill(g_pixels.begin(), g_pixels.end(), 0);
     }
-    present_game_pixels(g_pixels.data(), w, h, opt);
+    present_game_pixels(g_pixels.data() + (size_t)crop * w, w, h - 2 * crop, opt);
     draw_toast();
     maybe_screenshot();
     present_swap();
