@@ -10,6 +10,7 @@
 
 #include "memcard.h"
 #include "psx.h"
+#include "smooth.h"
 #include "state_io.h"
 
 extern "C" const uint32_t main_exe_hash;
@@ -144,6 +145,7 @@ void state_poll_load(R3000* c) {
     g_demo_loaded = false;
     g_in_level = true;
     g_last_autosave_frame = host_frame_count();
+    smooth_reset();
     std::longjmp(g_resume_jmp, 1);  // unwind the native stack; main() resumes
 }
 
@@ -151,7 +153,7 @@ void state_poll_load(R3000* c) {
 extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
     // VSync can also be reached from an interrupt callback; the interrupted context then
     // lives in native frames a state cannot capture, so wait for the main loop's VSync
-    if (bios_in_exception()) return;
+    if (bios_in_exception() || core_in_ghost()) return;
     uint64_t frame = host_frame_count();
 
     state_poll_load(c);
@@ -200,6 +202,7 @@ std::string state_slot_label(int slot) {
 extern "C" void psx_hook_level_start(void) { state_note_level_start(); }
 
 void state_note_level_start() {
+    smooth_reset();
     g_level_start_pending = true;
     g_level_start_frame = host_frame_count();
 }

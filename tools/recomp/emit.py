@@ -26,9 +26,11 @@ def lbl(a: int) -> str:
 # Runtime hooks emitted at the entry of specific functions.
 #   8008632C VSync: save-state safe point (see runtime/src/savestate.cpp)
 #   80030AD4 the level's main loop: a level has started (auto-save)
+#   800307F0 the level's render: extra frames between simulation steps (smooth.cpp)
 ENTRY_HOOKS = {
     0x8008632C: "psx_safepoint(c, 0x8008632Cu);",
     0x80030AD4: "psx_hook_level_start();",
+    0x800307F0: "psx_hook_render(c);",
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.

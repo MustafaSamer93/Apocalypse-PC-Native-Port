@@ -42,6 +42,34 @@ uint32_t word_count(const DmaChan& d) {
     return (d.bcr & 0xFFFF) * (d.bcr >> 16);
 }
 
+}  // namespace
+
+// Sends a linked list of GPU packets (an ordering table) to GP0; returns the words read.
+uint32_t gpu_run_list(R3000* c, uint32_t addr) {
+    addr &= 0x1FFFFC;
+    uint32_t guard = 0, words = 0;
+    for (;;) {
+        uint32_t header;
+        std::memcpy(&header, psx_ram + addr, 4);
+        uint32_t n = header >> 24;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t w;
+            std::memcpy(&w, psx_ram + ((addr + 4 + i * 4) & 0x1FFFFC), 4);
+            gpu_write_gp0(c, w);
+        }
+        words += n + 1;
+        if (header & 0x800000) break;
+        addr = header & 0x1FFFFC;
+        if (++guard > 0x100000) {
+            log_msg(LogCat::Dma, "GPU linked list does not terminate");
+            break;
+        }
+    }
+    return words;
+}
+
+namespace {
+
 // Moves the data immediately; completion (busy bit, IRQ) is signalled after `delay`.
 void dma_run(R3000* c, int ch) {
     DmaChan& d = g_dma[ch];
@@ -65,25 +93,7 @@ void dma_run(R3000* c, int ch) {
     }
 
     if (ch == 2 && sync == 2) {  // GPU linked list
-        uint32_t guard = 0;
-        uint32_t words = 0;
-        for (;;) {
-            uint32_t header;
-            std::memcpy(&header, psx_ram + addr, 4);
-            uint32_t n = header >> 24;
-            for (uint32_t i = 0; i < n; i++) {
-                uint32_t w;
-                std::memcpy(&w, psx_ram + ((addr + 4 + i * 4) & 0x1FFFFC), 4);
-                gpu_write_gp0(c, w);
-            }
-            words += n + 1;
-            if (header & 0x800000) break;
-            addr = header & 0x1FFFFC;
-            if (++guard > 0x100000) {
-                log_msg(LogCat::Dma, "GPU linked list does not terminate");
-                break;
-            }
-        }
+        uint32_t words = gpu_run_list(c, addr);
         d.madr = 0x00FFFFFF;
         delay = words;  // roughly 1 cycle per word of bus time
         LOG(Dma, "GPU list %u words", words);
@@ -91,6 +101,7 @@ void dma_run(R3000* c, int ch) {
         return;
     }
 
+    if (core_in_ghost() && ch != 2) return;  // sound, CD and movie DMA stay in real time
     uint32_t n = word_count(d);
     if (ch == 1 && !mdec_out_ready()) {
         // Output DMA is usually armed before the input arrives; run it once decoded.

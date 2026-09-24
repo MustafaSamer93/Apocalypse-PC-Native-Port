@@ -590,6 +590,23 @@ void bios_vblank(R3000* c) {
 
 #include "state_io.h"
 
+// Kernel state game code can change in passing (smooth.cpp rolls it back after an extra
+// frame); open files and directory listings are left alone.
+void bios_ghost_state(StateIO& s) {
+    s.raw(g_events, sizeof g_events);
+    s(g_hook_buf);
+    s.raw(g_int_chains, sizeof g_int_chains);
+    s.raw(g_pad_buf, sizeof g_pad_buf);
+    s.raw(g_pad_len, sizeof g_pad_len);
+    s(g_pad_started);
+    s(g_pad_legacy_dest);
+    s.deq(g_card_events);
+    s.raw(g_rcnt_clear, sizeof g_rcnt_clear);
+    s(g_rand_seed);
+    s(g_heap_base);
+    s(g_heap_size);
+}
+
 void bios_state(StateIO& s) {
     s.marker(0x42494F53);  // "BIOS"
     s.raw(g_events, sizeof g_events);

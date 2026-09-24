@@ -51,5 +51,13 @@ void hw_upload_all(const uint16_t* vram_1024x512);
 
 // Finishes pending draws; returns the VRAM texture and the display rectangle in its pixels.
 unsigned hw_display_texture(int x, int y, int w, int h, int* px, int* py, int* pw, int* ph);
+// Extra frames (smooth.cpp). A capture copies a rendered VRAM rectangle (native
+// coordinates) into its own texture; slots survive until the renderer is restarted.
+void hw_capture(int slot, int x, int y, int w, int h);
+unsigned hw_capture_texture(int slot, int* tex_w, int* tex_h);  // 0 if the slot is empty
+// Keeps a copy of a VRAM rectangle so it can be put back after drawing over it.
+void hw_stash(int x, int y, int w, int h);
+void hw_unstash();
+
 // Texture smoothing on/off (bilinear filtering of game textures).
 void hw_set_texture_filter(bool on);

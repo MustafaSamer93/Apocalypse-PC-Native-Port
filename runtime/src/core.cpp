@@ -1,5 +1,6 @@
 // Memory map, scheduler, interrupt controller, COP0 and indirect dispatch.
 #include <algorithm>
+#include <csetjmp>
 #include <cstdarg>
 #include <cstring>
 #include <unordered_map>
@@ -84,7 +85,18 @@ static uint64_t g_ev_time[(int)Ev::Count];
 static bool g_ev_active[(int)Ev::Count];
 static bool g_force_check = false;
 
+// Ghost mode (smooth.cpp): game code runs outside emulated time while an extra frame is
+// rendered. No events or interrupts are delivered; reaching the cycle budget aborts it.
+static bool g_ghost = false;
+static uint64_t g_ghost_deadline = 0;
+static std::jmp_buf* g_ghost_abort = nullptr;
+static int g_ghost_blocked_io = 0;
+
 static void sched_update(R3000* c) {
+    if (g_ghost) {
+        c->next_event = g_ghost_deadline;
+        return;
+    }
     uint64_t next = UINT64_MAX;
     for (int i = 0; i < (int)Ev::Count; i++)
         if (g_ev_active[i]) next = std::min(next, g_ev_time[i]);
@@ -119,6 +131,7 @@ void sched_cancel(R3000* c, Ev ev) {
 bool sched_pending(Ev ev) { return g_ev_active[(int)ev]; }
 
 void sched_request_check(R3000* c) {
+    if (g_ghost) return;
     g_force_check = true;
     c->next_event = 0;
 }
@@ -128,6 +141,7 @@ static void run_event(R3000* c, Ev ev);
 static int g_events_depth = 0;
 
 void psx_run_events(R3000* c) {
+    if (g_ghost) std::longjmp(*g_ghost_abort, 1);  // over budget: something is waiting on hardware
     // Debug aid: remember recent (cycles, sp, ra) and dump them if sp leaves RAM.
     struct SpSample { uint64_t cyc; uint32_t sp, ra; };
     static SpSample hist[64];
@@ -375,6 +389,11 @@ void mem_write_slow(R3000* c, uint32_t addr, uint32_t v, int size) {
         write_reg32(c, aligned, (cur & ~mask) | ((v << sh) & mask));
         return;
     }
+    if (g_ghost && ((p >= 0x1F801800 && p < 0x1F801804) || p == 0x1F801820 || p == 0x1F801824 ||
+                    (p >= 0x1F801C00 && p < 0x1F802000))) {
+        g_ghost_blocked_io++;  // sound, CD and movie hardware keep running in real time
+        return;
+    }
     if (p >= 0x1F801800 && p < 0x1F801804) { cdrom_write(c, p & 3, (uint8_t)v); return; }
     if (p == 0x1F801810) { gpu_write_gp0(c, v); return; }
     if (p == 0x1F801814) { gpu_write_gp1(c, v); return; }
@@ -530,3 +549,50 @@ void core_state(StateIO& s) {
 }
 
 void sched_refresh(R3000* c) { sched_update(c); }
+
+// ================================================================ ghost mode (smooth.cpp)
+
+struct CoreGhostSnap {
+    std::vector<uint8_t> ram;
+    uint8_t scratch[PSX_SCRATCH_SIZE];
+    uint64_t ev_time[(int)Ev::Count];
+    bool ev_active[(int)Ev::Count];
+    bool force_check;
+    uint32_t istat, imask;
+    int cache_isolated;
+};
+static CoreGhostSnap g_snap;
+
+void core_ghost_begin(R3000* c, uint64_t cycle_budget, std::jmp_buf* abort) {
+    g_snap.ram.assign(psx_ram, psx_ram + PSX_RAM_SIZE);
+    std::memcpy(g_snap.scratch, psx_scratch, sizeof psx_scratch);
+    std::memcpy(g_snap.ev_time, g_ev_time, sizeof g_ev_time);
+    std::memcpy(g_snap.ev_active, g_ev_active, sizeof g_ev_active);
+    g_snap.force_check = g_force_check;
+    g_snap.istat = g_istat;
+    g_snap.imask = g_imask;
+    g_snap.cache_isolated = psx_cache_isolated;
+    g_ghost = true;
+    g_ghost_deadline = c->cycles + cycle_budget;
+    g_ghost_abort = abort;
+    g_ghost_blocked_io = 0;
+    sched_update(c);
+}
+
+// Puts memory, scheduler and interrupt state back as they were at core_ghost_begin.
+int core_ghost_end(R3000* c) {
+    std::memcpy(psx_ram, g_snap.ram.data(), PSX_RAM_SIZE);
+    std::memcpy(psx_scratch, g_snap.scratch, sizeof psx_scratch);
+    std::memcpy(g_ev_time, g_snap.ev_time, sizeof g_ev_time);
+    std::memcpy(g_ev_active, g_snap.ev_active, sizeof g_ev_active);
+    g_force_check = g_snap.force_check;
+    g_istat = g_snap.istat;
+    g_imask = g_snap.imask;
+    psx_cache_isolated = g_snap.cache_isolated;
+    g_ghost = false;
+    g_ghost_abort = nullptr;
+    sched_update(c);
+    return g_ghost_blocked_io;
+}
+
+bool core_in_ghost() { return g_ghost; }

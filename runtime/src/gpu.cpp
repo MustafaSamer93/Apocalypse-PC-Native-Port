@@ -587,6 +587,7 @@ void gpu_write_gp1(R3000* c, uint32_t v) {
             DS.start_x = v & 0x3FE;
             DS.start_y = (v >> 10) & 0x1FF;
             LOG(Gpu, "display start %d,%d", DS.start_x, DS.start_y);
+            if (!core_in_ghost()) smooth_on_flip();
             break;
         case 0x06: DS.h1 = v & 0xFFF; DS.h2 = (v >> 12) & 0xFFF; break;
         case 0x07: DS.v1 = v & 0x3FF; DS.v2 = (v >> 10) & 0x3FF; break;
@@ -705,10 +706,11 @@ GpuDisplay gpu_display() {
 
 #include "state_io.h"
 
-void gpu_state(StateIO& s) {
-    s.marker(0x47505520);  // "GPU "
-    if (!s.loading() && hw_active()) hw_readback(0, 0, 1024, 512, g_vram);  // GPU-side VRAM is authoritative
-    s.raw(g_vram, sizeof g_vram);
+// No command half-sent and no VRAM transfer running (safe to feed GP0 from elsewhere).
+bool gpu_idle() { return g_cmd.empty() && !g_upload.active && !g_download.active; }
+
+// Everything but VRAM (smooth.cpp rolls this back after drawing an extra frame).
+void gpu_regs_state(StateIO& s) {
     s(S);
     s(DS);
     s(g_odd_line);
@@ -717,5 +719,25 @@ void gpu_state(StateIO& s) {
     s(g_upload);
     s(g_download);
     s(g_gpuread);
+}
+
+void gpu_state(StateIO& s) {
+    s.marker(0x47505520);  // "GPU "
+    if (!s.loading() && hw_active()) hw_readback(0, 0, 1024, 512, g_vram);  // GPU-side VRAM is authoritative
+    s.raw(g_vram, sizeof g_vram);
+    gpu_regs_state(s);
     if (s.loading() && hw_active()) hw_upload_all(g_vram);
+}
+
+// The CPU-side VRAM copy of a rectangle (fills and uploads land there even while the
+// OpenGL renderer draws the polygons).
+void gpu_vram_save(int x, int y, int w, int h, std::vector<uint16_t>& out) {
+    out.resize((size_t)w * h);
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) out[(size_t)j * w + i] = g_vram[((y + j) & 511) * 1024 + ((x + i) & 1023)];
+}
+
+void gpu_vram_restore(int x, int y, int w, int h, const std::vector<uint16_t>& in) {
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) g_vram[((y + j) & 511) * 1024 + ((x + i) & 1023)] = in[(size_t)j * w + i];
 }

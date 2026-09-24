@@ -1,10 +1,12 @@
 // Internal runtime interfaces shared by the hardware/BIOS modules.
 #pragma once
 
+#include <csetjmp>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "recomp.h"
 
@@ -74,6 +76,16 @@ struct GpuDisplay {
     bool enabled;
 };
 GpuDisplay gpu_display();
+uint32_t gpu_run_list(R3000* c, uint32_t addr);  // walks a GPU packet list (ordering table) into GP0
+void gpu_vram_save(int x, int y, int w, int h, std::vector<uint16_t>& out);
+void gpu_vram_restore(int x, int y, int w, int h, const std::vector<uint16_t>& in);
+
+// Ghost mode (smooth.cpp): run game code outside emulated time, then roll memory,
+// scheduler and interrupts back. Exceeding the cycle budget longjmps to `abort`.
+void core_ghost_begin(R3000* c, uint64_t cycle_budget, std::jmp_buf* abort);
+int core_ghost_end(R3000* c);  // returns how many sound/CD/movie writes were dropped
+bool core_in_ghost();
+void smooth_on_flip();         // the game showed a new frame (GP1 display start)
 int gpu_set_renderer(int scale);  // 0 = software, 1..8 = OpenGL at that scale
 
 // Widescreen hack: horizontal scale applied to GTE screen coordinates (1 = off).

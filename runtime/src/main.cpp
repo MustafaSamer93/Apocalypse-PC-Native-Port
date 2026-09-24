@@ -1,5 +1,6 @@
 // Entry point: loads the game's executable from the user's disc image into emulated RAM,
 // brings up the hardware and jumps to the recompiled entry point.
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -43,6 +44,8 @@ void usage() {
         "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
         "  --scale N          initial window scale (default 3)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
+        "  --smooth K         K images per game step (1 = original 30 fps; default: match the display)\n"
+        "  --refresh HZ       display refresh rate to assume (if the detected one is wrong)\n"
         "keys: arrows, Z=Cross X=Circle A=Square S=Triangle Q/W=L1/R1 1/2=L2/R2\n"
         "      Enter=Start Backspace=Select Tab=fast-forward F11=fullscreen Esc=quit\n");
 }
@@ -94,6 +97,14 @@ int main(int argc, char** argv) {
         else if (a == "--turbo") host_set_turbo(true);
         else if (a == "--interp") interp_only = true;
         else if (a == "--fps60") psx_opt_skip_frame_wait = 1;
+        else if (a == "--refresh") {  // --refresh HZ: display refresh rate to assume
+            extern float g_refresh_override;
+            g_refresh_override = (float)std::atof(next().c_str());
+        }
+        else if (a == "--smooth") {  // --smooth K: K images per game step (1 = original 30 fps)
+            extern int g_force_smooth;
+            g_force_smooth = std::clamp(std::atoi(next().c_str()), 1, 5);
+        }
         else if (a == "--states") {
             extern bool host_parse_state_script(const char*);
             if (!host_parse_state_script(next().c_str())) { usage(); return 1; }

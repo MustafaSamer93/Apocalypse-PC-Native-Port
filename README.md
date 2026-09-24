@@ -21,7 +21,7 @@ executable from your disc image, and the program reads everything else from it a
 | Sound effects, XA speech/music, CD audio, SPU reverb | working |
 | Memory card (`saves/card1.mcr`, emulator-compatible) | working |
 | Save states (5 slots) and auto-save (level start + every 5 minutes) | working |
-| Higher frame rates | not possible: the game logic advances one step per rendered frame (30 fps) |
+| Smooth frame rate: 60 / 90 / 120 / 150 fps to match the display (setting "Frame rate") | working; the game still simulates at 30 Hz |
 | HD texture packs | not implemented |
 | Linux | deferred (the code is portable; build scripts are Windows-only for now) |
 
@@ -54,7 +54,8 @@ cmake --build build-clang
 | fire toward a direction | left mouse button (toward the cursor) | right stick |
 
 F1 (or Select+Start held) = settings: save/load states, resolution, aspect ratio, CRT
-filter, texture smoothing, controller choice and button remapping.
+filter, texture smoothing, frame rate (original 30 fps or smooth), controller choice and
+button remapping.
 F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = quit.
 
 ## Command line
@@ -62,6 +63,9 @@ F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = qu
 ```
 apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N]
 ```
+
+`--smooth K` forces K images per game step (1 = the original 30 fps) and `--refresh HZ`
+overrides the detected display refresh rate.
 
 Debugging options: `--log core,bios,cd,gpu,spu,dma,irq,pad,mdec,host`, `--turbo`,
 `--press START@600+10,...` (scripted input), `--watch ADDR` (log writes to a RAM word, including DMA),
@@ -91,6 +95,7 @@ runtime/
   src/spu.cpp          24-voice ADPCM SPU
   src/mdec.cpp         movie decoder
   src/hw.cpp           DMA, root counters, controller port (SIO0)
+  src/smooth.cpp       extra frames between the game's 30 Hz steps (smooth frame rate)
   src/host_sdl.cpp     window, audio, input, frame pacing (SDL3)
 ```
 
@@ -105,5 +110,10 @@ Things the game does that the tools have to handle:
   function returns.
 - **libcd toggling DMA interrupt enables with byte stores to `DICR+2`.** All 32-bit I/O
   registers support sub-word access.
+- **A fixed 30 Hz simulation.** The level loop advances the world one fixed step per rendered
+  frame, so it cannot simply run faster. Its render, though, can already draw a moment between
+  two steps (it did so when the PS1 fell behind). `runtime/src/smooth.cpp` runs that render again
+  for fractions of a step, outside emulated time and with the machine rolled back afterwards, and
+  shows those images between the game's own.
 - **The game reads controllers directly over SIO.** Byte and `/ACK` timing are modelled,
   because the driver clears IRQ flags between the reply and the `/ACK`.

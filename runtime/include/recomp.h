@@ -185,6 +185,7 @@ void call_indirect(R3000* c, uint32_t addr);
 // Entry hooks (see ENTRY_HOOKS in tools/recomp/emit.py).
 void psx_safepoint(R3000* c, uint32_t pc);
 void psx_hook_level_start(void);
+void psx_hook_render(R3000* c);
 
 // Runtime switches for patched call sites (see OPTIONAL_CALLS in tools/recomp/emit.py).
 extern int psx_opt_skip_frame_wait;  // 1 = skip the main loop's second VBlank wait (60 fps)
