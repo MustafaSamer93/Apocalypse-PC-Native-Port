@@ -133,7 +133,7 @@ bool g_mid_pending = false;
 // before and the pose after (sim60_render).
 constexpr int kAnimA = 0x16, kAnimALen = 5;     // mesh frame index, frame counter, animation
 constexpr int kAnimB = 0x128, kAnimBLen = 0x14;  // animation playback state
-constexpr int kFlash = 0x1D0;                    // damage flash intensity (16-bit), fades 256 per update
+constexpr int kFlash = 0x1D0;                    // hit timer / damage flash (16-bit), -256 per update
 constexpr int kType = 0x1B;
 struct AnimState {
     uint32_t obj;
@@ -200,7 +200,12 @@ void halve(R3000* c, uint32_t addr, const Vec3& old) {
         int64_t d = (int64_t)now.v[k] - old.v[k];
         if (d > 0x400000 || d < -0x400000) return;
     }
-    for (int k = 0; k < 3; k++) MEM_W32(c, addr + 4 * k, (uint32_t)(old.v[k] + (now.v[k] - old.v[k]) / 2));
+    // rounded away from `old`, so the value always reaches what the game set (truncated, a
+    // speed the game set to 0 stayed at 1 or 2)
+    for (int k = 0; k < 3; k++) {
+        int32_t d = now.v[k] - old.v[k];
+        MEM_W32(c, addr + 4 * k, (uint32_t)(old.v[k] + (d + (d > 0) - (d < 0)) / 2));
+    }
 }
 
 void retime(R3000* c, const Before& b, bool odd) {
@@ -214,10 +219,14 @@ void retime(R3000* c, const Before& b, bool odd) {
             }
             if ((int16_t)MEM_R16(c, p + kPlayerHealth) < b.health) MEM_W16(c, p + kPlayerHealth, (uint16_t)b.health);
         }
-        {
-            // the damage flash fades by a fixed step per player update: half a step per tick
+        // The hit timer (it also sets the damage flash) counts down 256 per update and the player
+        // stays in the hit state until it is exactly 0. It keeps its 30 Hz rate: the odd-tick
+        // step is undone. (Halving the step left 128, never 0: the player froze after a hit, on
+        // the last frame of the hit animation.) The flash is still drawn fading every frame by
+        // the pose blend (sim60_render).
+        if (odd) {
             int16_t now = (int16_t)MEM_R16(c, p + kFlash);
-            if (now < b.flash && now >= 0) MEM_W16(c, p + kFlash, (uint16_t)(b.flash - (b.flash - now) / 2));
+            if (now < b.flash && now >= 0) MEM_W16(c, p + kFlash, (uint16_t)b.flash);
         }
     }
     uint32_t cam = MEM_R32(c, kCameraList);
@@ -234,8 +243,9 @@ void trace_player(R3000* c, uint32_t t) {
     static const bool on = std::getenv("APOC_SIM60_TRACE") != nullptr;
     uint32_t p = on ? MEM_R32(c, kPlayerList) : 0;
     if (p)
-        log_msg(LogCat::Host, "sim60 f=%llu tick=%u player %d %d %d", (unsigned long long)host_frame_count(), t,
-                (int32_t)MEM_R32(c, p + 4), (int32_t)MEM_R32(c, p + 8), (int32_t)MEM_R32(c, p + 12));
+        log_msg(LogCat::Host, "sim60 f=%llu tick=%u player %d %d %d health %d flash %d anim %d", (unsigned long long)host_frame_count(), t,
+                (int32_t)MEM_R32(c, p + 4), (int32_t)MEM_R32(c, p + 8), (int32_t)MEM_R32(c, p + 12),
+                (int16_t)MEM_R16(c, p + kPlayerHealth), (int16_t)MEM_R16(c, p + kFlash), (int16_t)MEM_R16(c, p + 0x18));
     // APOC_SIM60_DUMP=FROM,TO: the player object's first 0x300 bytes as words, each tick
     static const char* dump = std::getenv("APOC_SIM60_DUMP");
     if (p && dump) {
