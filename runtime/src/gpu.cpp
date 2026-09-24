@@ -1,5 +1,6 @@
 // PS1 GPU: command processing and a software rasterizer into 1024x512x16 VRAM.
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -43,6 +44,29 @@ struct DisplayState {
 DisplayState DS;
 
 bool g_odd_line = false;
+uint64_t g_vblanks = 0;
+
+// ---------------------------------------------------------------- widescreen 2D
+// With a widescreen aspect the GTE narrows the 3D view (gte.cpp) and the whole picture is
+// stretched to the wider screen. The level render's 2D (HUD, messages) would be stretched
+// with it, so it is narrowed by the same factor around the centre of the screen: it keeps its
+// proportions and its place in the original 4:3 picture. The 2D is what the render's last
+// routines add; their packets come from one buffer in order (next free packet: 800FF668),
+// so the packet address tells what made a primitive. Near full-width shapes (the red damage
+// flash, fades) still cover the screen.
+constexpr uint32_t kNextPacket = 0x800FF668;
+uint32_t g_2d_from = 0, g_2d_to = 0;  // packets of the HUD, messages (phys; to = the tint's start)
+uint64_t g_movie_vblank = 0;  // when the MDEC last decoded a movie frame (VBlank count)
+bool g_movie_seen = false;
+
+// Horizontal factor and centre for this primitive; 1 = leave it.
+float squeeze_2d(float* cx) {
+    const uint32_t a = g_gpu_packet_addr;
+    if (g_gte_widescreen == 1.0f || !a || a < g_2d_from || a >= g_2d_to) return 1.0f;
+    *cx = (float)(S.area_x1 + S.area_x2 + 1) * 0.5f;
+    return g_gte_widescreen;
+}
+bool full_width(float x0, float x1) { return x1 - x0 >= 0.9f * (float)(S.area_x2 - S.area_x1 + 1); }
 
 // command FIFO accumulation
 std::vector<uint32_t> g_cmd;
@@ -223,7 +247,7 @@ HwState hw_state() {
     return s;
 }
 
-HwVtx hw_vtx(const Vtx& v) { return HwVtx{v.x, v.y, v.r, v.g, v.b, v.u, v.v}; }
+HwVtx hw_vtx(const Vtx& v) { return HwVtx{(float)v.x, (float)v.y, v.r, v.g, v.b, v.u, v.v}; }
 
 // Hardware drops triangles whose bounding box is 1024x512 or larger.
 bool oversized(const Vtx& a, const Vtx& b, const Vtx& c) {
@@ -266,6 +290,12 @@ void draw_polygon(const uint32_t* w) {
     tex.page_y = S.tpage_y;
     tex.depth = S.tex_depth;
     if (textured && S.tex_disable) textured = false;
+    float cx = 0, k = squeeze_2d(&cx);
+    if (k != 1.0f) {
+        int x0 = v[0].x, x1 = v[0].x;
+        for (int i = 1; i < nv; i++) x0 = std::min(x0, v[i].x), x1 = std::max(x1, v[i].x);
+        if (full_width((float)x0, (float)x1)) k = 1.0f;
+    }
     if (hw_active()) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi; p.gouraud = gouraud;
@@ -274,11 +304,16 @@ void draw_polygon(const uint32_t* w) {
         p.clut_x = tex.clut_x; p.clut_y = tex.clut_y;
         HwState st = hw_state();
         HwVtx h[4];
-        for (int i = 0; i < nv; i++) h[i] = hw_vtx(v[i]);
+        for (int i = 0; i < nv; i++) {
+            h[i] = hw_vtx(v[i]);
+            if (k != 1.0f) h[i].x = cx + (h[i].x - cx) * k;
+        }
         if (!oversized(v[0], v[1], v[2])) hw_triangle(&h[0], &h[1], &h[2], p, st);
         if (quad && !oversized(v[1], v[2], v[3])) hw_triangle(&h[1], &h[2], &h[3], p, st);
         return;
     }
+    if (k != 1.0f)
+        for (int i = 0; i < nv; i++) v[i].x = (int)std::lround(cx + ((float)v[i].x - cx) * k);
     draw_triangle(&v[0], &v[1], &v[2], gouraud, textured, raw, semi, tex);
     if (quad) draw_triangle(&v[1], &v[2], &v[3], gouraud, textured, raw, semi, tex);
 }
@@ -288,6 +323,12 @@ void draw_polygon(const uint32_t* w) {
 void draw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, bool semi) {
     int dx = x1 - x0, dy = y1 - y0;
     if (std::abs(dx) >= 1024 || std::abs(dy) >= 512) return;
+    float cx = 0, k = squeeze_2d(&cx);
+    if (k != 1.0f && !full_width((float)std::min(x0, x1), (float)std::max(x0, x1))) {
+        x0 = (int)std::lround(cx + ((float)x0 - cx) * k);
+        x1 = (int)std::lround(cx + ((float)x1 - cx) * k);
+        dx = x1 - x0;
+    }
     if (hw_active()) {
         HwPrim p;
         p.semi = semi;
@@ -345,6 +386,18 @@ void draw_rect(const uint32_t* w) {
         p.semi_mode = S.semi_mode;
         p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;
         p.clut_x = tex.clut_x; p.clut_y = tex.clut_y;
+        float cx = 0, k = squeeze_2d(&cx);
+        if (k != 1.0f && wdt > 0 && hgt > 0 && !full_width((float)x, (float)(x + wdt))) {
+            int r = color & 0xFF, g = (color >> 8) & 0xFF, b = (color >> 16) & 0xFF;
+            float xa = cx + ((float)x - cx) * k, xb = cx + ((float)(x + wdt) - cx) * k;
+            int ub = S.rect_flip_x ? u0 - wdt : u0 + wdt, vb = S.rect_flip_y ? v0 - hgt : v0 + hgt;
+            HwVtx q[4] = {{xa, (float)y, r, g, b, u0, v0}, {xb, (float)y, r, g, b, ub, v0},
+                          {xa, (float)(y + hgt), r, g, b, u0, vb}, {xb, (float)(y + hgt), r, g, b, ub, vb}};
+            HwState st = hw_state();
+            hw_triangle(&q[0], &q[1], &q[2], p, st);
+            hw_triangle(&q[1], &q[2], &q[3], p, st);
+            return;
+        }
         hw_rect(x, y, wdt, hgt, u0, v0, S.rect_flip_x, S.rect_flip_y, color, p, hw_state());
         return;
     }
@@ -678,6 +731,7 @@ int gpu_set_renderer(int scale, int samples) {
 
 void gpu_vblank() {
     g_odd_line = !g_odd_line;
+    g_vblanks++;
     LOG(Gpu, "frame: polys=%u lines=%u rects=%u fills=%u uploads=%u area=(%d,%d)-(%d,%d) offset=(%d,%d)",
         g_stat_counts[0], g_stat_counts[1], g_stat_counts[2], g_stat_counts[3], g_stat_counts[4], S.area_x1,
         S.area_y1, S.area_x2, S.area_y2, S.off_x, S.off_y);
@@ -704,6 +758,26 @@ GpuDisplay gpu_display() {
 }
 
 // ================================================================ save states
+
+// Entry hooks (tools/recomp/emit.py) on the level render's last routines, called from the
+// render (80030A30..80030A48): 0 = the HUD, 1 and 2 = more 2D, 3 = the full-screen tint.
+extern "C" void psx_hook_2d(R3000* c, int stage) {
+    static const uint32_t kFrom[4] = {0x80030A38, 0x80030A40, 0x80030A48, 0x80030A50};
+    if (c->r[31] != kFrom[stage]) return;
+    const uint32_t next = MEM_R32(c, kNextPacket) & 0x1FFFFC;
+    if (stage == 0) {
+        g_2d_from = next;
+        g_2d_to = 0x200000;
+    } else if (stage == 3) {
+        g_2d_to = next;
+    }
+}
+
+void gpu_note_movie_frame() {
+    g_movie_vblank = g_vblanks;
+    g_movie_seen = true;
+}
+bool gpu_movie_playing() { return g_movie_seen && g_vblanks - g_movie_vblank < 30; }
 
 #include "state_io.h"
 

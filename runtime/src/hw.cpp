@@ -44,6 +44,8 @@ uint32_t word_count(const DmaChan& d) {
 
 }  // namespace
 
+uint32_t g_gpu_packet_addr = 0;  // RAM address of the packet being sent (0 = not from a list)
+
 // Sends a linked list of GPU packets (an ordering table) to GP0; returns the words read.
 uint32_t gpu_run_list(R3000* c, uint32_t addr) {
     addr &= 0x1FFFFC;
@@ -52,12 +54,14 @@ uint32_t gpu_run_list(R3000* c, uint32_t addr) {
         uint32_t header;
         std::memcpy(&header, psx_ram + addr, 4);
         uint32_t n = header >> 24;
+        g_gpu_packet_addr = addr;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t w;
             std::memcpy(&w, psx_ram + ((addr + 4 + i * 4) & 0x1FFFFC), 4);
             gpu_write_gp0(c, w);
         }
         words += n + 1;
+        g_gpu_packet_addr = 0;
         if (header & 0x800000) break;
         addr = header & 0x1FFFFC;
         if (++guard > 0x100000) {

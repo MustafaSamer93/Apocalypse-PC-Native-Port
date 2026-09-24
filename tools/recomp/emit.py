@@ -35,6 +35,11 @@ ENTRY_HOOKS = {
     0x8008632C: "psx_safepoint(c, 0x8008632Cu);",
     0x80030AD4: "psx_hook_level_start();",
     0x800307F0: "if (psx_hook_render(c)) return;",
+    # the render's 2D part (widescreen: HUD at its own proportions, gpu.cpp)
+    0x8006D91C: "psx_hook_2d(c, 0);",  # HUD
+    0x80016884: "psx_hook_2d(c, 1);",
+    0x8001B8BC: "psx_hook_2d(c, 2);",
+    0x8001C004: "psx_hook_2d(c, 3);",  # full-screen tint
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.

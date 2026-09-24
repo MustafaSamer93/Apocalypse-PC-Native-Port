@@ -108,6 +108,11 @@ int gpu_set_renderer(int scale, int samples = 1);  // 0 = software, 1..8 = OpenG
 
 // Widescreen hack: horizontal scale applied to GTE screen coordinates (1 = off).
 extern float g_gte_widescreen;
+// A movie (MDEC) is playing, or played within the last half second: movies are shown at
+// 4:3 as they were made, everything else in the chosen aspect (gpu.cpp, mdec.cpp).
+void gpu_note_movie_frame();
+bool gpu_movie_playing();
+extern uint32_t g_gpu_packet_addr;  // RAM address of the GPU packet being processed (hw.cpp)
 
 void cdrom_init(const std::string& cue_path);
 uint8_t cdrom_read(R3000* c, uint32_t reg);

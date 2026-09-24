@@ -17,7 +17,7 @@ executable from your disc image, and the program reads everything else from it a
 | 2D (title, HUD, menus) | working |
 | 3D gameplay (GTE + hardware renderer, 1x-8x internal resolution) | working |
 | Renderers: OpenGL 3.3 and Vulkan 1.3 (setting "Renderer"; falls back to OpenGL if Vulkan cannot start) | working |
-| 4:3 / 16:9 / 16:10 (widescreen widens the 3D view), CRT filter, texture smoothing | working |
+| 4:3 / 16:9 / 16:10 (widescreen widens the 3D view; the in-game HUD and pause menu keep their proportions; movies are shown at 4:3), CRT filter, texture smoothing | working; front-end menu text is still stretched in widescreen |
 | Anti-aliasing: supersampling (renders up to 8x, averaged down), FXAA, and MSAA 1x/2x/4x/8x ("AA rate") | working |
 | Keyboard + mouse, XInput gamepads (twin-stick aiming, rumble), in-game button remapping | working |
 | Sound effects, XA speech/music, CD audio, SPU reverb | working |

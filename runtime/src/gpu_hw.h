@@ -8,7 +8,8 @@
 #include <cstdint>
 
 struct HwVtx {
-    int x, y;          // native VRAM coordinates (draw offset applied)
+    float x, y;        // native VRAM coordinates (draw offset applied; whole numbers except
+                       // for the widescreen HUD, gpu.cpp)
     int r, g, b;
     int u, v;
 };

@@ -124,6 +124,7 @@ void emit_pixels_mono(const int16_t* y) {
 }
 
 void run_decode() {
+    gpu_note_movie_frame();
     int depth = (g_cmd >> 27) & 3;
     size_t pos = 0;
     int16_t cr[64], cb[64], y[4][64];

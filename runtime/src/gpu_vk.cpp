@@ -4,6 +4,7 @@
 // shown). VRAM row 0 is image row 0 here (the OpenGL version keeps it at the bottom), so all
 // rectangles, scissors and texel coordinates use the same numbers as the OpenGL code.
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -378,8 +379,8 @@ void vk_hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim
         const HwVtx* col = p.gouraud ? v : a;
         push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p);
     }
-    draw_area_dirty(std::min({a->x, b->x, c->x}), std::min({a->y, b->y, c->y}), std::max({a->x, b->x, c->x}) + 1,
-                    std::max({a->y, b->y, c->y}) + 1, s);
+    draw_area_dirty((int)std::floor(std::min({a->x, b->x, c->x})), (int)std::floor(std::min({a->y, b->y, c->y})),
+                    (int)std::ceil(std::max({a->x, b->x, c->x})) + 1, (int)std::ceil(std::max({a->y, b->y, c->y})) + 1, s);
 }
 
 void vk_hw_rect(int x, int y, int w, int h, int u0, int v0, bool flip_x, bool flip_y, uint32_t color, const HwPrim& p,

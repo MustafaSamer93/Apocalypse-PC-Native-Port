@@ -106,6 +106,8 @@ void draw_toast() {
 PresentOptions present_options() {
     PresentOptions o;
     o.aspect = g_gfx.aspect;
+    // movies are pictures made for 4:3: shown as they are, with bars at the sides
+    if ((o.aspect == Aspect::A16_9 || o.aspect == Aspect::A16_10) && gpu_movie_playing()) o.aspect = Aspect::A4_3;
     o.crt = g_gfx.crt;
     o.fxaa = g_gfx.aa & 1;
     return o;
