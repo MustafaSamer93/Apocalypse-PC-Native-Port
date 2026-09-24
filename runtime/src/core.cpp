@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <SDL3/SDL.h>
+
 #include "psx.h"
 
 uint8_t psx_ram[PSX_RAM_SIZE];
@@ -66,12 +68,15 @@ void trace_dump() {
 }
 
 void fatal(const char* fmt, ...) {
-    std::fprintf(stderr, "FATAL: ");
+    char msg[1024];
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(stderr, fmt, ap);
+    std::vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
-    std::fputc('\n', stderr);
+    std::fprintf(stderr, "FATAL: %s\n", msg);
+    // The exe has no console window: show the error, so a double-click never fails
+    // silently (scripts set APOC_NO_DIALOGS to get only the log).
+    if (!std::getenv("APOC_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Apocalypse", msg, nullptr);
     if (g_cpu) {
         std::fprintf(stderr, "  cycles=%llu ra=%08X sp=%08X\n", (unsigned long long)g_cpu->cycles,
                      g_cpu->r[31], g_cpu->r[29]);

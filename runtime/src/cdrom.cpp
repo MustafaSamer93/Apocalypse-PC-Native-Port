@@ -58,7 +58,10 @@ const Track* track_at(uint32_t lba) {
 
 void load_cue(const std::string& cue_path) {
     std::ifstream in(cue_path);
-    if (!in) fatal("cannot open cue sheet %s", cue_path.c_str());
+    if (!in)
+        fatal("The game's disc image was not found.\n\nPut your own copy of Apocalypse (USA) in the assets folder "
+              "next to apocalypse.exe:\n  Apocalypse (USA).cue\n  Apocalypse (USA) (Track 1).bin\n"
+              "  Apocalypse (USA) (Track 2).bin\n\n(looked for %s)", cue_path.c_str());
     auto dir = std::filesystem::path(cue_path).parent_path();
     std::string line, cur_file;
     uint32_t file_base = 0;
@@ -77,7 +80,7 @@ void load_cue(const std::string& cue_path) {
             t.file = cur_file;
             t.file_lba = file_base;
             t.fp = std::fopen(cur_file.c_str(), "rb");
-            if (!t.fp) fatal("cannot open track file %s", cur_file.c_str());
+            if (!t.fp) fatal("The disc image is incomplete: %s is missing from the assets folder.", cur_file.c_str());
             std::fseek(t.fp, 0, SEEK_END);
             t.sectors = (uint32_t)(std::ftell(t.fp) / RAW);
             t.start_lba = file_base;
