@@ -63,7 +63,8 @@ add_executable(apocalypse
     runtime/src/gpu_hw.cpp
     runtime/src/present.cpp
     runtime/src/savestate.cpp
-    runtime/src/smooth.cpp)
+    runtime/src/smooth.cpp
+    runtime/src/sim60.cpp)
 target_include_directories(apocalypse PRIVATE runtime/include runtime/src)
 
 # GTE known-answer tests (no game code needed)

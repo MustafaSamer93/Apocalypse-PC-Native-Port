@@ -172,7 +172,12 @@ RECOMP_INLINE void DIVU(R3000* c, uint32_t n, uint32_t d) {
 // ---------------------------------------------------------------- timing / events
 
 void psx_run_events(R3000* c);
-#define ADD_CYCLES(n) (c->cycles += (uint64_t)(n) * PSX_CYCLES_PER_INSN)
+// Emulated CPU speed: cycles charged per instruction in quarter cycles (default 8 = 2
+// cycles; smaller values make the CPU faster, e.g. for the 60 Hz simulation), with the
+// fraction carried over so nothing is lost to rounding.
+extern uint32_t psx_cpi_q;
+extern uint32_t psx_cycle_frac;
+#define ADD_CYCLES(n)                                       do {                                                        psx_cycle_frac += (uint32_t)(n) * psx_cpi_q;            c->cycles += psx_cycle_frac >> 2;                       psx_cycle_frac &= 3;                                } while (0)
 #define CHECK_EVENTS(c) do { if (RECOMP_UNLIKELY((c)->cycles >= (c)->next_event)) psx_run_events(c); } while (0)
 // Average cost of an instruction including cache/memory stalls. Recompiled code runs
 // far faster than this on the host; the value only paces emulated time.
@@ -185,10 +190,12 @@ void call_indirect(R3000* c, uint32_t addr);
 // Entry hooks (see ENTRY_HOOKS in tools/recomp/emit.py).
 void psx_safepoint(R3000* c, uint32_t pc);
 void psx_hook_level_start(void);
-void psx_hook_render(R3000* c);
+int psx_hook_render(R3000* c);  // nonzero: the render was done by the hook
+int psx_hook_tick(R3000* c);  // nonzero: the tick was handled (sim60.cpp)
 
 // Runtime switches for patched call sites (see OPTIONAL_CALLS in tools/recomp/emit.py).
 extern int psx_opt_skip_frame_wait;  // 1 = skip the main loop's second VBlank wait (60 fps)
+extern int psx_opt_sim60;            // 1 = 60 Hz simulation prototype (sim60.cpp)
 // `jr reg` that is not a known switch: a tail call if `addr` is a function or BIOS
 // vector, otherwise a jump inside the current function (interpreted until it returns
 // to `func_ra`, the address the current function was called with).

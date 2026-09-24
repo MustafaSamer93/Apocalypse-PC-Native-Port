@@ -108,6 +108,16 @@ static bool exec_simple(R3000* c, uint32_t pc, uint32_t w) {
 
 static void interp_loop(R3000* c, uint32_t pc, const uint32_t return_to);
 
+// jal sites switched off at runtime; keep in sync with OPTIONAL_CALLS in tools/recomp/emit.py
+static bool optional_call_skipped(uint32_t pc) {
+    switch (pc) {
+        case 0x80030BCC: return psx_opt_skip_frame_wait != 0;
+        case 0x80030B80:
+        case 0x80030BBC: return psx_opt_sim60 != 0;
+        default: return false;
+    }
+}
+
 void interp_run(R3000* c, uint32_t pc) {
     report_once(pc, true);
     interp_loop(c, pc, c->r[31]);
@@ -161,8 +171,7 @@ static void interp_loop(R3000* c, uint32_t pc, const uint32_t return_to) {
         ADD_CYCLES(2);
         if (link) {
             if (link_reg) r[link_reg] = pc + 8;
-            // keep in sync with OPTIONAL_CALLS in tools/recomp/emit.py
-            bool skip = pc == 0x80030BCC && psx_opt_skip_frame_wait;
+            bool skip = optional_call_skipped(pc);
             if (taken && !skip) call_indirect(c, target);
             pc += 8;
             continue;

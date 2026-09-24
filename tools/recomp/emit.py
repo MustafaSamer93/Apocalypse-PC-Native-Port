@@ -27,16 +27,22 @@ def lbl(a: int) -> str:
 #   8008632C VSync: save-state safe point (see runtime/src/savestate.cpp)
 #   80030AD4 the level's main loop: a level has started (auto-save)
 #   800307F0 the level's render: extra frames between simulation steps (smooth.cpp)
+#   8002FF90 the level's tick: 60 Hz simulation prototype (sim60.cpp)
 ENTRY_HOOKS = {
+    0x8002FF90: "if (psx_hook_tick(c)) return;",
     0x8008632C: "psx_safepoint(c, 0x8008632Cu);",
     0x80030AD4: "psx_hook_level_start();",
-    0x800307F0: "psx_hook_render(c);",
+    0x800307F0: "if (psx_hook_render(c)) return;",
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.
 # 80030BCC: the main loop's second VBlank wait (the game's 30 fps cap).
+# 80030B80 / 80030BBC: the loop's second tick and its extra VBlank wait (sim60.cpp:
+#   one tick and one render per VBlank).
 OPTIONAL_CALLS = {
     0x80030BCC: "psx_opt_skip_frame_wait",
+    0x80030B80: "psx_opt_sim60",
+    0x80030BBC: "psx_opt_sim60",
 }
 
 

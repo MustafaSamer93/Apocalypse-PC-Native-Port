@@ -11,6 +11,8 @@
 uint8_t psx_ram[PSX_RAM_SIZE];
 uint8_t psx_scratch[PSX_SCRATCH_SIZE];
 int psx_cache_isolated = 0;
+uint32_t psx_cpi_q = 4 * PSX_CYCLES_PER_INSN;
+uint32_t psx_cycle_frac = 0;
 R3000* g_cpu = nullptr;
 
 // ================================================================ logging

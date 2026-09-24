@@ -114,6 +114,7 @@ std::string fps_label() {
 // Applies graphics settings that affect emulation (renderer, widescreen projection).
 // Images per game step for the current settings and display (1 = the original 30 fps).
 int smooth_target() {
+    if (psx_opt_sim60) return 1;  // the game itself renders every VBlank
     if (g_force_smooth) return g_force_smooth;
     if (g_active_scale <= 0) return 1;  // extra images need the OpenGL renderer
     if (g_gfx.fps == 0) return smooth_factor_for_refresh(g_refresh_hz);
@@ -899,8 +900,8 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RES, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_DEVICE, R_REMAP, R_RESET,
-               R_BACK, R_COUNT };
+    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RES, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DEVICE, R_REMAP,
+               R_RESET, R_BACK, R_COUNT };
     static int slot = 1;
     size_t dev_index = 0;
     int sel = 0;
@@ -947,6 +948,11 @@ static void run_settings_menu() {
                         gfx_changed = true;
                         break;
                     }
+                    case R_SIM:  // 60 Hz simulation prototype (sim60.cpp); not saved
+                        psx_opt_sim60 = !psx_opt_sim60;
+                        psx_cpi_q = psx_opt_sim60 ? 2 : 4 * PSX_CYCLES_PER_INSN;
+                        gfx_changed = true;
+                        break;
                     case R_DEVICE: dev_index = (dev_index + entries + step) % entries; break;
                     case R_SAVE:
                     case R_LOAD:
@@ -1027,6 +1033,7 @@ static void run_settings_menu() {
                     row("CRT filter", g_gfx.crt ? "On" : "Off"),
                     row("Smooth textures", g_gfx.texture_filter ? "On" : "Off"),
                     row("Frame rate", fps_label()),
+                    row("Simulation", psx_opt_sim60 ? "60 Hz (prototype)" : "30 Hz (original)"),
                     row("Controls", dev_line),
                     std::string("Set up buttons") + (custom ? "  (custom)" : "  (default)"),
                     "Reset buttons to default",

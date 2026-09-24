@@ -97,6 +97,10 @@ int main(int argc, char** argv) {
         else if (a == "--turbo") host_set_turbo(true);
         else if (a == "--interp") interp_only = true;
         else if (a == "--fps60") psx_opt_skip_frame_wait = 1;
+        else if (a == "--sim60") {  // 60 Hz simulation prototype (sim60.cpp)
+            psx_opt_sim60 = 1;
+            psx_cpi_q = 2;  // a 4x faster CPU: an update and a render must fit in one VBlank
+        }
         else if (a == "--refresh") {  // --refresh HZ: display refresh rate to assume
             extern float g_refresh_override;
             g_refresh_override = (float)std::atof(next().c_str());
