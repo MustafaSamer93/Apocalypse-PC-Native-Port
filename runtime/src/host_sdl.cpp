@@ -14,7 +14,7 @@
 #include "savestate.h"
 #include "smooth.h"
 
-constexpr const char* kVersion = "v0.1.0 beta";
+constexpr const char* kVersion = "v0.1 beta";
 int g_force_smooth = 0;  // --smooth K: images per game step regardless of the display
 float g_refresh_override = 0;  // --refresh HZ: assume this display refresh rate
 
