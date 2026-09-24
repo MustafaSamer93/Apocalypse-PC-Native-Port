@@ -126,6 +126,8 @@ Things the game does that the tools have to handle:
   render every VBlank, updates the player and cameras on the ticks that did nothing, and retimes
   their per-update amounts (half of each update's change for positions and velocities; whole-
   number counters such as animation frames keep their 30 Hz rate). Enemies and shots keep their
-  30 Hz logic and are drawn half a step behind so they move every frame.
+  30 Hz logic; the frame after each world update draws the world half way between before and
+  after it (positions, rotations, the screen tint, and animation poses, which are blended per
+  vertex by rendering twice), so everything in level 1 moves every frame.
 - **The game reads controllers directly over SIO.** Byte and `/ACK` timing are modelled,
   because the driver clears IRQ flags between the reply and the `/ACK`.

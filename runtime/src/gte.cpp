@@ -1,7 +1,9 @@
 // Geometry Transformation Engine (COP2), bit-accurate per the psx-spx documentation.
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "psx.h"
 
@@ -12,6 +14,25 @@ R3000* C;  // current context, set on every entry point (single-threaded)
 }  // namespace
 
 float g_gte_widescreen = 1.0f;
+
+// Pose blending (sim60.cpp): one render records every transformed vertex and output colour,
+// a second render of the same scene replaces each with the average of the two. The two
+// renders differ only in animation state, so the n-th vertex of one is the n-th vertex of
+// the other; a pair that is not (different model, different vertex count) is left alone.
+GteBlendMode g_gte_blend = GteBlendMode::Off;
+static std::vector<GteBlendVtx> g_blend_vtx;
+static std::vector<uint32_t> g_blend_rgb;
+static size_t g_blend_vi = 0, g_blend_ci = 0;
+uint32_t g_blend_stats[3];  // vertices blended, vertices skipped, colours blended
+
+void gte_blend_begin(GteBlendMode m) {
+    g_gte_blend = m;
+    if (m == GteBlendMode::Record) {
+        g_blend_vtx.clear();
+        g_blend_rgb.clear();
+    }
+    g_blend_vi = g_blend_ci = 0;
+}
 
 namespace {
 
@@ -81,6 +102,14 @@ void push_color() {
     D(21) = D(22);
     uint32_t r = lim_color(1, MAC(1) >> 4), g = lim_color(2, MAC(2) >> 4), b = lim_color(3, MAC(3) >> 4);
     D(22) = (int32_t)(r | g << 8 | b << 16 | (uint32_t)rgbc(3) << 24);
+    if (g_gte_blend == GteBlendMode::Record) {
+        g_blend_rgb.push_back((uint32_t)D(22));
+    } else if (g_gte_blend == GteBlendMode::Blend && g_blend_ci < g_blend_rgb.size()) {
+        uint32_t o = g_blend_rgb[g_blend_ci++], n = (uint32_t)D(22), m = n & 0xFF000000u;
+        for (int s = 0; s < 24; s += 8) m |= ((((o >> s) & 0xFF) + ((n >> s) & 0xFF) + 1) / 2) << s;
+        D(22) = (int32_t)m;
+        g_blend_stats[2]++;
+    }
 }
 
 void push_sz(int32_t v) {
@@ -167,6 +196,22 @@ void rtp(int n, const Cmd& c, bool last) {
     MAC(0) = chk_mac0(sx_num + K(24));
     MAC(0) = chk_mac0(q * IR(2) + K(25));
     push_sxy((int32_t)((sx_num + K(24)) >> 16), (int32_t)((q * IR(2) + K(25)) >> 16));
+    if (g_gte_blend == GteBlendMode::Record) {
+        g_blend_vtx.push_back({(int16_t)x, (int16_t)y, (int16_t)z, D(14), D(19)});
+    } else if (g_gte_blend == GteBlendMode::Blend) {
+        // Pair up with the recorded vertex: same model vertex (segmented models) or a nearby
+        // one (keyframed meshes), and not far away on screen.
+        const GteBlendVtx* r = g_blend_vi < g_blend_vtx.size() ? &g_blend_vtx[g_blend_vi++] : nullptr;
+        int ox = r ? lo16(r->sxy) : 0, oy = r ? hi16(r->sxy) : 0, nx = lo16(D(14)), ny = hi16(D(14));
+        if (r && std::abs(r->vx - x) + std::abs(r->vy - y) + std::abs(r->vz - z) < 512 &&
+            std::abs(ox - nx) < 64 && std::abs(oy - ny) < 64) {
+            D(14) = (int32_t)((uint32_t)(((ox + nx) / 2) & 0xFFFF) | ((uint32_t)((oy + ny) / 2) << 16));
+            D(19) = (r->sz + D(19)) / 2;
+            g_blend_stats[0]++;
+        } else {
+            g_blend_stats[1]++;
+        }
+    }
     if (last) {
         int64_t dq = q * (int16_t)K(27) + K(28);
         MAC(0) = chk_mac0(dq);

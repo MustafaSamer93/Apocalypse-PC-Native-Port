@@ -19,9 +19,13 @@
 //   - whole-number counters (animation frame, speed step) keep their 30 Hz rate: an
 //     odd-tick +1 is undone;
 //   - damage only lands on world-update ticks (shots move at 30 Hz and would count twice).
-// Enemies, items and shots keep their 30 Hz logic; so they move evenly at 60 fps, the render
-// right after a world update draws them half way (position and rotation) from where they
-// were before it, and the next render draws them where they are.
+// Enemies, items and shots keep their 30 Hz logic; so everything moves every frame, the render
+// right after a world update draws the world half way between before and after it: object
+// positions and rotations, the screen tint (damage flash, fades), and every model's pose.
+// Poses are blended by rendering twice: once, rolled back, with each object's animation
+// state from before the update, recording every vertex and colour the GTE produced, then for
+// real with each vertex and colour replaced by the average of the two (gte.cpp). The next
+// render draws everything where it is.
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +33,11 @@
 #include <vector>
 
 #include "psx.h"
+#include "state_io.h"
+
+void bios_ghost_state(StateIO& s);
+void hw_state(StateIO& s);
+void gpu_regs_state(StateIO& s);
 
 int psx_opt_sim60 = 0;
 
@@ -119,6 +128,28 @@ int16_t mid_angle(int16_t a, int16_t b, bool* ok) {
 std::vector<ObjPos> g_moved;
 bool g_mid_pending = false;
 
+// An object's animation state (everything that picks its pose) and damage flash, from
+// before the last world update: the frame after it is drawn half way between the pose
+// before and the pose after (sim60_render).
+constexpr int kAnimA = 0x16, kAnimALen = 5;     // mesh frame index, frame counter, animation
+constexpr int kAnimB = 0x128, kAnimBLen = 0x14;  // animation playback state
+constexpr int kFlash = 0x1D0;                    // damage flash intensity (16-bit), fades 256 per update
+constexpr int kType = 0x1B;
+struct AnimState {
+    uint32_t obj;
+    uint8_t type;
+    uint8_t a[kAnimALen], b[kAnimBLen];
+    uint16_t flash;
+};
+std::vector<AnimState> g_prev_anim;
+uint64_t g_blend_frames = 0;
+
+// Screen tint (the red damage flash and the game's other fades): red, green and blue as
+// 16.16 values that the world update steps (8001BF34); the render draws a full-screen
+// translucent quad in that colour (8001C004). Drawn half way after a world update.
+constexpr uint32_t kTint = kGp + 0xCA4;
+int32_t g_tint_before[3], g_tint_after[3];
+
 void call(R3000* c, uint32_t fn, uint32_t a0 = 0) {
     c->r[4] = a0;
     call_indirect(c, fn);
@@ -136,6 +167,7 @@ struct Before {
     Vec3 pv[std::size(kPlayerVecs)];
     uint16_t counters[std::size(kPlayerCounters)];
     int16_t health = 0;
+    int16_t flash = 0;
     uint32_t cams[8] = {};
     Vec3 cv[8][std::size(kCameraVecs)];
     int ncams = 0;
@@ -149,6 +181,7 @@ Before capture(R3000* c) {
         for (size_t i = 0; i < std::size(kPlayerCounters); i++)
             b.counters[i] = (uint16_t)MEM_R16(c, b.player + kPlayerCounters[i]);
         b.health = (int16_t)MEM_R16(c, b.player + kPlayerHealth);
+        b.flash = (int16_t)MEM_R16(c, b.player + kFlash);
     }
     uint32_t cam = MEM_R32(c, kCameraList);
     for (; valid_ptr(cam) && b.ncams < 8; cam = MEM_R32(c, cam + 4)) {
@@ -180,6 +213,11 @@ void retime(R3000* c, const Before& b, bool odd) {
                 if ((uint16_t)(MEM_R16(c, a) - b.counters[i]) == 1) MEM_W16(c, a, b.counters[i]);
             }
             if ((int16_t)MEM_R16(c, p + kPlayerHealth) < b.health) MEM_W16(c, p + kPlayerHealth, (uint16_t)b.health);
+        }
+        {
+            // the damage flash fades by a fixed step per player update: half a step per tick
+            int16_t now = (int16_t)MEM_R16(c, p + kFlash);
+            if (now < b.flash && now >= 0) MEM_W16(c, p + kFlash, (uint16_t)(b.flash - (b.flash - now) / 2));
         }
     }
     uint32_t cam = MEM_R32(c, kCameraList);
@@ -227,6 +265,54 @@ void trace_player(R3000* c, uint32_t t) {
 
 }  // namespace
 
+// Runs the render once outside emulated time (everything rolled back afterwards) with every
+// object's animation state from before the world update, recording what the GTE produced.
+bool record_previous_pose(R3000* c) {
+    static const bool off = std::getenv("APOC_NO_POSE_BLEND") != nullptr;  // for A/B comparisons
+    if (off) return false;
+    bool changed = false;
+    for (const AnimState& a : g_prev_anim) {
+        if (MEM_R8(c, a.obj + kType) != a.type) continue;
+        for (int i = 0; i < kAnimALen && !changed; i++) changed = MEM_R8(c, a.obj + kAnimA + i) != a.a[i];
+        for (int i = 0; i < kAnimBLen && !changed; i++) changed = MEM_R8(c, a.obj + kAnimB + i) != a.b[i];
+        if (!changed) changed = MEM_R16(c, a.obj + kFlash) != a.flash;
+        if (changed) break;
+    }
+    if (!changed) return false;  // nothing animated: the plain render is exact
+
+    static std::jmp_buf abort;
+    const R3000 saved = *c;
+    StateIO snap(false);
+    bios_ghost_state(snap);
+    hw_state(snap);
+    gpu_regs_state(snap);
+    volatile bool done = false;
+    core_ghost_begin(c, 40'000'000, &abort);
+    if (setjmp(abort) == 0) {
+        for (const AnimState& a : g_prev_anim) {
+            if (MEM_R8(c, a.obj + kType) != a.type) continue;  // object replaced since
+            for (int i = 0; i < kAnimALen; i++) MEM_W8(c, a.obj + kAnimA + i, a.a[i]);
+            for (int i = 0; i < kAnimBLen; i++) MEM_W8(c, a.obj + kAnimB + i, a.b[i]);
+            MEM_W16(c, a.obj + kFlash, a.flash);
+        }
+        gte_blend_begin(GteBlendMode::Record);
+        c->r[31] = 0;
+        call(c, kRender);
+        done = true;
+    }
+    gte_blend_begin(GteBlendMode::Off);
+    core_ghost_end(c);
+    *c = saved;
+    StateIO back(snap.data());
+    bios_ghost_state(back);
+    hw_state(back);
+    gpu_regs_state(back);
+    if (done && (++g_blend_frames % 600) == 0)
+        log_msg(LogCat::Host, "sim60 pose blend: %u vertices blended, %u kept, %u colours", g_blend_stats[0],
+                g_blend_stats[1], g_blend_stats[2]);
+    return done;
+}
+
 // The level's render (called from smooth.cpp's render hook when psx_opt_sim60 is on).
 int sim60_render(R3000* c) {
     if (g_in_render || !g_mid_pending) return 0;
@@ -242,12 +328,26 @@ int sim60_render(R3000* c) {
             for (int k = 0; k < 3; k++) MEM_W16(c, op.obj + kObjRot + 2 * k, (uint16_t)mid[k]);
         set.push_back(&op);
     }
+    // the tint half way, unless it jumped (a new flash starts at full strength)
+    bool tint = true;
+    for (int k = 0; k < 3; k++) {
+        if ((int32_t)MEM_R32(c, kTint + 4 * k) != g_tint_after[k]) tint = false;
+        if (std::abs((int64_t)g_tint_after[k] - g_tint_before[k]) > (0x40 << 16)) tint = false;
+    }
+    if (tint)
+        for (int k = 0; k < 3; k++)
+            MEM_W32(c, kTint + 4 * k, (uint32_t)(g_tint_before[k] + (g_tint_after[k] - g_tint_before[k]) / 2));
     const uint32_t ra = c->r[31], sp = c->r[29];
     g_in_render = true;
+    const bool blend = record_previous_pose(c);
+    gte_blend_begin(blend ? GteBlendMode::Blend : GteBlendMode::Off);
     call(c, kRender);
+    gte_blend_begin(GteBlendMode::Off);
     g_in_render = false;
     c->r[31] = ra;
     c->r[29] = sp;
+    if (tint)
+        for (int k = 0; k < 3; k++) MEM_W32(c, kTint + 4 * k, (uint32_t)g_tint_after[k]);
     for (const ObjPos* op : set) {
         for (int k = 0; k < 3; k++) MEM_W32(c, op->obj + 4 + 4 * k, (uint32_t)op->after[k]);
         for (int k = 0; k < 3; k++) MEM_W16(c, op->obj + kObjRot + 2 * k, (uint16_t)op->rot_after[k]);
@@ -265,6 +365,16 @@ extern "C" int psx_hook_tick(R3000* c) {
     const Before before = capture(c);
     if (!(t & 1)) {
         // even: the game's full update (it advances the counters itself)
+        g_prev_anim.clear();
+        for (uint32_t head : {kPlayerList, kOtherLists[0], kOtherLists[1]}) {
+            uint32_t o = MEM_R32(c, head);
+            for (int n = 0; valid_ptr(o) && n < 4096; n++, o = MEM_R32(c, o + 0x1C)) {
+                AnimState a{o, (uint8_t)MEM_R8(c, o + kType), {}, {}, (uint16_t)MEM_R16(c, o + kFlash)};
+                for (int i = 0; i < kAnimALen; i++) a.a[i] = (uint8_t)MEM_R8(c, o + kAnimA + i);
+                for (int i = 0; i < kAnimBLen; i++) a.b[i] = (uint8_t)MEM_R8(c, o + kAnimB + i);
+                g_prev_anim.push_back(a);
+            }
+        }
         std::vector<ObjPos> objs;
         for (uint32_t head : kOtherLists) {
             uint32_t o = MEM_R32(c, head);
@@ -275,9 +385,11 @@ extern "C" int psx_hook_tick(R3000* c) {
                 objs.push_back(op);
             }
         }
+        for (int k = 0; k < 3; k++) g_tint_before[k] = (int32_t)MEM_R32(c, kTint + 4 * k);
         g_in_tick = true;
         call(c, kTick);
         g_in_tick = false;
+        for (int k = 0; k < 3; k++) g_tint_after[k] = (int32_t)MEM_R32(c, kTint + 4 * k);
         g_moved.clear();
         for (ObjPos& op : objs) {
             Vec3 p = rd(c, op.obj + 4);

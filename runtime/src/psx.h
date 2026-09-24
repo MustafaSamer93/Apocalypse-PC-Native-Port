@@ -87,6 +87,16 @@ int core_ghost_end(R3000* c);  // returns how many sound/CD/movie writes were dr
 bool core_in_ghost();
 void smooth_on_flip();         // the game showed a new frame (GP1 display start)
 
+// Pose blending between two renders (gte.cpp, sim60.cpp)
+enum class GteBlendMode { Off, Record, Blend };
+struct GteBlendVtx {
+    int16_t vx, vy, vz;  // model-space input
+    int32_t sxy, sz;     // screen output
+};
+extern GteBlendMode g_gte_blend;
+extern uint32_t g_blend_stats[3];
+void gte_blend_begin(GteBlendMode m);
+
 // 60 Hz simulation (sim60.cpp)
 extern int g_sim60_setting;    // 0 = 30 Hz, 1 = 60 Hz in level 1, 2 = 60 Hz in every level
 extern bool g_sim60_force;     // --sim60
