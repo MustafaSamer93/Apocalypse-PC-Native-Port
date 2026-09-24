@@ -32,6 +32,11 @@ bool hw_init(int scale);            // needs a current GL context
 void hw_shutdown();
 bool hw_active();
 int hw_scale();
+// Multisample anti-aliasing: samples asked for (1, 2, 4, 8; applies at the next hw_init) and
+// in use (lower if the GPU or a 512 MB budget does not allow it).
+void hw_set_samples(int n);
+int hw_samples_wanted();
+int hw_samples();
 
 // Primitives (native coordinates).
 void hw_triangle(const HwVtx* v0, const HwVtx* v1, const HwVtx* v2, const HwPrim& p, const HwState& s);

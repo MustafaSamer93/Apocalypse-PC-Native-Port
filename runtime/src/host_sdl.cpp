@@ -33,7 +33,9 @@ struct GfxSettings {
     bool texture_filter = false;
     int fps = 0;            // images per second: 0 = match the display, 30 = original, 60..150 (smooth.cpp)
     int aa = 3;             // anti-aliasing: bit 0 = FXAA pass, bit 1 = supersampling (SSAA)
+    int msaa = 1;           // multisample anti-aliasing: samples per pixel (1, 2, 4, 8)
 };
+int g_active_msaa = 1;      // MSAA samples the renderer was created with
 const char* const kAaNames[] = {"Off", "FXAA", "SSAA", "SSAA + FXAA"};
 GfxSettings g_gfx;
 float g_refresh_hz = 60.0f;  // display refresh rate
@@ -105,6 +107,14 @@ PresentOptions present_options() {
     return o;
 }
 
+// Settings screen text for the multisampling rate (with what the GPU could give).
+std::string msaa_label() {
+    std::string s = std::to_string(g_gfx.msaa) + "x" + (g_gfx.msaa == 1 ? " (off)" : "");
+    int got = hw_samples();
+    if (g_gfx.msaa > 1 && got > 0 && got < g_gfx.msaa) s += ", " + std::to_string(got) + "x fits";
+    return s;
+}
+
 // Settings screen text for the simulation rate choice.
 std::string sim60_label() {
     const char* names[] = {"30 Hz original", "60 Hz level 1", "60 Hz all (beta)"};
@@ -144,7 +154,10 @@ int render_scale() {
 
 void apply_graphics() {
     const int want = render_scale();
-    if (g_gl_ok && want != g_active_scale) g_active_scale = gpu_set_renderer(want);
+    if (g_gl_ok && (want != g_active_scale || g_gfx.msaa != g_active_msaa)) {
+        g_active_scale = gpu_set_renderer(want, g_gfx.msaa);
+        g_active_msaa = g_gfx.msaa;
+    }
     if (!g_gl_ok) g_active_scale = 0;
     hw_set_texture_filter(g_gfx.texture_filter);
     smooth_set_factor(smooth_target());
@@ -225,6 +238,7 @@ void save_settings() {
                  g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
     std::fprintf(f, "sim %d\n", g_sim60_setting);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
+    std::fprintf(f, "msaa %d\n", g_gfx.msaa);
     if (g_key_custom) {
         std::fprintf(f, "keys");
         for (int i = 0; i < 16; i++)
@@ -259,6 +273,10 @@ void load_settings() {
             if (got == 5) g_gfx.fps = std::clamp(fps / 30 * 30, 0, 150);
             else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
                 g_gfx.fps = smooth ? 0 : 30;  // older settings file
+            continue;
+        }
+        if (int ms; std::sscanf(line, "msaa %d", &ms) == 1) {
+            g_gfx.msaa = ms >= 8 ? 8 : ms >= 4 ? 4 : ms >= 2 ? 2 : 1;
             continue;
         }
         if (int aa; std::sscanf(line, "aa %d", &aa) == 1) {
@@ -958,7 +976,7 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RES, R_AA, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DEVICE, R_REMAP,
+    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DEVICE, R_REMAP,
                R_RESET, R_BACK, R_COUNT };
     static int slot = 1;
     size_t dev_index = 0;
@@ -997,6 +1015,14 @@ static void run_settings_menu() {
                 switch (sel) {
                     case R_RES: g_gfx.scale = (g_gfx.scale + step + 9) % 9; gfx_changed = true; break;
                     case R_AA: g_gfx.aa = (g_gfx.aa + step + 4) % 4; gfx_changed = true; break;
+                    case R_MSAA: {
+                        static const int rates[] = {1, 2, 4, 8};
+                        int i = 0;
+                        while (i < 3 && rates[i] != g_gfx.msaa) i++;
+                        g_gfx.msaa = rates[(i + step + 4) % 4];
+                        gfx_changed = true;
+                        break;
+                    }
                     case R_ASPECT: g_gfx.aspect = (Aspect)(((int)g_gfx.aspect + step + 4) % 4); gfx_changed = true; break;
                     case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
                     case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
@@ -1095,6 +1121,7 @@ static void run_settings_menu() {
                     row("Load auto-save", state_slot_label(kAutoSlot)),
                     row("Resolution", res),
                     row("Anti-aliasing", kAaNames[g_gfx.aa]),
+                    row("AA rate (MSAA)", msaa_label()),
                     row("Aspect ratio", kAspect[(int)g_gfx.aspect]),
                     row("CRT filter", g_gfx.crt ? "On" : "Off"),
                     row("Smooth textures", g_gfx.texture_filter ? "On" : "Off"),
@@ -1105,9 +1132,8 @@ static void run_settings_menu() {
                     "Reset buttons to default",
                     "Back to game",
                     status,
-                    "Arrows: choose/change  Enter: select",
-                    "F5/F9: quick save/load (slot 1)",
-                    "Open: F1 or hold SELECT+START"},
+                    "Arrows: change  Enter: select  Esc: back",
+                    "F5/F9: quick save/load  Pad: SELECT+START"},
                    1 + sel);
         SDL_Delay(15);
     }

@@ -104,7 +104,7 @@ extern std::string g_sim60_level;
 extern bool g_sim60_demo;
 void sim60_apply();
 void sim60_note_file(const std::string& file);
-int gpu_set_renderer(int scale);  // 0 = software, 1..8 = OpenGL at that scale
+int gpu_set_renderer(int scale, int samples = 1);  // 0 = software, 1..8 = OpenGL at that scale; MSAA samples
 
 // Widescreen hack: horizontal scale applied to GTE screen coordinates (1 = off).
 extern float g_gte_widescreen;

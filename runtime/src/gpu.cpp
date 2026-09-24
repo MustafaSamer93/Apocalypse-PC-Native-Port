@@ -660,11 +660,12 @@ uint32_t gpu_read_stat(R3000* c) {
 
 // 0 = software renderer, 1..8 = OpenGL renderer at that resolution scale. Needs the
 // window's GL context to be current. Returns the scale actually in use.
-int gpu_set_renderer(int scale) {
+int gpu_set_renderer(int scale, int samples) {
     if (hw_active()) {
         hw_readback(0, 0, 1024, 512, g_vram);  // keep what was drawn on the GPU
-        if (scale != hw_scale()) hw_shutdown();
+        if (scale != hw_scale() || samples != hw_samples_wanted()) hw_shutdown();
     }
+    hw_set_samples(samples);
     if (scale > 0 && !hw_active()) {
         if (!hw_init(scale)) {
             log_msg(LogCat::Gpu, "OpenGL renderer unavailable, using the software renderer");

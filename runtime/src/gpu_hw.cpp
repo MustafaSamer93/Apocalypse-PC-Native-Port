@@ -18,9 +18,11 @@ namespace {
 
 int S = 0;  // scale; 0 = not initialised
 GLuint g_draw_tex, g_draw_fbo, g_read_tex, g_read_fbo, g_stage_tex;
+GLuint g_draw_rb = 0;                     // multisampled draw target (instead of g_draw_tex)
+int g_samples_wanted = 1, g_samples = 1;  // MSAA samples asked for / in use
 GLuint g_prog, g_copy_prog, g_vao, g_vbo;
 GLint u_scale, u_texwin, u_pass, u_set_mask, u_filter, u_vram;
-GLint uc_src, uc_scale;
+GLint uc_src, uc_scale, uc_off;
 bool g_filter = false;
 
 struct GLVtx {
@@ -170,11 +172,14 @@ const char* kCopyVS = R"(#version 330 core
 layout(location = 0) in vec2 a_pos;
 void main() { gl_Position = vec4(a_pos.x / 512.0 - 1.0, a_pos.y / 256.0 - 1.0, 0.0, 1.0); }
 )";
+// Copies texels into the draw target by drawing (a multisampled target cannot be blitted
+// into): destination pixel p takes source texel (p - u_off) / u_scale.
 const char* kCopyFS = R"(#version 330 core
 uniform sampler2D u_src;
 uniform int u_scale;
+uniform ivec2 u_off;
 out vec4 o_color;
-void main() { o_color = texelFetch(u_src, ivec2(gl_FragCoord.xy) / u_scale, 0); }
+void main() { o_color = texelFetch(u_src, (ivec2(gl_FragCoord.xy) - u_off) / u_scale, 0); }
 )";
 
 GLuint make_vram_texture(int w, int h) {
@@ -359,6 +364,7 @@ bool hw_init(int scale) {
         u_vram = glGetUniformLocation(g_prog, "u_vram");
         uc_src = glGetUniformLocation(g_copy_prog, "u_src");
         uc_scale = glGetUniformLocation(g_copy_prog, "u_scale");
+        uc_off = glGetUniformLocation(g_copy_prog, "u_off");
         glGenVertexArrays(1, &g_vao);
         glGenBuffers(1, &g_vbo);
         glBindVertexArray(g_vao);
@@ -375,10 +381,39 @@ bool hw_init(int scale) {
     }
     hw_shutdown();
     S = std::clamp(scale, 1, 8);
-    g_draw_tex = make_vram_texture(1024 * S, 512 * S);
     g_read_tex = make_vram_texture(1024 * S, 512 * S);
-    g_draw_fbo = make_fbo(g_draw_tex);
     g_read_fbo = make_fbo(g_read_tex);
+    // Multisampling: polygons are drawn into a multisampled target that is resolved into
+    // `read` (which textures and the display come from). Sample counts that would take more
+    // than 512 MB, or more than the GPU offers, are lowered.
+    g_samples = 1;
+    if (g_samples_wanted > 1) {
+        GLint max_samples = 1;
+        glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
+        int n = std::min(g_samples_wanted, (int)max_samples);
+        while (n > 1 && (uint64_t)1024 * S * 512 * S * 4 * (uint64_t)n > (512ull << 20)) n /= 2;
+        while (n > 1) {
+            while (glGetError() != GL_NO_ERROR) {}
+            glGenRenderbuffers(1, &g_draw_rb);
+            glBindRenderbuffer(GL_RENDERBUFFER, g_draw_rb);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, 1024 * S, 512 * S);
+            glGenFramebuffers(1, &g_draw_fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, g_draw_fbo);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, g_draw_rb);
+            if (glGetError() == GL_NO_ERROR && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+                g_samples = n;
+                break;
+            }
+            glDeleteFramebuffers(1, &g_draw_fbo);
+            glDeleteRenderbuffers(1, &g_draw_rb);
+            g_draw_fbo = g_draw_rb = 0;
+            n /= 2;
+        }
+    }
+    if (g_samples == 1) {
+        g_draw_tex = make_vram_texture(1024 * S, 512 * S);
+        g_draw_fbo = make_fbo(g_draw_tex);
+    }
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         log_msg(LogCat::Gpu, "hardware renderer: %dx VRAM framebuffer not supported", S);
         hw_shutdown();
@@ -387,7 +422,7 @@ bool hw_init(int scale) {
     g_dirty = false;
     g_batch.clear();
     g_key = BatchKey{};
-    log_msg(LogCat::Gpu, "hardware renderer: %dx (%dx%d VRAM)", S, 1024 * S, 512 * S);
+    log_msg(LogCat::Gpu, "hardware renderer: %dx (%dx%d VRAM), %dx MSAA", S, 1024 * S, 512 * S, g_samples);
     return true;
 }
 
@@ -415,7 +450,8 @@ static void copy_out(Capture& c, int x, int y, int w, int h) {
         c.w = w * S;
         c.h = h * S;
     }
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_draw_fbo);
+    if (g_samples > 1) sync_read();  // resolved copy
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_samples > 1 ? g_read_fbo : g_draw_fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, c.fbo);
     glBlitFramebuffer(x * S, y * S, (x + w) * S, (y + h) * S, 0, 0, w * S, h * S, GL_COLOR_BUFFER_BIT,
                       GL_NEAREST);
@@ -436,13 +472,18 @@ void hw_shutdown() {
     free_capture(g_stash);
     glDeleteFramebuffers(1, &g_draw_fbo);
     glDeleteFramebuffers(1, &g_read_fbo);
-    glDeleteTextures(1, &g_draw_tex);
+    if (g_draw_tex) glDeleteTextures(1, &g_draw_tex);
+    if (g_draw_rb) glDeleteRenderbuffers(1, &g_draw_rb);
     glDeleteTextures(1, &g_read_tex);
+    g_draw_tex = g_draw_rb = 0;
     S = 0;
 }
 
 bool hw_active() { return S != 0; }
 int hw_scale() { return S; }
+int hw_samples() { return S ? g_samples : 0; }
+void hw_set_samples(int n) { g_samples_wanted = std::clamp(n, 1, 8); }
+int hw_samples_wanted() { return g_samples_wanted; }
 void hw_set_texture_filter(bool on) {
     if (on != g_filter) flush();
     g_filter = on;
@@ -513,6 +554,28 @@ void hw_fill(int x, int y, int w, int h, uint16_t color) {
     mark_dirty(x, y, x + w, y + h);
 }
 
+// Draws texels of `src` into the draw target over the native rectangle x, y, w, h: target
+// pixel p takes texel (p - off) / scale (see kCopyFS). Used where a blit cannot write
+// (a multisampled target).
+static void draw_copy(GLuint src, int offx, int offy, int scale, int x, int y, int w, int h) {
+    glUseProgram(g_copy_prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, src);
+    glUniform1i(uc_src, 0);
+    glUniform1i(uc_scale, scale);
+    glUniform2i(uc_off, offx, offy);
+    glBindVertexArray(g_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+    GLVtx q[6] = {};
+    float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
+    float c[6][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x1, y0}, {x1, y1}, {x0, y1}};
+    for (int i = 0; i < 6; i++) { q[i].x = c[i][0]; q[i].y = c[i][1]; }
+    glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+    glDisable(GL_BLEND);
+    bind_draw_target();
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
 // Uploads a native rectangle of the CPU VRAM copy into both GPU copies.
 static void upload_rect(int x, int y, int w, int h, const uint16_t* vram) {
     std::vector<uint32_t> px((size_t)w * h);
@@ -527,6 +590,7 @@ static void upload_rect(int x, int y, int w, int h, const uint16_t* vram) {
     glBindTexture(GL_TEXTURE_2D, g_stage_tex);
     glUniform1i(uc_src, 0);
     glUniform1i(uc_scale, S);
+    glUniform2i(uc_off, 0, 0);
     glBindVertexArray(g_vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
     GLVtx q[6] = {};
@@ -572,10 +636,14 @@ void hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
     w = std::min({w, 1024 - sx, 1024 - dx});
     h = std::min({h, 512 - sy, 512 - dy});
     if (w <= 0 || h <= 0) return;
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_read_fbo);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_draw_fbo);
-    glBlitFramebuffer(sx * S, sy * S, (sx + w) * S, (sy + h) * S, dx * S, dy * S, (dx + w) * S, (dy + h) * S,
-                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (g_samples > 1) {
+        draw_copy(g_read_tex, (dx - sx) * S, (dy - sy) * S, 1, dx, dy, w, h);
+    } else {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_read_fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_draw_fbo);
+        glBlitFramebuffer(sx * S, sy * S, (sx + w) * S, (sy + h) * S, dx * S, dy * S, (dx + w) * S, (dy + h) * S,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
     mark_dirty(dx, dy, dx + w, dy + h);
 }
 
@@ -585,7 +653,8 @@ void hw_readback(int x, int y, int w, int h, uint16_t* vram) {
     h = std::min(h, 512 - y);
     if (w <= 0 || h <= 0) return;
     std::vector<uint32_t> px((size_t)w * S * h * S);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_draw_fbo);
+    if (g_samples > 1) sync_read();
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_samples > 1 ? g_read_fbo : g_draw_fbo);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(x * S, y * S, w * S, h * S, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     for (int j = 0; j < h; j++) {
@@ -624,20 +693,25 @@ void hw_stash(int x, int y, int w, int h) {
 void hw_unstash() {
     if (!S || !g_stash_w) return;
     flush();
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_stash.fbo);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_draw_fbo);
-    glBlitFramebuffer(0, 0, g_stash_w * S, g_stash_h * S, g_stash_x * S, g_stash_y * S, (g_stash_x + g_stash_w) * S,
-                      (g_stash_y + g_stash_h) * S, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (g_samples > 1) {
+        draw_copy(g_stash.tex, g_stash_x * S, g_stash_y * S, 1, g_stash_x, g_stash_y, g_stash_w, g_stash_h);
+    } else {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_stash.fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_draw_fbo);
+        glBlitFramebuffer(0, 0, g_stash_w * S, g_stash_h * S, g_stash_x * S, g_stash_y * S,
+                          (g_stash_x + g_stash_w) * S, (g_stash_y + g_stash_h) * S, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     mark_dirty(g_stash_x, g_stash_y, g_stash_x + g_stash_w, g_stash_y + g_stash_h);  // read copy re-syncs
     g_stash_w = 0;
 }
 
 unsigned hw_display_texture(int x, int y, int w, int h, int* px, int* py, int* pw, int* ph) {
-    flush();
+    if (g_samples > 1) sync_read();  // show the resolved image
+    else flush();
     *px = x * S;
     *py = y * S;
     *pw = w * S;
     *ph = h * S;
-    return g_draw_tex;
+    return g_samples > 1 ? g_read_tex : g_draw_tex;
 }

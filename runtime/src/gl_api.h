@@ -16,6 +16,11 @@
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
     X(void, glBufferData, (GLenum, GLsizeiptr, const void*, GLenum))                                        \
     X(void, glBufferSubData, (GLenum, GLintptr, GLsizeiptr, const void*))                                   \
+    X(void, glGenRenderbuffers, (GLsizei, GLuint*))                                                         \
+    X(void, glBindRenderbuffer, (GLenum, GLuint))                                                           \
+    X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei))                  \
+    X(void, glFramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint))                                    \
+    X(void, glDeleteRenderbuffers, (GLsizei, const GLuint*))                                                \
     X(GLenum, glCheckFramebufferStatus, (GLenum))                                                           \
     X(void, glCompileShader, (GLuint))                                                                      \
     X(GLuint, glCreateProgram, (void))                                                                      \
@@ -64,6 +69,11 @@ GL_FUNCS(GL_DECLARE)
 #define glBlitFramebuffer p_glBlitFramebuffer
 #define glBufferData p_glBufferData
 #define glBufferSubData p_glBufferSubData
+#define glGenRenderbuffers p_glGenRenderbuffers
+#define glBindRenderbuffer p_glBindRenderbuffer
+#define glRenderbufferStorageMultisample p_glRenderbufferStorageMultisample
+#define glFramebufferRenderbuffer p_glFramebufferRenderbuffer
+#define glDeleteRenderbuffers p_glDeleteRenderbuffers
 #define glCheckFramebufferStatus p_glCheckFramebufferStatus
 #define glCompileShader p_glCompileShader
 #define glCreateProgram p_glCreateProgram
