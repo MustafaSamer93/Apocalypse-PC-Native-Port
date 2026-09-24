@@ -5,8 +5,13 @@
 #include <string>
 #include <vector>
 
+#include <csetjmp>
+
 #include "memcard.h"
 #include "psx.h"
+#include "savestate.h"
+
+extern std::jmp_buf g_resume_jmp;
 
 extern "C" {
 extern const RecompFunc main_func_table[];
@@ -88,6 +93,11 @@ int main(int argc, char** argv) {
         }
         else if (a == "--turbo") host_set_turbo(true);
         else if (a == "--interp") interp_only = true;
+        else if (a == "--fps60") psx_opt_skip_frame_wait = 1;
+        else if (a == "--states") {
+            extern bool host_parse_state_script(const char*);
+            if (!host_parse_state_script(next().c_str())) { usage(); return 1; }
+        }
         else if (a == "--screenshot") {  // --screenshot FRAME[,FRAME...] PREFIX
             extern std::vector<uint64_t> g_shot_frames;
             extern std::string g_shot_prefix;
@@ -151,7 +161,22 @@ int main(int argc, char** argv) {
     cpu.r[31] = 0;
     sched_add(&cpu, Ev::Scanline, CYCLES_PER_SCANLINE_NTSC);
 
-    call_indirect(&cpu, entry);
+    // Loading a save state longjmps back here (from the VSync safe point) with the machine
+    // restored; the game then continues from VSync's entry: VSync itself runs recompiled,
+    // and everything above it (the callers' remaining code) is interpreted, while every
+    // function those callers invoke is recompiled again.
+    if (setjmp(g_resume_jmp) == 0) {
+        call_indirect(&cpu, entry);
+    } else {
+        uint32_t pc;
+        if (!state_take_resume(&pc)) fatal("resumed without a loaded state");
+        uint32_t return_to = cpu.r[31];
+        call_indirect(&cpu, pc);
+        for (;;) {
+            interp_run_until(&cpu, return_to, 0xFFFFFFFFu);  // never "returns" to the sentinel
+            return_to = cpu.r[31];  // left through a tail call: continue where that returned
+        }
+    }
 
     log_msg(LogCat::Core, "game returned from its entry point");
     memcard(0).flush();

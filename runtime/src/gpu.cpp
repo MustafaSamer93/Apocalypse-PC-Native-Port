@@ -700,3 +700,22 @@ GpuDisplay gpu_display() {
     d.enabled = DS.enabled;
     return d;
 }
+
+// ================================================================ save states
+
+#include "state_io.h"
+
+void gpu_state(StateIO& s) {
+    s.marker(0x47505520);  // "GPU "
+    if (!s.loading() && hw_active()) hw_readback(0, 0, 1024, 512, g_vram);  // GPU-side VRAM is authoritative
+    s.raw(g_vram, sizeof g_vram);
+    s(S);
+    s(DS);
+    s(g_odd_line);
+    s.vec(g_cmd);
+    s(g_cmd_need);
+    s(g_upload);
+    s(g_download);
+    s(g_gpuread);
+    if (s.loading() && hw_active()) hw_upload_all(g_vram);
+}

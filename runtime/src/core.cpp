@@ -418,6 +418,8 @@ RecompFuncPtr dispatch_lookup(uint32_t addr) {
     return it == g_funcs.end() ? nullptr : it->second;
 }
 
+int psx_opt_skip_frame_wait = 0;
+
 uint32_t g_trace_call_addr = 0;  // --trace-call: log calls to this function (interp mode)
 static int g_trace_call_count = 0;
 
@@ -495,3 +497,27 @@ void psx_watch_dma(uint32_t phys, uint32_t len, const char* who) {
         log_msg(LogCat::Core, "watch: %s wrote %08X..%08X (cycles=%llu)", who, phys, phys + len,
                 (unsigned long long)g_cpu->cycles);
 }
+
+// ================================================================ save states
+
+#include "state_io.h"
+
+void core_state(StateIO& s) {
+    s.marker(0x434F5245);  // "CORE"
+    s.raw(psx_ram, sizeof psx_ram);
+    s.raw(psx_scratch, sizeof psx_scratch);
+    s(psx_cache_isolated);
+    s.raw(g_ev_time, sizeof g_ev_time);
+    s.raw(g_ev_active, sizeof g_ev_active);
+    s(g_force_check);
+    s(g_scanline);
+    s(g_istat);
+    s(g_imask);
+    s.raw(g_memctrl, sizeof g_memctrl);
+    s(g_ramsize);
+    // a load longjmps out of whatever native frames were active, including any
+    // psx_run_events that was mid-flight: its depth counter must start over
+    if (s.loading()) g_events_depth = 0;
+}
+
+void sched_refresh(R3000* c) { sched_update(c); }

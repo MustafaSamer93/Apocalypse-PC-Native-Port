@@ -567,3 +567,32 @@ bool cdrom_find_file(const char* path, uint32_t* lba_out, uint32_t* size_out) {
         p = p.substr(part.size() + 1);
     }
 }
+
+// ================================================================ save states
+
+#include "state_io.h"
+
+void cdrom_state(StateIO& s) {
+    s.marker(0x43444452);  // "CDDR"
+    s(g_index); s(g_int_enable); s(g_int_flag);
+    s.vec(g_params);
+    s.deq(g_resp_fifo);
+    uint32_t n = (uint32_t)g_pending.size();
+    s(n);
+    if (s.loading()) g_pending.resize(n);
+    for (auto& r : g_pending) {
+        s(r.irq);
+        s.vec(r.bytes);
+        s(r.due);
+    }
+    s(g_busy); s(g_stat); s(g_mode); s(g_filter_file); s(g_filter_chan); s(g_muted);
+    s(g_setloc); s(g_setloc_pending); s(g_pos); s(g_reading); s(g_playing);
+    s.raw(g_sector, sizeof g_sector);
+    s.raw(g_last_header, sizeof g_last_header);
+    s.vec(g_data);
+    s(g_data_pos);
+    s.raw(g_vol, sizeof g_vol);
+    s.raw(g_vol_pending, sizeof g_vol_pending);
+    s.raw(g_xa_old, sizeof g_xa_old);
+    s.raw(g_xa_older, sizeof g_xa_older);
+}

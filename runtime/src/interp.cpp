@@ -161,7 +161,9 @@ static void interp_loop(R3000* c, uint32_t pc, const uint32_t return_to) {
         ADD_CYCLES(2);
         if (link) {
             if (link_reg) r[link_reg] = pc + 8;
-            if (taken) call_indirect(c, target);
+            // keep in sync with OPTIONAL_CALLS in tools/recomp/emit.py
+            bool skip = pc == 0x80030BCC && psx_opt_skip_frame_wait;
+            if (taken && !skip) call_indirect(c, target);
             pc += 8;
             continue;
         }

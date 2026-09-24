@@ -11,6 +11,7 @@
 #include "gpu_hw.h"
 #include "present.h"
 #include "psx.h"
+#include "savestate.h"
 
 namespace {
 
@@ -63,6 +64,25 @@ enum : uint16_t {
     B_L2 = 1 << 8, B_R2 = 1 << 9, B_L1 = 1 << 10, B_R1 = 1 << 11,
     B_TRIANGLE = 1 << 12, B_CIRCLE = 1 << 13, B_CROSS = 1 << 14, B_SQUARE = 1 << 15,
 };
+
+// Short on-screen messages ("State 1 saved").
+std::string g_toast;
+uint64_t g_toast_until = 0;
+
+void draw_toast() {
+    if (g_toast.empty() || SDL_GetTicksNS() >= g_toast_until) return;
+    SDL_Renderer* r = present_overlay_begin();
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderScale(r, 2.0f, 2.0f);
+    float w = 8.0f * (float)g_toast.size() + 12.0f;
+    SDL_FRect box{8, 8, w, 16};
+    SDL_SetRenderDrawColor(r, 0, 0, 0, 180);
+    SDL_RenderFillRect(r, &box);
+    SDL_SetRenderDrawColor(r, 255, 230, 180, 255);
+    SDL_RenderDebugText(r, 14, 12, g_toast.c_str());
+    SDL_SetRenderScale(r, 1.0f, 1.0f);
+    present_overlay_end();
+}
 
 PresentOptions present_options() {
     PresentOptions o;
@@ -300,6 +320,8 @@ void host_poll() {
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) g_quit = true;
                 if (e.key.scancode == SDL_SCANCODE_F1 && !e.key.repeat) open_menu = true;
+                if (e.key.scancode == SDL_SCANCODE_F5 && !e.key.repeat) state_request_save(1);
+                if (e.key.scancode == SDL_SCANCODE_F9 && !e.key.repeat) state_request_load(1);
                 if (e.key.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
                     bool fs = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
                     SDL_SetWindowFullscreen(g_window, !fs);
@@ -511,6 +533,33 @@ void host_rumble(int port, uint8_t small_motor, uint8_t large_motor) {
 std::vector<uint64_t> g_shot_frames;  // --screenshot F1,F2,... PREFIX
 std::string g_shot_prefix;
 
+// --states save1@4000,load1@4600 : scripted save/load requests (testing)
+std::vector<std::pair<uint64_t, int>> g_state_script;  // frame -> +slot (save) / -slot-1 (load)
+
+static void run_state_script() {
+    for (auto& [f, op] : g_state_script) {
+        if (f != g_frame) continue;
+        if (op >= 0) state_request_save(op);
+        else state_request_load(-op - 1);
+    }
+}
+
+bool host_parse_state_script(const char* spec) {
+    std::string s(spec);
+    for (size_t p = 0; p < s.size();) {
+        size_t e = s.find(',', p);
+        if (e == std::string::npos) e = s.size();
+        std::string item = s.substr(p, e - p);
+        p = e + 1;
+        int slot;
+        unsigned long long frame;
+        if (std::sscanf(item.c_str(), "save%d@%llu", &slot, &frame) == 2) g_state_script.push_back({frame, slot});
+        else if (std::sscanf(item.c_str(), "load%d@%llu", &slot, &frame) == 2) g_state_script.push_back({frame, -slot - 1});
+        else return false;
+    }
+    return true;
+}
+
 static void maybe_screenshot() {
     for (uint64_t f : g_shot_frames)
         if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
@@ -544,6 +593,8 @@ static void write_vram_bmp(const uint16_t* vram, const std::string& path) {
 
 void host_present(const GpuDisplay& d) {
     g_frame++;
+    run_state_script();
+    state_poll_load(g_cpu);
     if (g_dump_vram_frame && g_frame == g_dump_vram_frame) {
         write_vram_bmp(d.vram, g_dump_vram_path);
         log_msg(LogCat::Host, "VRAM dumped to %s (display at %d,%d %dx%d%s)", g_dump_vram_path.c_str(), d.x, d.y,
@@ -578,6 +629,7 @@ void host_present(const GpuDisplay& d) {
         int px, py, pw, ph;
         unsigned tex = hw_display_texture(d.x, d.y, w, h, &px, &py, &pw, &ph);
         present_game_texture(tex, 1024 * hw_scale(), 512 * hw_scale(), px, py, pw, ph, h, opt);
+        draw_toast();
         maybe_screenshot();
         present_swap();
         return;
@@ -606,6 +658,7 @@ void host_present(const GpuDisplay& d) {
         std::fill(g_pixels.begin(), g_pixels.end(), 0);
     }
     present_game_pixels(g_pixels.data(), w, h, opt);
+    draw_toast();
     maybe_screenshot();
     present_swap();
 }
@@ -774,7 +827,9 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    enum Row { R_RES, R_ASPECT, R_CRT, R_FILTER, R_DEVICE, R_REMAP, R_RESET, R_BACK, R_COUNT };
+    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RES, R_ASPECT, R_CRT, R_FILTER, R_DEVICE, R_REMAP, R_RESET, R_BACK,
+               R_COUNT };
+    static int slot = 1;
     size_t dev_index = 0;
     int sel = 0;
     std::string status;
@@ -814,12 +869,27 @@ static void run_settings_menu() {
                     case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
                     case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
                     case R_DEVICE: dev_index = (dev_index + entries + step) % entries; break;
+                    case R_SAVE:
+                    case R_LOAD:
+                        if (dir) slot = (slot - 1 + step + kStateSlots) % kStateSlots + 1;
+                        break;
                     default: break;
                 }
             }
             if (!enter) continue;
             if (sel == R_BACK) {
                 open = false;
+            } else if (sel == R_SAVE) {
+                state_request_save(slot);  // taken at the next frame, once the menu closes
+                open = false;
+            } else if (sel == R_LOAD || sel == R_LOAD_AUTO) {
+                int s = sel == R_LOAD ? slot : kAutoSlot;
+                if (state_slot_exists(s)) {
+                    state_request_load(s);
+                    open = false;
+                } else {
+                    status = "That slot is empty.";
+                }
             } else if (sel == R_REMAP && is_keyboard) {
                 SDL_Scancode keys_new[16];
                 if (remap_keyboard(keys_new, &quit)) {
@@ -868,7 +938,11 @@ static void run_settings_menu() {
             s.resize(15, ' ');
             return s + "< " + value + " >";
         };
-        draw_panel({"SETTINGS", "",
+        std::string slot_line = std::to_string(slot) + ": " + state_slot_label(slot);
+        draw_panel({"SETTINGS",
+                    row("Save state", slot_line),
+                    row("Load state", slot_line),
+                    row("Load auto-save", state_slot_label(kAutoSlot)),
                     row("Resolution", res),
                     row("Aspect ratio", kAspect[(int)g_gfx.aspect]),
                     row("CRT filter", g_gfx.crt ? "On" : "Off"),
@@ -877,11 +951,11 @@ static void run_settings_menu() {
                     std::string("Set up buttons") + (custom ? "  (custom)" : "  (default)"),
                     "Reset buttons to default",
                     "Back to game",
-                    "", status, "",
-                    "Up/down: choose   Left/right: change",
-                    "Enter / X: select   Esc / O: back",
-                    "Open anytime: F1 or hold SELECT+START"},
-                   2 + sel);
+                    status,
+                    "Arrows: choose/change  Enter: select",
+                    "F5/F9: quick save/load (slot 1)",
+                    "Open: F1 or hold SELECT+START"},
+                   1 + sel);
         SDL_Delay(15);
     }
     if (quit) g_quit = true;
@@ -956,3 +1030,13 @@ void host_audio_push(const int16_t* stereo, int frames) {
 }
 
 int host_audio_queued_frames() { return g_audio ? SDL_GetAudioStreamQueued(g_audio) / 4 : 0; }
+
+void host_toast(const std::string& text) {
+    g_toast = text;
+    g_toast_until = SDL_GetTicksNS() + 2500000000ull;
+    log_msg(LogCat::Host, "%s", text.c_str());
+}
+
+void host_audio_clear() {
+    if (g_audio) SDL_ClearAudioStream(g_audio);
+}

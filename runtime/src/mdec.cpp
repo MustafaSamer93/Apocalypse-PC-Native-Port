@@ -236,3 +236,22 @@ uint32_t mdec_dma_out() {
 }
 
 bool mdec_out_ready() { return !g_out.empty(); }
+
+// ================================================================ save states
+
+#include "state_io.h"
+
+void mdec_state(StateIO& s) {
+    s.marker(0x4D444543);  // "MDEC"
+    s.raw(g_qt_y, sizeof g_qt_y);
+    s.raw(g_qt_c, sizeof g_qt_c);
+    s.raw(g_scale, sizeof g_scale);
+    s(g_cmd);
+    s.vec(g_in);
+    s(g_in_words_left);
+    s(g_mode);
+    s(g_quant_color);
+    s.deq(g_out);
+    s(g_en_in);
+    s(g_en_out);
+}

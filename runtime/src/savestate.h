@@ -1,0 +1,32 @@
+// Save states for the recompiled game.
+//
+// The game's call stack lives partly in native C frames, which cannot be saved. States
+// are therefore only taken at one "safe point" (entry of libetc's VSync, which the game
+// calls every frame from ordinary code; calls made from interrupt callbacks do not count).
+// A save requested during a level load waits until the load ends. Loading restores memory and hardware, unwinds the
+// native stack back to main() and resumes at the safe point in the interpreter; the
+// interpreter walks the MIPS stack back up through the callers and every function they
+// call runs recompiled again.
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+constexpr int kStateSlots = 5;
+constexpr int kAutoSlot = 0;  // slot 0 is the auto-save; 1..5 are manual
+
+void state_request_save(int slot);
+void state_request_load(int slot);
+bool state_slot_exists(int slot);
+std::string state_slot_label(int slot);  // "empty" or the save time
+
+// Auto-save triggers (see savestate.cpp).
+void state_note_level_start();
+void state_note_file_loaded(const std::string& name);
+
+// Performs a pending load (and never returns if it succeeds). Called once per frame.
+struct R3000;
+void state_poll_load(R3000* c);
+
+// main(): returns true (with the resume address) after a state was loaded.
+bool state_take_resume(uint32_t* pc);

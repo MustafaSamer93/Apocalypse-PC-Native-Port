@@ -518,3 +518,20 @@ void sio_write(R3000* c, uint32_t addr, uint32_t v, int size) {
         case 0x1F80104E: g_sio_baud = (uint16_t)v; break;
     }
 }
+
+// ================================================================ save states
+
+#include "state_io.h"
+
+void hw_state(StateIO& s) {
+    s.marker(0x44544D53);  // "DTMS"
+    s.raw(g_dma, sizeof g_dma);
+    s(g_dpcr);
+    s(g_dicr);
+    s(g_mdec_out_waiting);
+    s.raw(g_tmr, sizeof g_tmr);
+    s(g_sio_ctrl); s(g_sio_mode); s(g_sio_baud); s(g_sio_stat); s(g_sio_step);
+    s(g_sio_rx); s(g_sio_rx_full); s(g_sio_device_pad); s(g_sio_phase);
+    s(g_sio_next_rx); s(g_sio_next_ack);
+    s(g_ds);
+}

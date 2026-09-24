@@ -9,6 +9,7 @@
 
 #include "memcard.h"
 #include "psx.h"
+#include "savestate.h"
 
 namespace {
 
@@ -159,6 +160,7 @@ std::string format_printf(R3000* c, const std::string& fmt, int first_arg) {
 void bios_puts(const std::string& s) {
     std::fputs(s.c_str(), stdout);
     std::fflush(stdout);
+    state_note_file_loaded(s);  // the game prints each file name as it loads it
     LOG(Host, "[frame %llu] game says: %s", (unsigned long long)host_frame_count(), s.c_str());
 }
 
@@ -510,6 +512,8 @@ static void call_psx(R3000* c, uint32_t addr, uint32_t a0) {
     call_indirect(c, addr);
 }
 
+bool bios_in_exception() { return g_in_exception; }
+
 void bios_take_interrupt(R3000* c) {
     if (g_in_exception) return;
     R3000 saved = *c;
@@ -579,5 +583,39 @@ void bios_vblank(R3000* c) {
         PendingEvent ev = g_card_events.front();
         g_card_events.pop_front();
         bios_deliver_event(c, ev.cls, ev.spec);
+    }
+}
+
+// ================================================================ save states
+
+#include "state_io.h"
+
+void bios_state(StateIO& s) {
+    s.marker(0x42494F53);  // "BIOS"
+    s.raw(g_events, sizeof g_events);
+    s(g_hook_buf);
+    s.raw(g_int_chains, sizeof g_int_chains);
+    s.raw(g_pad_buf, sizeof g_pad_buf);
+    s.raw(g_pad_len, sizeof g_pad_len);
+    s(g_pad_started);
+    s(g_pad_legacy_dest);
+    s.deq(g_card_events);
+    for (auto& f : g_files) {
+        s(f.used);
+        s(f.port);
+        s.str(f.info.name);
+        s(f.info.first_block);
+        s(f.info.size);
+        s(f.pos);
+        s(f.async);
+    }
+    s.raw(g_rcnt_clear, sizeof g_rcnt_clear);
+    s(g_rand_seed);
+    s(g_heap_base);
+    s(g_heap_size);
+    if (s.loading()) {
+        g_in_exception = false;
+        g_dir_list.clear();
+        g_dir_index = 0;
     }
 }

@@ -23,6 +23,21 @@ def lbl(a: int) -> str:
     return f"L_{a:08X}"
 
 
+# Runtime hooks emitted at the entry of specific functions.
+#   8008632C VSync: save-state safe point (see runtime/src/savestate.cpp)
+#   80030AD4 the level's main loop: a level has started (auto-save)
+ENTRY_HOOKS = {
+    0x8008632C: "psx_safepoint(c, 0x8008632Cu);",
+    0x80030AD4: "psx_hook_level_start();",
+}
+
+# jal sites whose call can be switched off at runtime: address -> runtime flag name.
+# 80030BCC: the main loop's second VBlank wait (the game's 30 fps cap).
+OPTIONAL_CALLS = {
+    0x80030BCC: "psx_opt_skip_frame_wait",
+}
+
+
 class FunctionEmitter:
     def __init__(self, fn: Function, known_entries: set[int], debug_ra: bool = True):
         self.fn = fn
@@ -178,7 +193,10 @@ class FunctionEmitter:
                 for s in self.simple(ds):
                     self.out(s)
                 self.flush_cycles()
-                self.out(f"c->r[31] = 0x{pc + 8:08X}u; {self.call(i.target)}")
+                call = f"c->r[31] = 0x{pc + 8:08X}u; {self.call(i.target)}"
+                if pc in OPTIONAL_CALLS:
+                    call = f"if (!{OPTIONAL_CALLS[pc]}) {{ {call} }}"
+                self.out(call)
             else:  # bltzal / bgezal: ra is written whether or not taken
                 self.out(f"{{ const int cond = {self.branch_cond(i)};")
                 for s in self.simple(ds):
@@ -311,4 +329,6 @@ class FunctionEmitter:
                 "    const uint32_t entry_ra = c->r[31]; (void)entry_ra;"]
         if self.debug_ra:
             head.append("    const uint32_t entry_sp = c->r[29]; (void)entry_sp;")
+        if fn.entry in ENTRY_HOOKS:
+            head.append("    " + ENTRY_HOOKS[fn.entry])
         return "\n".join(head + body + ["}", ""])

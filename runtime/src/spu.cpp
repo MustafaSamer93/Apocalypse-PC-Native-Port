@@ -488,3 +488,24 @@ void spu_end_frame(R3000* c) {
     if (!g_out.empty()) host_audio_push(g_out.data(), (int)(g_out.size() / 2));
     g_out.clear();
 }
+
+// ================================================================ save states
+
+#include "state_io.h"
+
+void spu_state(StateIO& s) {
+    s.marker(0x53505520);  // "SPU "
+    s.raw(g_ram, sizeof g_ram);
+    s.raw(g_regs, sizeof g_regs);
+    s.raw(g_voice, sizeof g_voice);
+    s(g_endx); s(g_transfer_addr); s(g_irq_flag);
+    s.raw(g_main_vol, sizeof g_main_vol);
+    s(g_noise_timer); s(g_noise_level);
+    s(g_rev_addr); s.raw(g_rev_out, sizeof g_rev_out); s(g_rev_odd);
+    s.deq(g_cd_fifo);
+    s(g_cd_phase);
+    s.raw(g_cd_prev, sizeof g_cd_prev);
+    s(g_last_cycles);
+    s(g_cycle_accum);
+    if (s.loading()) g_out.clear();
+}
