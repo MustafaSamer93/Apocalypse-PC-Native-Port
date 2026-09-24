@@ -1,4 +1,4 @@
-﻿#include "present.h"
+#include "present.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,7 +12,9 @@ namespace {
 
 SDL_Window* g_win = nullptr;
 SDL_GLContext g_ctx = nullptr;
-GLuint g_prog_plain, g_prog_crt, g_vao, g_vbo;
+GLuint g_prog_plain, g_prog_crt, g_prog_fxaa, g_vao, g_vbo;
+GLuint g_aa_tex = 0, g_aa_fbo = 0;  // the scaled image, for the FXAA pass
+int g_aa_w = 0, g_aa_h = 0;
 GLuint g_sw_tex = 0;
 int g_sw_w = 0, g_sw_h = 0;
 
@@ -50,6 +52,20 @@ in vec2 v_uv;
 out vec4 o_color;
 void main() {
     vec2 texel = u_rect.xy + v_uv * u_rect.zw;
+    // Image larger than the output (supersampling): average everything each output pixel
+    // covers, up to 4x4 bilinear taps (each already a 2x2 average).
+    vec2 fp = u_rect.zw / u_out_size;
+    if (fp.x > 1.01 || fp.y > 1.01) {
+        ivec2 n = ivec2(clamp(ceil(fp), vec2(1.0), vec2(4.0)));
+        vec3 acc = vec3(0.0);
+        for (int j = 0; j < n.y; j++)
+            for (int i = 0; i < n.x; i++) {
+                vec2 t = texel + ((vec2(i, j) + 0.5) / vec2(n) - 0.5) * fp;
+                acc += texture(u_tex, t / u_tex_size).rgb;
+            }
+        o_color = vec4(acc / float(n.x * n.y), 1.0);
+        return;
+    }
     vec2 scale = max(floor(u_out_size / u_rect.zw), vec2(1.0));
     vec2 region = 0.5 - 0.5 / scale;
     vec2 f = fract(texel) - 0.5;
@@ -112,6 +128,35 @@ out vec4 o_color;
 void main() { o_color = texture(u_tex, v_uv); }
 )";
 
+// FXAA (Timothy Lottes' fast approximate anti-aliasing): softens stair-stepped edges
+// along their direction, leaving flat areas and fine texture alone.
+const char* kFxaaFS = R"(#version 330 core
+uniform sampler2D u_tex;
+uniform vec2 u_px;           // 1 / texture size
+in vec2 v_uv;
+out vec4 o_color;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+vec3 at(vec2 p) { return texture(u_tex, p).rgb; }
+void main() {
+    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);  // the source was rendered bottom-up
+    vec3 m = at(uv);
+    float lNW = luma(at(uv + vec2(-1.0, -1.0) * u_px)), lNE = luma(at(uv + vec2(1.0, -1.0) * u_px));
+    float lSW = luma(at(uv + vec2(-1.0, 1.0) * u_px)), lSE = luma(at(uv + vec2(1.0, 1.0) * u_px));
+    float lM = luma(m);
+    float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+    float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+    if (lMax - lMin < max(0.0312, lMax * 0.125)) { o_color = vec4(m, 1.0); return; }  // no edge
+    vec2 dir = vec2(-((lNW + lNE) - (lSW + lSE)), (lNW + lSW) - (lNE + lSE));
+    float reduce = max((lNW + lNE + lSW + lSE) * 0.03125, 1.0 / 128.0);
+    float rcp = 1.0 / (min(abs(dir.x), abs(dir.y)) + reduce);
+    dir = clamp(dir * rcp, vec2(-8.0), vec2(8.0)) * u_px;
+    vec3 a = 0.5 * (at(uv + dir * (1.0 / 3.0 - 0.5)) + at(uv + dir * (2.0 / 3.0 - 0.5)));
+    vec3 b = a * 0.5 + 0.25 * (at(uv - dir * 0.5) + at(uv + dir * 0.5));
+    float lB = luma(b);
+    o_color = vec4((lB < lMin || lB > lMax) ? a : b, 1.0);
+}
+)";
+
 GLuint make_texture(int w, int h, GLint filter) {
     GLuint t;
     glGenTextures(1, &t);
@@ -157,6 +202,24 @@ void draw_image(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, 
     g_ch = ch;
     glViewport((GLint)g_cx, (GLint)g_cy, (GLsizei)cw, (GLsizei)ch);
 
+    // FXAA: draw the scaled image into a target the size of the picture, then filter that
+    // into the window. (Not with the CRT filter, whose scanlines it would soften.)
+    const bool fxaa = o.fxaa && !o.crt;
+    if (fxaa) {
+        int tw = std::max(1, (int)cw), th = std::max(1, (int)ch);
+        if (tw != g_aa_w || th != g_aa_h) {
+            if (g_aa_fbo) glDeleteFramebuffers(1, &g_aa_fbo);
+            if (g_aa_tex) glDeleteTextures(1, &g_aa_tex);
+            g_aa_tex = make_texture(tw, th, GL_LINEAR);
+            glGenFramebuffers(1, &g_aa_fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, g_aa_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_aa_tex, 0);
+            g_aa_w = tw;
+            g_aa_h = th;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, g_aa_fbo);
+        glViewport(0, 0, tw, th);
+    }
     GLuint prog = o.crt ? g_prog_crt : g_prog_plain;
     glUseProgram(prog);
     glActiveTexture(GL_TEXTURE0);
@@ -169,6 +232,15 @@ void draw_image(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, 
     glUniform2f(glGetUniformLocation(prog, "u_out_size"), cw, ch);
     if (o.crt) glUniform1f(glGetUniformLocation(prog, "u_lines"), (float)native_h);
     draw_quad();
+    if (fxaa) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport((GLint)g_cx, (GLint)g_cy, (GLsizei)cw, (GLsizei)ch);
+        glUseProgram(g_prog_fxaa);
+        glBindTexture(GL_TEXTURE_2D, g_aa_tex);
+        glUniform1i(glGetUniformLocation(g_prog_fxaa, "u_tex"), 0);
+        glUniform2f(glGetUniformLocation(g_prog_fxaa, "u_px"), 1.0f / (float)g_aa_w, 1.0f / (float)g_aa_h);
+        draw_quad();
+    }
 }
 
 }  // namespace
@@ -185,8 +257,9 @@ bool present_init(SDL_Window* window) {
     log_msg(LogCat::Host, "OpenGL: %s / %s", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
     g_prog_plain = gl_program(kVS, kPlainFS);
     g_prog_crt = gl_program(kVS, kCrtFS);
+    g_prog_fxaa = gl_program(kVS, kFxaaFS);
     g_prog_overlay = gl_program(kVS, kOverlayFS);
-    if (!g_prog_plain || !g_prog_crt || !g_prog_overlay) return false;
+    if (!g_prog_plain || !g_prog_crt || !g_prog_fxaa || !g_prog_overlay) return false;
 
     const float quad[8] = {0, 0, 1, 0, 0, 1, 1, 1};
     glGenVertexArrays(1, &g_vao);

@@ -32,7 +32,9 @@ struct GfxSettings {
     bool crt = false;
     bool texture_filter = false;
     int fps = 0;            // images per second: 0 = match the display, 30 = original, 60..150 (smooth.cpp)
+    int aa = 3;             // anti-aliasing: bit 0 = FXAA pass, bit 1 = supersampling (SSAA)
 };
+const char* const kAaNames[] = {"Off", "FXAA", "SSAA", "SSAA + FXAA"};
 GfxSettings g_gfx;
 float g_refresh_hz = 60.0f;  // display refresh rate
 bool g_multi_present = false;  // not one image per emulated vblank: host_throttle_frame presents
@@ -99,6 +101,7 @@ PresentOptions present_options() {
     PresentOptions o;
     o.aspect = g_gfx.aspect;
     o.crt = g_gfx.crt;
+    o.fxaa = g_gfx.aa & 1;
     return o;
 }
 
@@ -130,8 +133,18 @@ int smooth_target() {
     return std::clamp(g_gfx.fps / 30, 1, 5);
 }
 
+// Internal resolution actually rendered: the Resolution setting, raised by supersampling to
+// about twice the lines the window shows (at most 8x = 1920 lines).
+int render_scale() {
+    if (g_gfx.scale == 0 || !(g_gfx.aa & 2) || !g_window) return g_gfx.scale;
+    int w = 0, h = 0;
+    SDL_GetWindowSizeInPixels(g_window, &w, &h);
+    return std::clamp((2 * h + 239) / 240, g_gfx.scale, 8);
+}
+
 void apply_graphics() {
-    if (g_gl_ok && g_gfx.scale != g_active_scale) g_active_scale = gpu_set_renderer(g_gfx.scale);
+    const int want = render_scale();
+    if (g_gl_ok && want != g_active_scale) g_active_scale = gpu_set_renderer(want);
     if (!g_gl_ok) g_active_scale = 0;
     hw_set_texture_filter(g_gfx.texture_filter);
     smooth_set_factor(smooth_target());
@@ -211,6 +224,7 @@ void save_settings() {
     std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d\n", g_gfx.scale, (int)g_gfx.aspect,
                  g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
     std::fprintf(f, "sim %d\n", g_sim60_setting);
+    std::fprintf(f, "aa %d\n", g_gfx.aa);
     if (g_key_custom) {
         std::fprintf(f, "keys");
         for (int i = 0; i < 16; i++)
@@ -245,6 +259,10 @@ void load_settings() {
             if (got == 5) g_gfx.fps = std::clamp(fps / 30 * 30, 0, 150);
             else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
                 g_gfx.fps = smooth ? 0 : 30;  // older settings file
+            continue;
+        }
+        if (int aa; std::sscanf(line, "aa %d", &aa) == 1) {
+            g_gfx.aa = std::clamp(aa, 0, 3);
             continue;
         }
         if (int sim; std::sscanf(line, "sim %d", &sim) == 1) {
@@ -407,6 +425,7 @@ void host_poll() {
                     SDL_SetWindowFullscreen(g_window, !fs);
                 }
                 break;
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: apply_graphics(); break;
             // JOYSTICK_ADDED fires for every device (gamepads included); add_device
             // decides between the gamepad and raw-joystick paths and ignores repeats.
             case SDL_EVENT_JOYSTICK_ADDED: add_device(e.jdevice.which); break;
@@ -829,7 +848,7 @@ void draw_panel(const std::vector<std::string>& lines, int highlight) {
     SDL_RenderFillRect(g_renderer, &bg);
     SDL_SetRenderScale(g_renderer, 2.0f, 2.0f);  // 8x8 debug font -> 16x16; 40x30 character grid
     for (int i = 0; i < (int)lines.size(); i++) {
-        float y = 24.0f + 12.0f * (float)i;
+        float y = 12.0f + 12.0f * (float)i;
         if (i == highlight) {
             SDL_SetRenderDrawColor(g_renderer, 200, 60, 20, 255);
             SDL_FRect r{12, y - 2, 296, 12};
@@ -939,7 +958,7 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RES, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DEVICE, R_REMAP,
+    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RES, R_AA, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DEVICE, R_REMAP,
                R_RESET, R_BACK, R_COUNT };
     static int slot = 1;
     size_t dev_index = 0;
@@ -977,6 +996,7 @@ static void run_settings_menu() {
                 int step = dir ? dir : 1;
                 switch (sel) {
                     case R_RES: g_gfx.scale = (g_gfx.scale + step + 9) % 9; gfx_changed = true; break;
+                    case R_AA: g_gfx.aa = (g_gfx.aa + step + 4) % 4; gfx_changed = true; break;
                     case R_ASPECT: g_gfx.aspect = (Aspect)(((int)g_gfx.aspect + step + 4) % 4); gfx_changed = true; break;
                     case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
                     case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
@@ -1056,8 +1076,10 @@ static void run_settings_menu() {
         if (!open || quit) break;
 
         std::string res = g_gfx.scale == 0 ? std::string("Original (software)")
-                                           : std::to_string(g_gfx.scale) + "x  (" + std::to_string(512 * g_gfx.scale) +
-                                                 "x" + std::to_string(240 * g_gfx.scale) + ")";
+                                           : std::to_string(g_gfx.scale) + "x  (" + std::to_string(240 * g_gfx.scale) +
+                                                 " lines)";
+        if (g_gfx.scale > 0 && g_active_scale > g_gfx.scale)
+            res = std::to_string(g_gfx.scale) + "x, SSAA: " + std::to_string(g_active_scale) + "x";
         std::string dev_line = is_keyboard ? std::string("Keyboard & mouse")
                                            : std::string(device_name(g_devices[dev_index - 1])).substr(0, 22);
         bool custom = is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 1])) > 0;
@@ -1072,6 +1094,7 @@ static void run_settings_menu() {
                     row("Load state", slot_line),
                     row("Load auto-save", state_slot_label(kAutoSlot)),
                     row("Resolution", res),
+                    row("Anti-aliasing", kAaNames[g_gfx.aa]),
                     row("Aspect ratio", kAspect[(int)g_gfx.aspect]),
                     row("CRT filter", g_gfx.crt ? "On" : "Off"),
                     row("Smooth textures", g_gfx.texture_filter ? "On" : "Off"),

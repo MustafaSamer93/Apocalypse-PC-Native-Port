@@ -11,6 +11,7 @@ enum class Aspect { A4_3, A16_9, A16_10, Stretch };
 struct PresentOptions {
     Aspect aspect = Aspect::A4_3;
     bool crt = false;
+    bool fxaa = false;  // edge-smoothing pass (not with the CRT filter)
 };
 
 bool present_init(SDL_Window* window);

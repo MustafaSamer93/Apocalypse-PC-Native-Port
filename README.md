@@ -17,6 +17,7 @@ executable from your disc image, and the program reads everything else from it a
 | 2D (title, HUD, menus) | working |
 | 3D gameplay (GTE + OpenGL renderer, 1x-8x internal resolution) | working |
 | 4:3 / 16:9 / 16:10 (widescreen widens the 3D view), CRT filter, texture smoothing | working |
+| Anti-aliasing: supersampling (renders up to 8x, averaged down) and/or FXAA; setting "Anti-aliasing" | working |
 | Keyboard + mouse, XInput gamepads (twin-stick aiming, rumble), in-game button remapping | working |
 | Sound effects, XA speech/music, CD audio, SPU reverb | working |
 | Memory card (`saves/card1.mcr`, emulator-compatible) | working |
@@ -67,7 +68,8 @@ F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = qu
 apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N]
 ```
 
-Defaults: 16:9, rendered at 5x (1200 lines), in a 1080-line window, or fullscreen on a 1080p
+Defaults: 16:9, rendered at 5x (1200 lines; supersampling raises it to about twice the window's
+lines, at most 8x), with SSAA + FXAA anti-aliasing, in a 1080-line window, or fullscreen on a 1080p
 screen. `--scale N` asks for a window 240*N lines high instead.
 
 `--sim60` turns the 60 Hz simulation on in every level (default: level 1 only).
