@@ -17,7 +17,7 @@
 #include "savestate.h"
 #include "smooth.h"
 
-constexpr const char* kVersion = "v0.1.1";
+constexpr const char* kVersion = "v0.1.1 beta";
 int g_force_smooth = 0;  // --smooth K: images per game step regardless of the display
 void host_toast(const std::string& text);
 int g_renderer_override = -1;  // --renderer opengl|vulkan: 0 / 1, -1 = the saved setting
