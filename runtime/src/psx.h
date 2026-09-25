@@ -92,10 +92,30 @@ enum class GteBlendMode { Off, Record, Blend };
 struct GteBlendVtx {
     int16_t vx, vy, vz;  // model-space input
     int32_t sxy, sz;     // screen output
+    float px, py, pw;    // exact screen position and depth (pw 0: none)
 };
+
+// Precise vertices (gte.cpp): the exact screen position (x, y) and view depth (w) of recent
+// projections, found by the whole-pixel vertex word the GPU received. Different vertices can
+// land on the same pixel: every one is kept, numbered in projection order (seq).
+struct GtePrecise {
+    float x, y, w;
+    uint32_t seq;
+};
+extern bool g_gte_precise;  // setting: draw 3D polygons at their exact positions, perspective-correct
+int gte_precise_find(uint32_t xy, GtePrecise* out, int max);  // candidates found (0: none)
+void gte_precise_clear();
+// PGXP (gte.cpp): the exact vertex for a GPU vertex word read from RAM address a (0: none)
+bool pgxp_find(uint32_t a, uint32_t word, GtePrecise* out);
+extern uint32_t g_gpu_word_addr;  // RAM address of the GP0 word being sent (0: not from a list)
+extern uint32_t g_precise_stats[8];
+extern uint32_t g_corner_stats[2];  // level grid vertices rebuilt from exact corners, corner sets rejected
 extern GteBlendMode g_gte_blend;
 extern uint32_t g_blend_stats[3];
 void gte_blend_begin(GteBlendMode m);
+
+// Draw distance (drawdist.cpp): percent of the game's own view distance (100 = original)
+extern int g_draw_distance;
 
 // 60 Hz simulation (sim60.cpp)
 extern int g_sim60_setting;    // 0 = 30 Hz, 1 = 60 Hz in level 1, 2 = 60 Hz in every level

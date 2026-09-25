@@ -1,6 +1,7 @@
 // PS1 GPU: command processing and a software rasterizer into 1024x512x16 VRAM.
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -88,6 +89,7 @@ float squeeze_2d(float x0, float x1, float* fix) {
 
 // command FIFO accumulation
 std::vector<uint32_t> g_cmd;
+uint32_t g_cmd_addr[16];  // RAM address of each word of g_cmd (0: not from a list)
 size_t g_cmd_need = 0;
 
 // CPU<->VRAM transfer state
@@ -273,6 +275,73 @@ bool oversized(const Vtx& a, const Vtx& b, const Vtx& c) {
            std::max({a.y, b.y, c.y}) - std::min({a.y, b.y, c.y}) >= 512;
 }
 
+// Precise 3D: the exact position and depth of each corner of a polygon (gte.cpp), found by the
+// whole-pixel vertex word the GPU received; ok[i] false where none was found.
+// - Several vertices can land on one pixel: each corner takes the candidate projected nearest
+//   in time to the others (a polygon's corners come from one model's batch of projections).
+// - The game nudges some vertices by a pixel after projecting them (level 1's subdivided floors
+//   and walls: every other grid vertex). A corner with no exact match takes a candidate from
+//   the pixels around it, if that was projected in the same batch, keeping the nudge.
+void precise_corners(const uint32_t* xyw, int nv, GtePrecise* pr, bool* ok) {
+    constexpr int kMax = 8;
+    constexpr uint32_t kBatch = 64;  // projections apart that still count as the same batch
+    struct Cand {
+        GtePrecise p;
+        int dx, dy;
+    };
+    Cand cand[4][kMax];
+    int nc[4];
+    bool any_exact = false;
+    for (int i = 0; i < nv; i++) {
+        GtePrecise found[kMax];
+        nc[i] = gte_precise_find(xyw[i], found, kMax);
+        for (int m = 0; m < nc[i]; m++) cand[i][m] = {found[m], 0, 0};
+        if (nc[i]) {
+            any_exact = true;
+            continue;
+        }
+        const int x = (int32_t)(xyw[i] << 21) >> 21, y = (int32_t)((xyw[i] >> 16) << 21) >> 21;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                if (!dx && !dy) continue;
+                const uint32_t k = ((uint32_t)(x + dx) & 0x7FF) | ((uint32_t)(y + dy) & 0x7FF) << 16;
+                const int n = gte_precise_find(k, found, kMax - nc[i]);
+                for (int m = 0; m < n; m++) cand[i][nc[i]++] = {found[m], dx, dy};
+            }
+    }
+    uint64_t best_cost = UINT64_MAX;
+    uint32_t best_anchor = 0;
+    for (int a = 0; a < nv; a++)
+        for (int j = 0; j < nc[a]; j++) {
+            const Cand& an = cand[a][j];
+            if (any_exact && (an.dx || an.dy)) continue;  // anchored by an exact corner
+            uint64_t cost = 0;
+            for (int i = 0; i < nv; i++) {
+                uint32_t d_best = UINT32_MAX;
+                for (int m = 0; m < nc[i]; m++) {
+                    const uint32_t s = cand[i][m].p.seq;
+                    d_best = std::min(d_best, s > an.p.seq ? s - an.p.seq : an.p.seq - s);
+                }
+                if (nc[i]) cost += d_best;
+            }
+            if (cost < best_cost) best_cost = cost, best_anchor = an.p.seq;
+        }
+    for (int i = 0; i < nv; i++) {
+        ok[i] = false;
+        uint32_t d_best = UINT32_MAX;
+        for (int m = 0; m < nc[i]; m++) {
+            const Cand& cd = cand[i][m];
+            const uint32_t d = cd.p.seq > best_anchor ? cd.p.seq - best_anchor : best_anchor - cd.p.seq;
+            if (d >= d_best || ((cd.dx || cd.dy) && d > kBatch)) continue;
+            d_best = d;
+            pr[i] = cd.p;
+            pr[i].x -= (float)cd.dx;  // the game's nudge
+            pr[i].y -= (float)cd.dy;
+            ok[i] = true;
+        }
+    }
+}
+
 // Scanline-accurate rasterization would need the exact hardware edge walker; the
 // edge-function rasterizer above follows the same fill convention (top/left inclusive).
 void draw_polygon(const uint32_t* w) {
@@ -280,12 +349,14 @@ void draw_polygon(const uint32_t* w) {
     bool gouraud = cmd & 0x10, quad = cmd & 0x08, textured = cmd & 0x04, semi = cmd & 0x02, raw = cmd & 0x01;
     int nv = quad ? 4 : 3;
     Vtx v[4];
+    uint32_t xyw[4], xya[4];
     TexCtx tex{};
     int idx = 0;
     uint32_t color = w[idx++] & 0xFFFFFF;
     for (int i = 0; i < nv; i++) {
         if (i > 0 && gouraud) color = w[idx++] & 0xFFFFFF;
-        uint32_t xy = w[idx++];
+        xya[i] = w == g_cmd.data() ? g_cmd_addr[idx] : 0;
+        uint32_t xy = xyw[i] = w[idx++];
         v[i].x = ((int32_t)(xy << 21) >> 21) + S.off_x;
         v[i].y = ((int32_t)((xy >> 16) << 21) >> 21) + S.off_y;
         v[i].r = color & 0xFF;
@@ -322,6 +393,39 @@ void draw_polygon(const uint32_t* w) {
         for (int i = 0; i < nv; i++) {
             h[i] = hw_vtx(v[i]);
             if (k != 1.0f) h[i].x = cx + (h[i].x - cx) * k;
+        }
+        // Precise 3D (gte.cpp): each vertex the GTE projected goes to its exact position (all of
+        // them, so neighbouring polygons still share their edges); when every vertex was, the
+        // texture is perspective-correct too (w relative to the farthest vertex).
+        if (g_gte_precise && k == 1.0f) {
+            // the vertex the word itself came from (PGXP), else one projected to that pixel
+            GtePrecise pr[4];
+            bool nc[4], shadow_all = true;
+            for (int i = 0; i < nv; i++) shadow_all &= nc[i] = pgxp_find(xya[i], xyw[i], &pr[i]);
+            if (!shadow_all) {
+                GtePrecise pc[4];
+                bool cc[4];
+                precise_corners(xyw, nv, pc, cc);
+                for (int i = 0; i < nv; i++)
+                    if (!nc[i]) pr[i] = pc[i], nc[i] = cc[i];
+                    else g_precise_stats[7]++;
+            } else {
+                g_precise_stats[7] += nv;
+            }
+            bool all = true;
+            float wmax = 0;
+            for (int i = 0; i < nv; i++) {
+                if (!nc[i]) {
+                    all = false;
+                    continue;
+                }
+                h[i].x = pr[i].x + (float)S.off_x;
+                h[i].y = pr[i].y + (float)S.off_y;
+                wmax = std::max(wmax, pr[i].w);
+            }
+            if (all)
+                for (int i = 0; i < nv; i++) h[i].w = pr[i].w / wmax;
+            g_precise_stats[all ? 0 : wmax > 0 ? 1 : 2]++;
         }
         if (!oversized(v[0], v[1], v[2])) hw_triangle(&h[0], &h[1], &h[2], p, st);
         if (quad && !oversized(v[1], v[2], v[3])) hw_triangle(&h[1], &h[2], &h[3], p, st);
@@ -625,6 +729,7 @@ void gpu_write_gp0(R3000* c, uint32_t v) {
     if (g_cmd.empty()) {
         g_cmd_need = command_length(v);
     }
+    if (g_cmd.size() < 16) g_cmd_addr[g_cmd.size()] = g_gpu_word_addr;
     g_cmd.push_back(v);
     if (g_cmd_need == SIZE_MAX) {  // polyline: ends with terminator (after at least 2 vertices)
         if (g_cmd.size() >= 3 && (v & 0xF000F000) == 0x50005000) {
@@ -815,6 +920,16 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
 // A frame's ordering table was drawn: the packets noted so far are done with (each frame's
 // render notes its own; after a level, its HUD range must not apply to menu packets).
 void gpu_list_done() {
+    static const bool stats = std::getenv("APOC_PRECISE_STATS") != nullptr;
+    static uint32_t lists = 0;
+    if (stats && ++lists % 300 == 0) {
+        log_msg(LogCat::Host, "precise: %u polys all, %u partial, %u none; %u corners by shadow; %u grid vertices rebuilt, %u rejected; %u depth clashes; %u projections, %u too near, %u off",
+                g_precise_stats[0], g_precise_stats[1], g_precise_stats[2], g_precise_stats[7], g_corner_stats[0],
+                g_corner_stats[1], g_precise_stats[3], g_precise_stats[4], g_precise_stats[5], g_precise_stats[6]);
+        std::memset(g_corner_stats, 0, sizeof g_corner_stats);
+        std::memset(g_precise_stats, 0, sizeof g_precise_stats);
+    }
+    gte_precise_clear();
     g_text_packets.clear();
     g_2d_from = g_2d_mid = g_2d_to = 0;
 }

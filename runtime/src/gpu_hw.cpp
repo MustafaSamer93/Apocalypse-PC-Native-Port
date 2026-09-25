@@ -32,6 +32,7 @@ struct GLVtx {
     uint8_t r, g, b, a;
     float u, v;
     uint32_t info0, info1;
+    float w;  // 1, or view depth for perspective-correct texturing (HwVtx::w)
 };
 
 // Primitives are batched while the state below stays the same.
@@ -58,11 +59,12 @@ layout(location = 0) in vec2 a_pos;
 layout(location = 1) in vec4 a_color;
 layout(location = 2) in vec2 a_uv;
 layout(location = 3) in uvec2 a_info;
-noperspective out vec4 v_color;
-noperspective out vec2 v_uv;
+layout(location = 4) in float a_w;
+out vec4 v_color;  // like v_uv: perspective-correct when a_w varies (PGXP colour correction)
+out vec2 v_uv;  // perspective-correct when a_w varies (precise 3D); affine when it is 1
 flat out uvec2 v_info;
 void main() {
-    gl_Position = vec4(a_pos.x / 512.0 - 1.0, a_pos.y / 256.0 - 1.0, 0.0, 1.0);
+    gl_Position = vec4(a_pos.x / 512.0 - 1.0, a_pos.y / 256.0 - 1.0, 0.0, 1.0) * a_w;
     v_color = a_color;
     v_uv = a_uv;
     v_info = a_info;
@@ -76,8 +78,8 @@ uniform ivec4 u_texwin;   // mask x, mask y, offset x, offset y (8-pixel units)
 uniform int u_pass;       // 0: draw all, 1: only opaque texels, 2: only semi-transparent texels
 uniform int u_set_mask;
 uniform int u_filter;
-noperspective in vec4 v_color;
-noperspective in vec2 v_uv;
+in vec4 v_color;
+in vec2 v_uv;
 flat in uvec2 v_info;
 out vec4 o_color;
 
@@ -334,9 +336,9 @@ uint32_t info0(const HwPrim& p) {
 }
 uint32_t info1(const HwPrim& p) { return (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10; }
 
-void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p) {
+void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f) {
     GLVtx t;
-    t.x = x; t.y = y;
+    t.x = x; t.y = y; t.w = w;
     t.r = (uint8_t)r; t.g = (uint8_t)g; t.b = (uint8_t)b; t.a = 255;
     t.u = u; t.v = v;
     t.info0 = info0(p);
@@ -379,6 +381,8 @@ bool gl_hw_init(int scale) {
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, u));
         glEnableVertexAttribArray(3);
         glVertexAttribIPointer(3, 2, GL_UNSIGNED_INT, sizeof(GLVtx), (void*)offsetof(GLVtx, info0));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, w));
         g_stage_tex = make_vram_texture(1024, 512);
     }
     gl_hw_shutdown();
@@ -497,7 +501,7 @@ void gl_hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim
     begin_prim(p, s);
     for (const HwVtx* v : {a, b, c}) {
         const HwVtx* col = p.gouraud ? v : a;
-        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p);
+        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p, v->w);
     }
     draw_area_dirty((int)std::floor(std::min({a->x, b->x, c->x})), (int)std::floor(std::min({a->y, b->y, c->y})),
                     (int)std::ceil(std::max({a->x, b->x, c->x})) + 1, (int)std::ceil(std::max({a->y, b->y, c->y})) + 1, s);

@@ -436,8 +436,8 @@ VkPipelineLayout make_layout(uint32_t push_bytes) {
     return l;
 }
 
-// Vertex layout shared with gpu_vk.cpp (VkVtx): pos, colour, uv, info.
-static constexpr uint32_t kVtxStride = 28;
+// Vertex layout shared with gpu_vk.cpp (VkVtx): pos, colour, uv, info, w.
+static constexpr uint32_t kVtxStride = 32;
 
 VkPipeline make_pipeline(const PipelineDesc& d) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
@@ -450,17 +450,18 @@ VkPipeline make_pipeline(const PipelineDesc& d) {
     st[1].pName = "main";
 
     VkVertexInputBindingDescription bind{0, kVtxStride, VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attrs[4] = {
+    VkVertexInputAttributeDescription attrs[5] = {
         {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
         {1, 0, VK_FORMAT_R8G8B8A8_UNORM, 8},
         {2, 0, VK_FORMAT_R32G32_SFLOAT, 12},
         {3, 0, VK_FORMAT_R32G32_UINT, 20},
+        {4, 0, VK_FORMAT_R32_SFLOAT, 28},
     };
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     if (d.vertices != Vertices::None) {
         vi.vertexBindingDescriptionCount = 1;
         vi.pVertexBindingDescriptions = &bind;
-        vi.vertexAttributeDescriptionCount = d.vertices == Vertices::Vram ? 4 : 1;
+        vi.vertexAttributeDescriptionCount = d.vertices == Vertices::Vram ? 5 : 1;
         vi.pVertexAttributeDescriptions = attrs;
     }
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};

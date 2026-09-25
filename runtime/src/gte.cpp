@@ -34,6 +34,178 @@ void gte_blend_begin(GteBlendMode m) {
     g_blend_vi = g_blend_ci = 0;
 }
 
+// Precise vertices (F1 -> Precise 3D). The GTE hands the game whole-pixel screen positions,
+// so vertices jump from pixel to pixel as things move, and the GPU maps textures without
+// perspective; both make textures wobble. Each projection's exact position and depth is kept
+// here under the whole-pixel position it produced (as a GPU vertex word packs it: 11-bit x
+// and y); the GPU looks its polygons' vertices up (gpu.cpp). Cleared after each frame's
+// ordering table is drawn.
+bool g_gte_precise = true;
+
+namespace {
+
+constexpr int kPreciseSlots = 1 << 15;  // power of two; a busy frame projects ~10,000 vertices
+struct PreciseSlot {
+    uint32_t key, gen;
+    GtePrecise p;
+};
+PreciseSlot g_precise[kPreciseSlots];
+}  // namespace
+uint32_t g_precise_stats[8];  // polygons with every / some / no vertex precise, depth clashes; projections, too near, off; corners by shadow
+namespace {
+uint32_t g_precise_gen = 1, g_precise_seq = 0;
+int g_precise_used = 0;
+
+uint32_t precise_key(uint32_t xy) { return (xy & 0x7FF) | (xy & 0x7FF0000); }
+uint32_t precise_hash(uint32_t k) { return (k * 0x9E3779B1u) >> 17; }
+
+void precise_put(uint32_t sxy, float x, float y, float w) {
+    if (g_precise_used >= kPreciseSlots * 3 / 4) return;
+    uint32_t k = precise_key(sxy);
+    const uint32_t seq = ++g_precise_seq;
+    bool clash = false;
+    for (uint32_t i = precise_hash(k);; i = (i + 1) & (kPreciseSlots - 1)) {
+        PreciseSlot& s = g_precise[i];
+        if (s.gen != g_precise_gen) {
+            s = {k, g_precise_gen, {x, y, w, seq}};
+            g_precise_used++;
+            if (clash) g_precise_stats[3]++;
+            return;
+        }
+        if (s.key != k) continue;
+        // the same vertex projected again (a shared vertex, a model drawn twice): the latest
+        if (std::abs(s.p.w - w) <= s.p.w * 0.002f && std::abs(s.p.x - x) < 0.05f && std::abs(s.p.y - y) < 0.05f) {
+            s.p = {x, y, w, seq};
+            return;
+        }
+        clash = true;  // a different vertex on the same pixel: kept as well
+    }
+}
+
+}  // namespace
+
+int gte_precise_find(uint32_t xy, GtePrecise* out, int max) {
+    uint32_t k = precise_key(xy);
+    int n = 0;
+    for (uint32_t i = precise_hash(k); n < max; i = (i + 1) & (kPreciseSlots - 1)) {
+        const PreciseSlot& s = g_precise[i];
+        if (s.gen != g_precise_gen) break;
+        if (s.key == k) out[n++] = s.p;
+    }
+    return n;
+}
+
+// PGXP shadows (recomp.h): the exact vertex behind each RAM/scratchpad word, CPU register and
+// SXY FIFO entry, carried by the generated code from the projection to the GPU packet. Unlike
+// the table above, this knows which vertex a word came from even when several share a pixel.
+extern "C" {
+PgxpVal pgxp_gpr[32];
+PgxpVal pgxp_ram[PSX_RAM_SIZE / 4];
+PgxpVal pgxp_scratch[PSX_SCRATCH_SIZE / 4];
+}
+namespace {
+PgxpVal g_pgxp_sxy[3];  // SXY0..2
+
+PgxpVal& pgxp_sxy(int reg) { return g_pgxp_sxy[reg == 15 ? 2 : reg - 12]; }
+void pgxp_push(const PgxpVal& v) {
+    g_pgxp_sxy[0] = g_pgxp_sxy[1];
+    g_pgxp_sxy[1] = g_pgxp_sxy[2];
+    g_pgxp_sxy[2] = v;
+}
+}  // namespace
+
+extern "C" void pgxp_gte_to_gpr(int gpr, int reg) { pgxp_gpr[gpr] = pgxp_sxy(reg); }
+extern "C" void pgxp_gpr_to_gte(int reg, int gpr) {
+    if (reg == 15) pgxp_push(pgxp_gpr[gpr]);
+    else pgxp_sxy(reg) = pgxp_gpr[gpr];
+}
+extern "C" void pgxp_gte_to_mem(int reg, uint32_t a) {
+    if (PgxpVal* m = PGXP_MEM(a)) *m = pgxp_sxy(reg);
+}
+extern "C" void pgxp_mem_to_gte(int reg, uint32_t a) {
+    const PgxpVal* m = PGXP_MEM(a);
+    const PgxpVal v = m ? *m : PgxpVal{};
+    if (reg == 15) pgxp_push(v);
+    else pgxp_sxy(reg) = v;
+}
+
+// Exact view-space corners (PGXP "CPU mode" for this game's level renderer). The level pass
+// (80080A20...) projects each floor/wall corner, then keeps its view position as the GTE's
+// whole units (IR1..3, the fraction cut off) and, for near polygons, loads three such corners
+// as the columns of the rotation matrix and projects weighted mixes of them (the subdivision
+// grid, V0 = weights). Built from whole-unit corners, every grid vertex was off by up to a
+// unit in view space, ~2 px near the camera and different for each corner: the textures of
+// near floors and walls swam even with exact projection. Every projection's exact view
+// position is kept here under the IR triple the game gets, and rtp() rebuilds a grid vertex
+// from its exact corners.
+namespace {
+constexpr int kCornerSlots = 1 << 14;
+struct CornerSlot {
+    uint64_t key;  // IR1 | IR2 << 16 | IR3 << 32 (16 bits each)
+    uint32_t gen, seq;
+    double v[3];   // exact view position, whole units
+};
+CornerSlot g_corner[kCornerSlots];
+uint32_t g_corner_gen = 1, g_corner_seq = 0;
+int g_corner_used = 0;
+uint32_t corner_hash(uint64_t k) { return (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 50); }
+uint64_t corner_key(int32_t a, int32_t b, int32_t c) {
+    return (uint64_t)(uint16_t)a | (uint64_t)(uint16_t)b << 16 | (uint64_t)(uint16_t)c << 32;
+}
+void corner_put(uint64_t k, const double* v) {
+    if (g_corner_used >= kCornerSlots * 3 / 4) return;
+    for (uint32_t i = corner_hash(k);; i = (i + 1) & (kCornerSlots - 1)) {
+        CornerSlot& s = g_corner[i];
+        if (s.gen != g_corner_gen) {
+            g_corner_used++;
+        } else if (s.key != k) {
+            continue;
+        }
+        s = {k, g_corner_gen, ++g_corner_seq, {v[0], v[1], v[2]}};  // the latest of one IR triple
+        return;
+    }
+}
+const CornerSlot* corner_find(uint64_t k) {
+    for (uint32_t i = corner_hash(k);; i = (i + 1) & (kCornerSlots - 1)) {
+        const CornerSlot& s = g_corner[i];
+        if (s.gen != g_corner_gen) return nullptr;
+        if (s.key == k) return &s;
+    }
+}
+}  // namespace
+uint32_t g_corner_stats[2];  // grid vertices rebuilt, corner sets rejected
+
+// The exact vertex for a GPU vertex word read from RAM address `a` (0: not from RAM). The
+// shadow counts when its 11-bit x and y are those of the word or one pixel off (code that
+// packs flags into SXY words, or nudges grid vertices, keeps the shadow of the original).
+bool pgxp_find(uint32_t a, uint32_t word, GtePrecise* out) {
+    if (!a) return false;
+    const PgxpVal& s = pgxp_ram[(a & (PSX_RAM_SIZE - 1)) >> 2];
+    if (s.w <= 0) return false;
+    auto sx = [](uint32_t v) { return (int32_t)(v << 21) >> 21; };
+    auto sy = [](uint32_t v) { return (int32_t)((v >> 16) << 21) >> 21; };
+    const int dx = sx(word) - sx(s.v), dy = sy(word) - sy(s.v);
+    if (dx < -1 || dx > 1 || dy < -1 || dy > 1) return false;
+    *out = {s.x + (float)dx, s.y + (float)dy, s.w, 0};
+    return true;
+}
+
+void gte_precise_clear() {
+    if (g_corner_used) {
+        g_corner_used = 0;
+        if (++g_corner_gen == 0) {
+            std::memset(g_corner, 0, sizeof g_corner);
+            g_corner_gen = 1;
+        }
+    }
+    if (g_precise_used == 0) return;
+    g_precise_used = 0;
+    if (++g_precise_gen == 0) {  // wrapped: stamps from 2^32 frames ago would look current
+        std::memset(g_precise, 0, sizeof g_precise);
+        g_precise_gen = 1;
+    }
+}
+
 namespace {
 
 // ---------------------------------------------------------------- register access
@@ -172,9 +344,10 @@ int64_t mul_vec_row(int i, int64_t t, int16_t m0, int16_t m1, int16_t m2, int32_
 void rtp(int n, const Cmd& c, bool last) {
     int32_t x = VX(n), y = VY(n), z = VZ(n);
     int64_t tr[3] = {K(5), K(6), K(7)};
-    int64_t mac3_full = 0;
+    int64_t mac3_full = 0, view[3];
     for (int i = 1; i <= 3; i++) {
         int64_t v = mul_vec_row(i, tr[i - 1] << 12, M(0, i - 1, 0), M(0, i - 1, 1), M(0, i - 1, 2), x, y, z);
+        view[i - 1] = v;
         if (i == 3) mac3_full = v;
         MAC(i) = (int32_t)(v >> c.shift);
     }
@@ -196,8 +369,74 @@ void rtp(int n, const Cmd& c, bool last) {
     MAC(0) = chk_mac0(sx_num + K(24));
     MAC(0) = chk_mac0(q * IR(2) + K(25));
     push_sxy((int32_t)((sx_num + K(24)) >> 16), (int32_t)((q * IR(2) + K(25)) >> 16));
+    pgxp_push({});  // filled in below
+    // The exact projection: h * view x / view z, without the divider's rounding or the
+    // whole-pixel result, kept when it agrees with the result the game got. Vertices close to the camera (the divider overflows) or off the screen (the result is
+    // clamped to +-1024) still get their exact position when in front of the camera: big floor
+    // and wall polygons reaching past the screen edge are the ones whose textures swam most.
+    // The renderer draws them with w, so even huge positions come out right.
+    // exact view position (x4096): a subdivision grid vertex is rebuilt from its exact corners
+    double ev[3] = {(double)view[0], (double)view[1], (double)view[2]};
+    bool rebuilt = false;
+    if (g_gte_precise && c.shift == 12 && K(5) == 0 && K(6) == 0 && K(7) == 0) {
+        const CornerSlot* cs[3];
+        bool all = true;
+        for (int j = 0; j < 3 && all; j++)
+            all = (cs[j] = corner_find(corner_key(M(0, 0, j), M(0, 1, j), M(0, 2, j)))) != nullptr;
+        // the three corners come from one polygon, projected together shortly before
+        for (int j = 1; j < 3 && all; j++)
+            all = (cs[j]->seq > cs[0]->seq ? cs[j]->seq - cs[0]->seq : cs[0]->seq - cs[j]->seq) < 4096;
+        if (all) {
+            const double w[3] = {(double)x, (double)y, (double)z};
+            double r[3], wsum = 0;
+            for (int j = 0; j < 3; j++) wsum += std::abs(w[j]);
+            bool ok = wsum <= 3 * 4096.0;
+            for (int i = 0; i < 3 && ok; i++) {
+                r[i] = cs[0]->v[i] * w[0] + cs[1]->v[i] * w[1] + cs[2]->v[i] * w[2];
+                // whole-unit corners are at most a unit off each: the rebuilt one stays close
+                ok = std::abs(r[i] - (double)view[i]) <= wsum + 4096.0;
+            }
+            if (ok) {
+                for (int i = 0; i < 3; i++) ev[i] = r[i];
+                rebuilt = true;
+                g_corner_stats[0]++;
+            } else {
+                g_corner_stats[1]++;
+            }
+        }
+    }
+    if (g_gte_precise && c.shift == 12) {
+        const double u[3] = {ev[0] / 4096.0, ev[1] / 4096.0, ev[2] / 4096.0};
+        corner_put(corner_key(IR(1), IR(2), IR(3)), u);
+    }
+    float px = 0, py = 0, pw = 0;
+    if (g_gte_precise && ev[2] >= 4096) {
+        const double ws = g_gte_widescreen;
+        const double fx = (double)K(24) / 65536.0 + (double)h * ev[0] / ev[2] * ws;
+        const double fy = (double)K(25) / 65536.0 + (double)h * ev[1] / ev[2];
+        const int sx = lo16(D(14)), sy = hi16(D(14));
+        const bool overflow = (int64_t)h * 4096 >= view[2] * 2;
+        const bool clamp_x = (sx == 0x3FF && fx > 0x3FE) || (sx == -0x400 && fx < -0x3FF);
+        const bool clamp_y = (sy == 0x3FF && fy > 0x3FE) || (sy == -0x400 && fy < -0x3FF);
+        // The GTE divides whole units (IR = view / 4096, SZ = view z / 4096), and this game's views
+        // are small (SZ 150..600 near the camera): its result is off the exact one by up to
+        // h / SZ * (1 + |IR| / SZ) pixels, often 5 to 10. A tighter test turned exactly the near
+        // floor and wall vertices away, which kept their polygons affine and snapped to pixels.
+        const double sz = std::max<int32_t>(D(19), 1);
+        const double err_x = (double)h * ws / sz * (1.0 + std::abs(IR(1)) / sz) + 1.5;
+        const double err_y = (double)h / sz * (1.0 + std::abs(IR(2)) / sz) + 1.5;
+        const bool near_x = std::abs(fx - sx) < err_x || clamp_x, near_y = std::abs(fy - sy) < err_y || clamp_y;
+        if ((near_x && near_y) || overflow || rebuilt)
+            px = (float)fx, py = (float)fy, pw = (float)(ev[2] / 4096.0);
+        else
+            g_precise_stats[6]++;
+        if (overflow) g_precise_stats[5]++;
+    } else {
+        g_precise_stats[5]++;
+    }
+    g_precise_stats[4]++;
     if (g_gte_blend == GteBlendMode::Record) {
-        g_blend_vtx.push_back({(int16_t)x, (int16_t)y, (int16_t)z, D(14), D(19)});
+        g_blend_vtx.push_back({(int16_t)x, (int16_t)y, (int16_t)z, D(14), D(19), px, py, pw});
     } else if (g_gte_blend == GteBlendMode::Blend) {
         // Pair up with the recorded vertex: same model vertex (segmented models) or a nearby
         // one (keyframed meshes), and not far away on screen.
@@ -207,11 +446,15 @@ void rtp(int n, const Cmd& c, bool last) {
             std::abs(ox - nx) < 64 && std::abs(oy - ny) < 64) {
             D(14) = (int32_t)((uint32_t)(((ox + nx) / 2) & 0xFFFF) | ((uint32_t)((oy + ny) / 2) << 16));
             D(19) = (r->sz + D(19)) / 2;
+            if (pw > 0 && r->pw > 0) px = (px + r->px) / 2, py = (py + r->py) / 2, pw = (pw + r->pw) / 2;
+            else pw = 0;
             g_blend_stats[0]++;
         } else {
             g_blend_stats[1]++;
         }
     }
+    g_pgxp_sxy[2] = {(uint32_t)D(14), px, py, pw};
+    if (pw > 0 && g_gte_blend != GteBlendMode::Record) precise_put((uint32_t)D(14), px, py, pw);
     if (last) {
         int64_t dq = q * (int16_t)K(27) + K(28);
         MAC(0) = chk_mac0(dq);
@@ -455,6 +698,24 @@ extern "C" void gte_command(R3000* c, uint32_t cmd) {
             int32_t sx2 = lo16(D(14)), sy2 = hi16(D(14));
             MAC(0) = chk_mac0((int64_t)sx0 * sy1 + (int64_t)sx1 * sy2 + (int64_t)sx2 * sy0 -
                               (int64_t)sx0 * sy2 - (int64_t)sx1 * sy0 - (int64_t)sx2 * sy1);
+            // PGXP culling correction: facing from the exact positions, when all three are known
+            // (thin or tiny polygons whose whole-pixel corners flip the sign, and flicker)
+            if (g_gte_precise) {
+                GtePrecise e[3];
+                bool all = true;
+                for (int i = 0; i < 3 && all; i++) {
+                    const PgxpVal& s = g_pgxp_sxy[i];
+                    const int32_t w = D(12 + i);
+                    all = s.w > 0 && std::abs(lo16(w) - lo16((int32_t)s.v)) <= 1 && std::abs(hi16(w) - hi16((int32_t)s.v)) <= 1;
+                    if (all) e[i] = {s.x + (float)(lo16(w) - lo16((int32_t)s.v)), s.y + (float)(hi16(w) - hi16((int32_t)s.v)), s.w, 0};
+                }
+                if (all) {
+                    const double a = ((double)e[1].x - e[0].x) * ((double)e[2].y - e[0].y) -
+                                     ((double)e[2].x - e[0].x) * ((double)e[1].y - e[0].y);
+                    const int32_t m = MAC(0);
+                    if ((a > 0.5 && m <= 0) || (a < -0.5 && m >= 0)) MAC(0) = a > 0 ? 1 : -1;
+                }
+            }
             break;
         }
         case 0x0C: {  // OP: all three components use the IR values from before the command

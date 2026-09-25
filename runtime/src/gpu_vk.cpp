@@ -35,8 +35,9 @@ struct VkVtx {
     uint8_t r, g, b, a;
     float u, v;
     uint32_t info0, info1;
+    float w;  // 1, or view depth for perspective-correct texturing (HwVtx::w)
 };
-static_assert(sizeof(VkVtx) == 28, "vertex layout (vk_context.cpp kVtxStride)");
+static_assert(sizeof(VkVtx) == 32, "vertex layout (vk_context.cpp kVtxStride)");
 
 struct VramPush {
     int32_t scale, pass, set_mask, filter;
@@ -180,8 +181,8 @@ uint32_t info0(const HwPrim& p) {
 }
 uint32_t info1(const HwPrim& p) { return (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10; }
 
-void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p) {
-    g_batch.push_back(VkVtx{x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b, 255, u, v, info0(p), info1(p)});
+void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f) {
+    g_batch.push_back(VkVtx{x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b, 255, u, v, info0(p), info1(p), w});
 }
 
 void draw_area_dirty(int x0, int y0, int x1, int y1, const HwState& s) {
@@ -377,7 +378,7 @@ void vk_hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim
     begin_prim(p, s);
     for (const HwVtx* v : {a, b, c}) {
         const HwVtx* col = p.gouraud ? v : a;
-        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p);
+        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p, v->w);
     }
     draw_area_dirty((int)std::floor(std::min({a->x, b->x, c->x})), (int)std::floor(std::min({a->y, b->y, c->y})),
                     (int)std::ceil(std::max({a->x, b->x, c->x})) + 1, (int)std::ceil(std::max({a->y, b->y, c->y})) + 1, s);

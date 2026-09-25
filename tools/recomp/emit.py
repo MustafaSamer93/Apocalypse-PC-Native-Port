@@ -99,6 +99,11 @@ class FunctionEmitter:
 
         if i.word == 0:
             return []
+        # register moves carry the precise-vertex shadow along (PGXP_* in recomp.h)
+        if k == K_ALU and rd != 0 and n in ("addu", "or") and (rs == 0 or rt == 0) and rs != rt:
+            return [f"c->r[{rd}] = {R(rs or rt)}; PGXP_MOVE({rd}, {rs or rt});"]
+        if k == K_ALU and rt != 0 and n in ("addiu", "addi", "ori") and imm == 0 and rs != 0:
+            return [f"c->r[{rt}] = {R(rs)}; PGXP_MOVE({rt}, {rs});"]
         if k == K_ALU:
             if n == "sll":   return set_(rd, f"{R(rt)} << {sa}")
             if n == "srl":   return set_(rd, f"{R(rt)} >> {sa}")
@@ -143,10 +148,14 @@ class FunctionEmitter:
             }[n]
             if rt == 0:
                 return [f"(void){expr};"]  # keep side effects of I/O reads
+            if n == "lw":  # the address is taken before rt (which may be rs) changes
+                return [f"{{ const uint32_t a_ = {addr}; c->r[{rt}] = MEM_R32(c, a_); PGXP_LW({rt}, a_); }}"]
             return set_(rt, expr)
         if k == K_STORE:
             fn = {"sb": "MEM_W8", "sh": "MEM_W16", "sw": "MEM_W32",
                   "swl": "MEM_SWL", "swr": "MEM_SWR"}[n]
+            if n == "sw":
+                return [f"{{ const uint32_t a_ = {addr}; MEM_W32(c, a_, {R(rt)}); PGXP_SW({rt}, a_); }}"]
             return [f"{fn}(c, {addr}, {R(rt)});"]
         if k == K_COP0:
             if n == "mfc0": return set_(rt, f"cop0_read(c, {rd})")
@@ -154,12 +163,22 @@ class FunctionEmitter:
         if k == K_RFE:
             return ["cop0_rfe(c);"]
         if k == K_GTE:
+            sxy = 12 <= rd <= 15
+            if n == "mfc2" and sxy and rt != 0:
+                return [f"c->r[{rt}] = gte_read_data(c, {rd}); pgxp_gte_to_gpr({rt}, {rd});"]
+            if n == "mtc2" and sxy:
+                return [f"gte_write_data(c, {rd}, {R(rt)}); pgxp_gpr_to_gte({rd}, {rt});"]
             if n == "mfc2": return set_(rt, f"gte_read_data(c, {rd})")
             if n == "cfc2": return set_(rt, f"gte_read_ctrl(c, {rd})")
             if n == "mtc2": return [f"gte_write_data(c, {rd}, {R(rt)});"]
             if n == "ctc2": return [f"gte_write_ctrl(c, {rd}, {R(rt)});"]
             if n == "cop2": return [f"gte_command(c, 0x{imm:07X}u);"]
         if k == K_GTE_MEM:
+            if 12 <= rt <= 15:  # SXY: the precise-vertex shadow goes along
+                if n == "lwc2":
+                    return [f"{{ const uint32_t a_ = {addr}; gte_write_data(c, {rt}, MEM_R32(c, a_)); pgxp_mem_to_gte({rt}, a_); }}"]
+                if n == "swc2":
+                    return [f"{{ const uint32_t a_ = {addr}; MEM_W32(c, a_, gte_read_data(c, {rt})); pgxp_gte_to_mem({rt}, a_); }}"]
             if n == "lwc2": return [f"gte_write_data(c, {rt}, MEM_R32(c, {addr}));"]
             if n == "swc2": return [f"MEM_W32(c, {addr}, gte_read_data(c, {rt}));"]
         if k == K_SYSCALL:

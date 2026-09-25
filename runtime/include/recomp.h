@@ -134,6 +134,42 @@ RECOMP_INLINE void MEM_SWR(R3000* c, uint32_t a, uint32_t v) {
     MEM_W32(c, aa, w);
 }
 
+// ---------------------------------------------------------------- precise vertices (PGXP)
+
+// Every RAM/scratchpad word and CPU register has a shadow: the exact screen position and depth
+// of the projected vertex (GTE SXY) it last held, and the whole-pixel word it was for (v). The
+// generated code copies shadows on lw/sw, register moves and SXY transfers; nothing else
+// clears them: whoever uses a shadow checks v against the word it has (gpu.cpp), so a
+// shadow left behind by other code is simply not taken. w = 0: no exact position.
+typedef struct PgxpVal {
+    uint32_t v;
+    float x, y, w;
+} PgxpVal;
+extern PgxpVal pgxp_gpr[32];
+extern PgxpVal pgxp_ram[PSX_RAM_SIZE / 4];
+extern PgxpVal pgxp_scratch[PSX_SCRATCH_SIZE / 4];
+
+RECOMP_INLINE PgxpVal* PGXP_MEM(uint32_t a) {
+    if (RECOMP_LIKELY(PSX_IS_RAM(a))) return &pgxp_ram[(a & (PSX_RAM_SIZE - 1)) >> 2];
+    if (PSX_IS_SCRATCH(a)) return &pgxp_scratch[(a & (PSX_SCRATCH_SIZE - 1)) >> 2];
+    return 0;
+}
+RECOMP_INLINE void PGXP_LW(int rt, uint32_t a) {
+    const PgxpVal* m = PGXP_MEM(a);
+    if (m) pgxp_gpr[rt] = *m;
+    else pgxp_gpr[rt].w = 0;
+}
+RECOMP_INLINE void PGXP_SW(int rt, uint32_t a) {
+    PgxpVal* m = PGXP_MEM(a);
+    if (m) *m = pgxp_gpr[rt];
+}
+#define PGXP_MOVE(rd, rs) (pgxp_gpr[rd] = pgxp_gpr[rs])
+// SXY registers (12..15) to and from CPU registers and memory (gte.cpp)
+void pgxp_gte_to_gpr(int gpr, int reg);
+void pgxp_gpr_to_gte(int reg, int gpr);
+void pgxp_gte_to_mem(int reg, uint32_t a);
+void pgxp_mem_to_gte(int reg, uint32_t a);
+
 // ---------------------------------------------------------------- arithmetic
 
 RECOMP_INLINE void MULT(R3000* c, int32_t a, int32_t b) {

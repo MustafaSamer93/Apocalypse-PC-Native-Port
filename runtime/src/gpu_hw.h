@@ -12,6 +12,7 @@ struct HwVtx {
                        // for the widescreen HUD, gpu.cpp)
     int r, g, b;
     int u, v;
+    float w = 1.0f;    // view depth for perspective-correct texturing (precise 3D); 1 = affine
 };
 
 // Per-primitive drawing state (texture page, palette, blending) as the GPU had it.
