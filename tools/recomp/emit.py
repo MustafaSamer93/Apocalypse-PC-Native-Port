@@ -29,9 +29,11 @@ def lbl(a: int) -> str:
 #   800307F0 the level's render: extra frames between simulation steps (smooth.cpp)
 #   8002FF90 the level's tick: 60 Hz simulation prototype (sim60.cpp)
 #   800189EC the game records progress (level, restart point, health, weapons): auto-save
+#   8005F688 the player's update: every jump rises the full height (sim60.cpp)
 ENTRY_HOOKS = {
     0x8002FF90: "if (psx_hook_tick(c)) return;",
     0x800189EC: "psx_hook_progress(c);",
+    0x8005F688: "psx_hook_player(c);",
     0x8008632C: "psx_safepoint(c, 0x8008632Cu);",
     0x80030AD4: "psx_hook_level_start();",
     0x800307F0: "if (psx_hook_render(c)) return;",

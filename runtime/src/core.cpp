@@ -3,6 +3,7 @@
 #include <csetjmp>
 #include <cstdarg>
 #include <cstring>
+#include <filesystem>
 #include <unordered_map>
 #include <vector>
 
@@ -80,6 +81,19 @@ void fatal(const char* fmt, ...) {
     if (g_cpu) {
         std::fprintf(stderr, "  cycles=%llu ra=%08X sp=%08X\n", (unsigned long long)g_cpu->cycles,
                      g_cpu->r[31], g_cpu->r[29]);
+        for (int i = 0; i < 32; i += 8) {
+            std::fprintf(stderr, "  r%-2d", i);
+            for (int k = i; k < i + 8; k++) std::fprintf(stderr, " %08X", g_cpu->r[k]);
+            std::fprintf(stderr, "\n");
+        }
+        // the whole RAM, for finding what led here (next to the log)
+        std::error_code ec;
+        std::filesystem::create_directories("debug", ec);
+        if (FILE* f = std::fopen("debug/crash_ram.bin", "wb")) {
+            std::fwrite(psx_ram, 1, PSX_RAM_SIZE, f);
+            std::fclose(f);
+            std::fprintf(stderr, "  RAM saved to debug/crash_ram.bin\n");
+        }
     }
     trace_dump();
     std::fflush(stderr);

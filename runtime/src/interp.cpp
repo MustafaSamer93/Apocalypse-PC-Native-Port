@@ -21,7 +21,7 @@ void report_once(uint32_t pc, bool is_call) {
     static std::unordered_set<uint32_t> seen;
     if (!seen.insert(pc).second) return;
     log_msg(LogCat::Core, "interpreting unrecompiled code at %08X%s", pc, is_call ? "" : " (intra-function jump)");
-    if (!is_call) return;
+    if (!is_call || (pc & 0x1FFFFFFF) < 0x10000) return;  // not code: a jump through a null pointer
     if (FILE* f = std::fopen("extra_seeds.txt", "a")) {
         std::fprintf(f, "%08X\n", pc);
         std::fclose(f);
@@ -119,6 +119,10 @@ static bool optional_call_skipped(uint32_t pc) {
 }
 
 void interp_run(R3000* c, uint32_t pc) {
+    // The kernel's low memory holds no game code: this is a call through a null (or corrupt)
+    // function pointer. Running it would only execute junk and hang; stop with the evidence.
+    if ((pc & 0x1FFFFFFF) < 0x1000)
+        fatal("call to %08X (a null function pointer) from ra=%08X a0=%08X", pc, c->r[31], c->r[4]);
     report_once(pc, true);
     interp_loop(c, pc, c->r[31]);
 }
