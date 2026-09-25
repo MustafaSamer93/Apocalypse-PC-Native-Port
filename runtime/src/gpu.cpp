@@ -701,8 +701,12 @@ void upload_word(uint32_t v) {
             g_upload.cx = 0;
             if (++g_upload.cy >= g_upload.h) {
                 g_upload.active = false;
+                LOG(Gpu, "upload %d,%d %dx%d", g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (hw_active()) hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
                 replace_note_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
+                // a whole picture: replace it now, before the game draws on it in the same
+                // frame (the title's PRESS START); pictures sent in strips wait for the VBlank
+                if (g_upload.w >= 512 && g_upload.h >= 240) replace_check(g_vram);
             }
         }
     }
@@ -938,7 +942,9 @@ void gpu_note_movie_frame() {
     g_movie_vblank = g_vblanks;
     g_movie_seen = true;
 }
-bool gpu_movie_playing() { return g_movie_seen && g_vblanks - g_movie_vblank < 30; }
+// Full-screen movies show a 24-bit display; levels also decode video for in-game screens
+// (15-bit display), which must not count.
+bool gpu_movie_playing() { return g_movie_seen && g_vblanks - g_movie_vblank < 30 && (DS.mode & 0x10); }
 
 #include "state_io.h"
 

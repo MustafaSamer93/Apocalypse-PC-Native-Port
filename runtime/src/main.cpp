@@ -106,6 +106,18 @@ int main(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::current_path(std::filesystem::u8path(base), ec);
     }
+#ifdef _WIN32
+    // Started with no console and nothing redirected (a double-click): log to
+    // debug/apocalypse.log (with F12 screenshots and crash dumps), keeping the previous run's
+    // log as debug/apocalypse.old.log.
+    if (HANDLE err = GetStdHandle(STD_ERROR_HANDLE); !GetConsoleWindow() && (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN)) {
+        std::error_code ec;
+        std::filesystem::create_directories("debug", ec);
+        std::filesystem::rename("debug/apocalypse.log", "debug/apocalypse.old.log", ec);
+        FILE* f;
+        if (freopen_s(&f, "debug/apocalypse.log", "a", stderr) == 0) std::setvbuf(stderr, nullptr, _IONBF, 0);
+    }
+#endif
     std::string cue = "assets/Apocalypse (USA).cue";
     std::string card_dir = "saves";
     int scale = 0;  // window: 0 = 1080 lines or as much as fits

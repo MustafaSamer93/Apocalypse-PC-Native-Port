@@ -11,14 +11,17 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 constexpr int kStateSlots = 5;
 constexpr int kAutoSlot = 0;  // slot 0 is the auto-save; 1..5 are manual
+constexpr int kChapterBase = 1000;  // slot kChapterBase + i: chapter i of state_chapter_names()
 
 void state_request_save(int slot);
 void state_request_load(int slot);
 bool state_slot_exists(int slot);
 std::string state_slot_label(int slot);  // "empty" or the save time
+std::vector<std::string> state_chapter_names();  // "1: Cat1 (prsn)", ... in the order reached
 
 // Auto-save triggers (see savestate.cpp).
 void state_note_level_start();

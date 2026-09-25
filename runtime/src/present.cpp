@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -360,10 +361,35 @@ void gl_present_save_bmp(const char* path) {
     std::vector<uint8_t> flipped(px.size());
     for (int y = 0; y < h; y++)
         std::memcpy(&flipped[(size_t)y * w * 4], &px[(size_t)(h - 1 - y) * w * 4], (size_t)w * 4);
-    SDL_Surface* s = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_ARGB8888, flipped.data(), w * 4);
-    if (!s || !SDL_SaveBMP(s, path)) log_msg(LogCat::Host, "screenshot %s failed: %s", path, SDL_GetError());
-    else log_msg(LogCat::Host, "screenshot saved to %s", path);
-    if (s) SDL_DestroySurface(s);
+    save_bmp_bgrx(flipped.data(), w, h, path);
+}
+
+// 24-bit, so the window's alpha (0 in the GL back buffer) cannot make viewers show it
+// transparent or blank.
+bool save_bmp_bgrx(const uint8_t* px, int w, int h, const char* path) {
+    const uint32_t row = ((uint32_t)w * 3 + 3) & ~3u, size = 54 + row * (uint32_t)h;
+    uint8_t hdr[54] = {'B', 'M'};
+    auto put32 = [&](int off, uint32_t v) { for (int i = 0; i < 4; i++) hdr[off + i] = (uint8_t)(v >> (8 * i)); };
+    put32(2, size);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, (uint32_t)w);
+    put32(22, (uint32_t)-h);  // top-down rows
+    hdr[26] = 1;
+    hdr[28] = 24;
+    put32(34, row * (uint32_t)h);
+    FILE* f = std::fopen(path, "wb");
+    bool ok = f && std::fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr;
+    std::vector<uint8_t> line(row, 0);
+    for (int y = 0; ok && y < h; y++) {
+        const uint8_t* src = px + (size_t)y * w * 4;
+        for (int x = 0; x < w; x++) std::memcpy(&line[(size_t)x * 3], src + (size_t)x * 4, 3);
+        ok = std::fwrite(line.data(), 1, row, f) == row;
+    }
+    if (f && std::fclose(f) != 0) ok = false;
+    if (ok) log_msg(LogCat::Host, "screenshot saved to %s", path);
+    else log_msg(LogCat::Host, "screenshot %s failed", path);
+    return ok;
 }
 
 void gl_present_swap() { SDL_GL_SwapWindow(g_win); }

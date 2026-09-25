@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -127,6 +129,17 @@ std::string sim60_label() {
     return s;
 }
 
+// Draw distance choices, percent of the game's own (drawdist.cpp).
+constexpr int kDrawDistChoices[] = {100, 150, 200, 300, 400};
+
+std::string drawdist_label() {
+    if (g_draw_distance <= 100) return "Original";
+    if (g_draw_distance >= 400) return "Max";  // the 32000 limit in every level tried
+    std::string s = std::to_string(g_draw_distance / 100);
+    if (g_draw_distance % 100) s += "." + std::to_string(g_draw_distance % 100 / 10);
+    return s + "x";
+}
+
 // Settings screen text for the frame rate choice.
 std::string fps_label() {
     if (g_gfx.fps == 30) return "30 (original)";
@@ -241,6 +254,8 @@ void save_settings() {
     std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d\n", g_gfx.scale, (int)g_gfx.aspect,
                  g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
     std::fprintf(f, "sim %d\n", g_sim60_setting);
+    std::fprintf(f, "drawdist %d\n", g_draw_distance);
+    std::fprintf(f, "precise %d\n", g_gte_precise ? 1 : 0);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
     std::fprintf(f, "msaa %d\n", g_gfx.msaa);
     std::fprintf(f, "renderer %s\n", g_gfx.vulkan ? "vulkan" : "opengl");
@@ -290,6 +305,14 @@ void load_settings() {
         }
         if (int aa; std::sscanf(line, "aa %d", &aa) == 1) {
             g_gfx.aa = std::clamp(aa, 0, 3);
+            continue;
+        }
+        if (int pr; std::sscanf(line, "precise %d", &pr) == 1) {
+            g_gte_precise = pr != 0;
+            continue;
+        }
+        if (int dd; std::sscanf(line, "drawdist %d", &dd) == 1) {
+            g_draw_distance = std::clamp(dd, 100, 400);
             continue;
         }
         if (int sim; std::sscanf(line, "sim %d", &sim) == 1) {
@@ -371,8 +394,8 @@ bool host_init(const char* title, int scale) {
         log_msg(LogCat::Host, "loaded extra controller mappings from gamecontrollerdb.txt");
     load_settings();
     // Window shaped like the picture. `scale` N asks for 240*N lines; 0 (the default) asks for
-    // 1080: a 1080p window if the desktop has room, else fullscreen on a 1080-line display,
-    // else the largest window that fits.
+    // 1080: a 1080p window if the desktop has room, else the largest window that fits. Always a
+    // window (so screenshot tools can capture it); F11 switches to fullscreen.
     const float ratio = g_gfx.aspect == Aspect::A16_9 ? 16.0f / 9 : g_gfx.aspect == Aspect::A16_10 ? 16.0f / 10 : 4.0f / 3;
     int win_h = scale > 0 ? 240 * scale : 1080;
     bool fullscreen = false;
@@ -382,12 +405,7 @@ bool host_init(const char* title, int scale) {
     if (SDL_GetDisplayUsableBounds(display, &usable)) {
         const int frame = 40;  // title bar and borders
         int fit_h = std::min(usable.h - frame, (int)((float)(usable.w - 16) / ratio));
-        if (win_h > fit_h) {
-            if (scale == 0 && desktop && desktop->h >= 1080 && (float)desktop->w >= 1080 * ratio - 1)
-                fullscreen = true;  // a 1080-line screen: use all of it
-            else
-                win_h = std::max(240, fit_h);
-        }
+        if (win_h > fit_h) win_h = std::max(240, fit_h);
     }
     int win_w = (int)((float)win_h * ratio + 0.5f);
     if (desktop)
@@ -451,6 +469,7 @@ void host_shutdown() {
 }
 
 static void run_settings_menu();
+static bool g_shot_key = false;  // F12: save the next frame to debug/ (maybe_screenshot)
 
 void host_poll() {
     bool open_menu = false;
@@ -463,6 +482,18 @@ void host_poll() {
                 if (e.key.scancode == SDL_SCANCODE_F1 && !e.key.repeat) open_menu = true;
                 if (e.key.scancode == SDL_SCANCODE_F5 && !e.key.repeat) state_request_save(1);
                 if (e.key.scancode == SDL_SCANCODE_F9 && !e.key.repeat) state_request_load(1);
+                if (e.key.scancode == SDL_SCANCODE_F8 && !e.key.repeat) {  // issue marker + state saves/slot1NN.state
+                    // ponytail: numbering restarts each launch, so older issue states get overwritten
+                    static int issue = 0;
+                    extern std::string g_sim60_level;
+                    extern int psx_opt_sim60;
+                    issue++;
+                    log_msg(LogCat::Host, "===== F8 issue #%d: frame %llu, level \"%s\", sim60 %d, state saves/slot%d.state =====",
+                            issue, (unsigned long long)g_frame, g_sim60_level.c_str(), psx_opt_sim60, 100 + issue);
+                    std::fflush(stderr);
+                    state_request_save(100 + issue);
+                }
+                if (e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) g_shot_key = true;
                 if (e.key.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
                     bool fs = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
                     SDL_SetWindowFullscreen(g_window, !fs);
@@ -705,6 +736,22 @@ bool host_parse_state_script(const char* spec) {
 static void maybe_screenshot() {
     for (uint64_t f : g_shot_frames)
         if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
+    if (!g_shot_key) return;
+    g_shot_key = false;
+    // debug/shot_<date>_<time>.bmp (a second one within the same second gets _2, _3...)
+    std::error_code ec;
+    std::filesystem::create_directories("debug", ec);
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &now);
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm);
+    std::string path = std::string("debug/shot_") + stamp + ".bmp";
+    for (int n = 2; std::filesystem::exists(path, ec); n++)
+        path = std::string("debug/shot_") + stamp + "_" + std::to_string(n) + ".bmp";
+    present_save_bmp(path.c_str());
+    log_msg(LogCat::Host, "===== F12 screenshot %s: frame %llu =====", path.c_str(), (unsigned long long)g_frame);
+    host_toast("Screenshot saved: " + path);
 }
 
 uint64_t g_dump_vram_frame = 0;
@@ -769,8 +816,8 @@ static void draw_game(const GpuDisplay& d, double frac) {
         }
         if (image != g_last_image) g_images++;
         g_last_image = image;
+        maybe_screenshot();  // before the toasts: the picture is the game alone
         draw_toast();
-        maybe_screenshot();
         present_swap();
         return;
     }
@@ -800,8 +847,8 @@ static void draw_game(const GpuDisplay& d, double frac) {
         std::fill(g_pixels.begin(), g_pixels.end(), 0);
     }
     present_game_pixels(g_pixels.data() + (size_t)crop * w, w, h - 2 * crop, opt);
-    draw_toast();
     maybe_screenshot();
+    draw_toast();
     present_swap();
 }
 
@@ -1015,9 +1062,12 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DEVICE, R_REMAP,
+    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_DEVICE, R_REMAP,
                R_RESET, R_BACK, R_COUNT };
     static int slot = 1;
+    static int chapter = 0;
+    const std::vector<std::string> chapters = state_chapter_names();
+    if (chapter >= (int)chapters.size()) chapter = 0;
     size_t dev_index = 0;
     int sel = 0;
     std::string status;
@@ -1086,6 +1136,17 @@ static void run_settings_menu() {
                         gfx_changed = true;
                         break;
                     }
+                    case R_DRAWDIST: {  // takes effect at the next render (drawdist.cpp)
+                        int n = (int)std::size(kDrawDistChoices), i = 0;
+                        while (i < n - 1 && kDrawDistChoices[i] != g_draw_distance) i++;
+                        g_draw_distance = kDrawDistChoices[(i + step + n) % n];
+                        gfx_changed = true;
+                        break;
+                    }
+                    case R_PRECISE: g_gte_precise = !g_gte_precise; gfx_changed = true; break;  // gte.cpp
+                    case R_CHAPTER:
+                        if (dir && !chapters.empty()) chapter = (chapter + step + (int)chapters.size()) % (int)chapters.size();
+                        break;
                     case R_DEVICE: dev_index = (dev_index + entries + step) % entries; break;
                     case R_SAVE:
                     case R_LOAD:
@@ -1107,6 +1168,13 @@ static void run_settings_menu() {
                     open = false;
                 } else {
                     status = "That slot is empty.";
+                }
+            } else if (sel == R_CHAPTER) {
+                if (chapters.empty()) {
+                    status = "Chapters appear as you reach checkpoints.";
+                } else {
+                    state_request_load(kChapterBase + chapter);
+                    open = false;
                 }
             } else if (sel == R_REMAP && is_keyboard) {
                 SDL_Scancode keys_new[16];
@@ -1163,6 +1231,7 @@ static void run_settings_menu() {
                     row("Save state", slot_line),
                     row("Load state", slot_line),
                     row("Load auto-save", state_slot_label(kAutoSlot)),
+                    row("Chapter", chapters.empty() ? std::string("none yet") : chapters[chapter].substr(0, 26)),
                     row("Renderer", std::string(g_gfx.vulkan ? "Vulkan" : "OpenGL") +
                                         ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)")),
                     row("Resolution", res),
@@ -1173,6 +1242,8 @@ static void run_settings_menu() {
                     row("Smooth textures", g_gfx.texture_filter ? "On" : "Off"),
                     row("Frame rate", fps_label()),
                     row("Simulation", sim60_label()),
+                    row("Draw distance", drawdist_label()),
+                    row("Precise 3D", g_gte_precise ? "On (no wobble)" : "Off (original)"),
                     row("Controls", dev_line),
                     std::string("Set up buttons") + (custom ? "  (custom)" : "  (default)"),
                     "Reset buttons to default",

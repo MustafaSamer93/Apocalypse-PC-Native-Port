@@ -418,10 +418,7 @@ void vk_present_save_bmp(const char* path) {
     std::vector<uint8_t> px(st.ptr, st.ptr + (size_t)w * h * 4);
     if (g_swap_format == VK_FORMAT_R8G8B8A8_UNORM)  // BMP rows want B, G, R
         for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);
-    SDL_Surface* s = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_ARGB8888, px.data(), w * 4);
-    if (!s || !SDL_SaveBMP(s, path)) log_msg(LogCat::Host, "screenshot %s failed: %s", path, SDL_GetError());
-    else log_msg(LogCat::Host, "screenshot saved to %s", path);
-    if (s) SDL_DestroySurface(s);
+    save_bmp_bgrx(px.data(), w, h, path);
     // drawing can continue on this image (the overlay, for one)
     vkc::begin_rendering(*target);
 }

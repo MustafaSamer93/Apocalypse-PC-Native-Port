@@ -166,7 +166,8 @@ void replace_note_upload(int x, int y, int w, int h) {
 // the game then draws on it, PRESS START, must stay); other copies count as uploads.
 void replace_note_copy(int sx, int sy, int dx, int dy, int w, int h) {
     const int from = buffer_of(sx, sy, w, h), to = buffer_of(dx, dy, w, h);
-    if (to < 0) return;
+    // a copy onto itself changes nothing (the title does a 2x1 one after drawing PRESS START)
+    if (to < 0 || (sx == dx && sy == dy)) return;
     if (from >= 0 && from != to && g_replaced[from] && sx == 0 && dx == 0 && sy % 256 == 0 && dy % 256 == 0 &&
         w >= 512 && h >= 240) {
         g_replaced[to] = true;

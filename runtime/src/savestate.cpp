@@ -4,9 +4,12 @@
 #include <chrono>
 #include <csetjmp>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <vector>
+
+#include <SDL3/SDL_stdinc.h>
 
 #include "memcard.h"
 #include "psx.h"
@@ -65,8 +68,27 @@ void read_progress(std::string* level, std::string* restart) {
     *restart = ram_string(kProgressRestart, 24);
 }
 
+// Chapters: the state at each progress point the first time it is reached, in that order,
+// as "saves/chapters/NN <level> <restart point>.state" (listed in the F1 menu).
+constexpr int kChapterNew = kChapterBase - 1;  // the slot save_to writes a new chapter to
+std::string g_new_chapter;
+
+std::vector<std::filesystem::path> chapter_files() {
+    std::vector<std::filesystem::path> v;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator("saves/chapters", ec))
+        if (e.path().extension() == ".state") v.push_back(e.path());
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
 std::string slot_path(int slot) {
     std::filesystem::create_directories("saves");
+    if (slot == kChapterNew) return g_new_chapter;
+    if (slot >= kChapterBase) {
+        auto v = chapter_files();
+        return (size_t)(slot - kChapterBase) < v.size() ? v[slot - kChapterBase].string() : "saves/chapters/none";
+    }
     return slot == kAutoSlot ? "saves/autosave.state" : "saves/slot" + std::to_string(slot) + ".state";
 }
 
@@ -117,6 +139,9 @@ bool save_to(int slot, R3000* c, uint32_t pc) {
     return !ec;
 }
 
+// Keeps the state as a chapter unless this progress point already has one.
+void save_chapter(const std::string& level, const std::string& restart, R3000* c, uint32_t pc);
+
 bool load_from(int slot, R3000* c, uint32_t* pc) {
     std::string path = slot_path(slot);
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -146,6 +171,18 @@ bool load_from(int slot, R3000* c, uint32_t* pc) {
     return true;
 }
 
+void save_chapter(const std::string& level, const std::string& restart, R3000* c, uint32_t pc) {
+    const std::string key = level + " " + restart;
+    auto v = chapter_files();
+    for (const auto& f : v)
+        if (f.stem().string().substr(3) == key) return;
+    std::filesystem::create_directories("saves/chapters");
+    char num[8];
+    std::snprintf(num, sizeof num, "%02zu ", v.size() + 1);
+    g_new_chapter = "saves/chapters/" + std::string(num) + key + ".state";
+    save_to(kChapterNew, c, pc);
+}
+
 }  // namespace
 
 // Loading replaces the whole machine and abandons whatever is executing, so unlike saving
@@ -162,7 +199,9 @@ void state_poll_load(R3000* c) {
     }
     memcard(0).flush();
     host_audio_clear();
-    host_toast(slot == kAutoSlot ? "Auto-save loaded" : "State " + std::to_string(slot) + " loaded");
+    host_toast(slot == kAutoSlot       ? "Auto-save loaded"
+               : slot >= kChapterBase ? "Chapter " + std::to_string(slot - kChapterBase + 1) + " loaded"
+                                      : "State " + std::to_string(slot) + " loaded");
     g_resume_pc = resume_pc;
     g_resume_pending = true;
     // the loaded game's progress point is where auto-saves continue from
@@ -189,19 +228,29 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
         host_toast(ok ? "State " + std::to_string(slot) + " saved" : "Saving failed");
     }
 
-    {  // Debug: APOC_TEST_CHECKPOINT=FRAME:NODE makes the restart point trigger node NODE (level 1:
-       // 1 = start, 296 = Cat1, 52 = Trips) and records progress, as a checkpoint trigger does
+    {  // Debug: APOC_TEST_CHECKPOINT=FRAME:NODE[:respawn] makes the restart point trigger node NODE
+       // and records progress, as a checkpoint trigger does. With ":respawn" the player then
+       // respawns there (as after a death, without losing a life), which creates that chapter.
+       // Level 1 restart nodes: 1 Start, 296 Cat1, 867 Cat1andhalf, 410 Cell, 52 Trips,
+       // 495 Cat2, 1467 Cat2andhalf, 558 Prisoners, 739 Tank (type-8 nodes in prsn_t.trg).
         static const char* t = std::getenv("APOC_TEST_CHECKPOINT");
         static bool done = false;
         unsigned long long tf = 0;
         unsigned ti = 0;
-        if (t && !done && std::sscanf(t, "%llu:%u", &tf, &ti) == 2 && frame >= tf) {
+        char opt[16] = "";
+        if (t && !done && std::sscanf(t, "%llu:%u:%15s", &tf, &ti, opt) >= 2 && frame >= tf) {
             done = true;
             const R3000 saved = *c;
             MEM_W32(c, 0x800FF620, ti);
             c->r[31] = 0;
             call_indirect(c, 0x800189EC);
             *c = saved;
+            // the level loop (80030CB4) respawns at the recorded point once player flag
+            // +0x4E bit 0x40 (death finished) is set; that costs a life (0x800FF874), so add one
+            if (uint32_t player = MEM_R32(c, 0x800FF5A0); player && std::strcmp(opt, "respawn") == 0) {
+                MEM_W32(c, 0x800FF874, MEM_R32(c, 0x800FF874) + 1);
+                MEM_W16(c, player + 0x4E, MEM_R16(c, player + 0x4E) | 0x40);
+            }
         }
     }
     // Auto-save a moment after the game records a new progress point (once any level
@@ -211,6 +260,7 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
         std::string level, restart;
         read_progress(&level, &restart);
         if (g_demo_loaded || level.empty() || restart.empty()) return;
+        save_chapter(level, restart, c, pc);
         if (g_saved_level.empty()) {  // the first point of this session (new game or loaded save)
             g_saved_level = level;
             g_saved_restart = restart;
@@ -238,6 +288,20 @@ void state_request_save(int slot) { g_save_request = slot; }
 void state_request_load(int slot) { g_load_request = slot; }
 
 bool state_slot_exists(int slot) { return std::filesystem::exists(slot_path(slot)); }
+
+std::vector<std::string> state_chapter_names() {
+    std::vector<std::string> names;
+    for (const auto& f : chapter_files()) {
+        // "03 prsn_t Re_Cat1_Prsn" -> "3: Cat1 (prsn)"
+        std::string n = f.stem().string(), level = n.substr(3, n.find(' ', 3) - 3), point = n.substr(4 + level.size());
+        if (level.size() > 2 && level.compare(level.size() - 2, 2, "_t") == 0) level.resize(level.size() - 2);
+        if (point.compare(0, 3, "Re_") == 0) point.erase(0, 3);
+        if (size_t u = point.rfind('_'); u != std::string::npos && SDL_strcasecmp(point.c_str() + u + 1, level.c_str()) == 0)
+            point.resize(u);
+        names.push_back(std::to_string(names.size() + 1) + ": " + point + " (" + level + ")");
+    }
+    return names;
+}
 
 std::string state_slot_label(int slot) {
     std::error_code ec;

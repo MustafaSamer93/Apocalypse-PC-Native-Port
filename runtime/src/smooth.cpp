@@ -267,9 +267,11 @@ void smooth_reset() {
 struct Stats { int extras; double ms; } g_st{};
 
 int sim60_render(R3000* c);
+void drawdist_apply(R3000* c);
 
 extern "C" int psx_hook_render(R3000* c) {
     if (core_in_ghost()) return 0;
+    drawdist_apply(c);
     if (psx_opt_sim60) return sim60_render(c);
     const int k = smooth_factor();
     CaptureSet& back = g_sets[g_back];

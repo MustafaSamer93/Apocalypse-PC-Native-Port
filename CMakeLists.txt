@@ -100,6 +100,7 @@ add_executable(apocalypse
     runtime/src/savestate.cpp
     runtime/src/smooth.cpp
     runtime/src/sim60.cpp
+    runtime/src/drawdist.cpp
     runtime/src/render_backend.cpp
     runtime/src/replace.cpp
     runtime/src/vk_context.cpp

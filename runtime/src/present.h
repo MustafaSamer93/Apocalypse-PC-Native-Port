@@ -33,6 +33,8 @@ void present_overlay_end();
 
 void present_swap();
 void present_save_bmp(const char* path);  // back buffer -> BMP (debug screenshots)
+// Top-down 32-bit pixels, blue first (alpha ignored) -> 24-bit BMP; logs the result.
+bool save_bmp_bgrx(const uint8_t* px, int w, int h, const char* path);
 
 // Window pixel -> 640x480 position inside the game image (for mouse aiming).
 bool present_window_to_game(float wx, float wy, float* x, float* y);
