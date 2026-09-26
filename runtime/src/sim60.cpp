@@ -1,4 +1,4 @@
-// 60 Hz simulation (level 1 by default; F1 -> Simulation; --sim60 for every level).
+// 60 Hz simulation (levels 1-4 by default; F1 -> Simulation; --sim60 for every level).
 //
 // The level loop (80030AD4) normally calls the tick (8002FF90) twice per rendered frame
 // and waits for two VBlanks; the tick advances a 60 Hz counter (gp+0x438) and updates
@@ -28,6 +28,7 @@
 // render draws everything where it is.
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -42,18 +43,23 @@ void gpu_regs_state(StateIO& s);
 
 int psx_opt_sim60 = 0;
 
-// Setting: 0 = 30 Hz everywhere (original), 1 = 60 Hz in level 1 (the tested level),
-// 2 = 60 Hz in every level (untested). Attract-mode demos always run at 30 Hz: they replay
-// input recorded per 30 Hz update.
+// Setting: 0 = 30 Hz everywhere (original), 1 = 60 Hz in the tested levels (1 prison "prsn",
+// 2 sewers "sewr", 3 plague "city" and its death sequence "death", 4 rooftops "roof"), 2 = 60 Hz
+// in every level (untested). Attract-mode
+// demos always run at 30 Hz: they replay input recorded per 30 Hz update.
 int g_sim60_setting = 1;
 bool g_sim60_force = false;  // --sim60: on in any level, even when it is not known yet
 std::string g_sim60_level;  // base name of the level's trigger file ("prsn" = level 1)
 bool g_sim60_demo = false;
 
+bool sim60_tested(const std::string& level) {
+    return level == "prsn" || level == "sewr" || level == "city" || level == "death" || level == "roof";
+}
+
 void sim60_apply() {
     bool on = !g_sim60_demo &&
               (g_sim60_force || (!g_sim60_level.empty() && (g_sim60_setting == 2 ||
-                                                            (g_sim60_setting == 1 && g_sim60_level == "prsn"))));
+                                                            (g_sim60_setting == 1 && sim60_tested(g_sim60_level)))));
     if ((on ? 1 : 0) != psx_opt_sim60)
         log_msg(LogCat::Host, "60 Hz simulation %s (level \"%s\"%s)", on ? "on" : "off", g_sim60_level.c_str(),
                 g_sim60_demo ? ", demo" : "");
@@ -105,7 +111,9 @@ constexpr uint32_t kUpdateCameras = 0x80037258;  // update one small-object list
 // position, world and local velocity. The velocities are mostly recomputed each update
 // (from the speed step and facing); halving them matters where they are integrated (falls).
 constexpr int kPlayerVecs[] = {0x04, 0x68, 0x98};
-constexpr int kPlayerCounters[] = {0x260, 0x23A};  // speed step, time in the air (long-fall animation from 49)
+// speed step, time in the air (long-fall animation from 49), idle time (8005FDD0: a voice line
+// after 1350 updates standing still, 45 s, and every 90 s after; it came twice as often)
+constexpr int kPlayerCounters[] = {0x260, 0x23A, 0x244};
 // Animation clock: each update adds the rate (+0x130, 16.16 frames) to the fraction (+0x12C)
 // and moves the frame (+0x134, copied to +0x136 and +0x18) on by the carry, 1 or 2 frames.
 // While the animation (+0x1A) and its start frame (+0x128) stay the same, the clock (frame and
@@ -154,6 +162,7 @@ struct Vec3 {
 };
 
 bool g_in_tick = false;
+bool g_in_tick_any = false;  // a tick run from psx_hook_tick (either kind)
 bool g_in_render = false;
 
 // Positions of the other objects before the last world update (for the render after it).
@@ -184,7 +193,7 @@ bool g_mid_pending = false;
 // The cameras (gp+0x588) are updated at 60 Hz already and are left out.
 constexpr uint32_t kEffectLists = kGp + 0x578, kEffectListsEnd = kGp + 0x5A8;
 constexpr uint32_t kSpriteList = kGp + 0x57C, kGlowList = kGp + 0x594, kShardList = kGp + 0x598,
-                   kTrailList = kGp + 0x5A0, kBeamList = kGp + 0x5A8;
+                   kRingList = kGp + 0x59C, kTrailList = kGp + 0x5A0, kBeamList = kGp + 0x5A8;
 constexpr int kEffectClass = 0x44, kEffectAge = 0x08, kEffectPos = 0x18;
 constexpr int32_t kFar = 0x400000;  // a longer step (20.12) is a jump: a reused object, a teleport
 
@@ -207,6 +216,7 @@ constexpr EffectField kEffectFields[] = {
     {kSpriteList, 0, Kind::Colour, 0x4C, 0},
     {kSpriteList, 0x800A1C78, Kind::Halves, 0x5C, 0x800},
     {kSpriteList, 0x800A1C78, Kind::Halves, 0x60, 0x800},
+    {kSpriteList, 0x800A1C60, Kind::Halves, 0x5C, 0x800},  // a flash's size grows (level 3's guns)
     // a chain's segments (A1BE0), each from one point to the next
     {0, 0x800A1BE0, Kind::Point, 0x60, kFar},
     {0, 0x800A1BE0, Kind::Point, 0x6C, kFar},
@@ -221,10 +231,19 @@ constexpr EffectField kEffectFields[] = {
     // lights: a fan of vertices round the position, turned by +0x60, in the colour +0x58
     {kGlowList, 0, Kind::Halves, 0x60, 0x400},
     {kGlowList, 0, Kind::Colour, 0x58, 0},
+    // flickering lights fading out (800A1154: +0x6E..+0x74, stepped by +0x76)
+    {kGlowList, 0x800A1154, Kind::Halves, 0x6C, 0x400},
+    {kGlowList, 0x800A1154, Kind::Halves, 0x70, 0x400},
+    {kGlowList, 0x800A1154, Kind::Halves, 0x74, 0x400},
     // shards: three corners
     {kShardList, 0, Kind::Point, 0x48, kFar},
     {kShardList, 0, Kind::Point, 0x54, kFar},
     {kShardList, 0, Kind::Point, 0x60, kFar},
+    {kShardList, 0x800A1B98, Kind::Colour, 0x70, 0},  // and their fading colours
+    {kShardList, 0x800A1B98, Kind::Colour, 0x74, 0},
+    // rings (800A15F8: the one that grows round the player when level 4 respawns it): two radii
+    {kRingList, 0x800A15F8, Kind::Number, 0x5C, 0x400},
+    {kRingList, 0x800A15F8, Kind::Number, 0x60, 0x400},
     // trails: the first point (the others are in a table, below)
     {kTrailList, 0, Kind::Point, 0x54, kFar},
     // beams: head, tail and a fading colour
@@ -241,6 +260,10 @@ struct EffectTable {
 constexpr EffectTable kEffectTables[] = {
     {kGlowList, 0x48, 0x50, 8, -1, 4},    // lights: each vertex's distance (random), colour
     {kTrailList, 0x50, 0x4C, 16, 0, 12},  // trails: each further point and its colour
+    // rings (800A15F8): 140-byte segments (80029198 builds them), each with three points
+    {kRingList, 0x50, 0x4C, 140, 0x68, -1},
+    {kRingList, 0x50, 0x4C, 140, 0x74, -1},
+    {kRingList, 0x50, 0x4C, 140, 0x80, -1},
 };
 constexpr uint32_t kMaxTable = 64;
 
@@ -298,18 +321,28 @@ void for_each_effect(R3000* c, F f) {
     }
 }
 
+// Flickering lights (class 800A1154, below): their fan's angle (+0x60) and vertex colours are
+// random every update. Drawn half way they made a third, dimmer pattern between two random ones,
+// so the light pulsed and its rays jumped on every frame; they keep the game's 30 Hz flicker.
+bool random_field(uint32_t list, uint32_t cls, int off) {
+    return list == kGlowList && cls == 0x800A1154u && off == 0x60;
+}
+
 // Every field of an effect drawn half way: f(address, kind, limit); a Point is its x address.
 template <class F>
 void for_each_field(R3000* c, uint32_t list, uint32_t o, uint32_t cls, F f) {
     for (const EffectField& e : kEffectFields)
-        if ((!e.list || e.list == list) && (!e.cls || e.cls == cls)) f(o + e.off, e.kind, e.limit);
+        if ((!e.list || e.list == list) && (!e.cls || e.cls == cls) && !random_field(list, cls, e.off))
+            f(o + e.off, e.kind, e.limit);
     for (const EffectTable& t : kEffectTables) {
-        if (t.list != list) continue;
+        if (t.list != list || (list == kGlowList && cls == 0x800A1154u)) continue;
         const uint32_t p = MEM_R32(c, o + t.ptr), n = MEM_R32(c, o + t.count);
         if (!valid_ptr(p) || n > kMaxTable) continue;
+        // only inside the table's own heap block (a ring's count can run past it)
+        const uint32_t size = MEM_R32(c, p - 4) >> 4;
         for (uint32_t i = 0; i < n; i++) {
-            if (t.point >= 0) f(p + i * t.stride + t.point, Kind::Point, kFar);
-            if (t.colour >= 0) f(p + i * t.stride + t.colour, Kind::Colour, 0);
+            if (t.point >= 0 && i * t.stride + t.point + 12 <= size) f(p + i * t.stride + t.point, Kind::Point, kFar);
+            if (t.colour >= 0 && i * t.stride + t.colour + 4 <= size) f(p + i * t.stride + t.colour, Kind::Colour, 0);
         }
     }
 }
@@ -479,16 +512,16 @@ uint32_t mid_word(const MidWord& m) {
 }
 
 // Flickering lights (class 800A1154: a fan of coloured vertices on the walls and floor, e.g. the
-// flash of a gun being fired): 8001D114 gives every vertex a random distance and the fan a random
-// angle. The game does that when a light is made (a gun's flash lives for one update and is made
-// again every update) and, for lights flagged at +0x78, every update: they flickered at 30 Hz. On
-// the player-only ticks they flicker once more, with the game's random numbers (gp+0xD58..D60)
-// put back afterwards and without the fade the flicker also steps (+0x6E..+0x74 by +0x76), so the
-// game plays exactly as before.
+// flash of a gun being fired, a grenade's blast): 8001D114 gives every vertex a random distance
+// and the fan a random angle. The game does that when a light is made (a gun's flash lives for one
+// update and is made again every update) and, for lights flagged at +0x78, every update: they
+// flicker at 30 Hz. (This flickered them once more on the player-only ticks, at 60 Hz: with the
+// half-way frame between, a new random pattern every frame made glows pulse and rays jump. Off;
+// APOC_FLICKER60=1 brings it back for comparisons.)
 constexpr uint32_t kFlickerClass = 0x800A1154, kFlicker = 0x8001D114, kRandState = kGp + 0xD58;
 void flicker_lights(R3000* c) {
-    static const bool off = std::getenv("APOC_NO_EFFECT_BLEND") != nullptr;
-    if (off) return;
+    static const bool on = std::getenv("APOC_FLICKER60") != nullptr && std::getenv("APOC_NO_EFFECT_BLEND") == nullptr;
+    if (!on) return;
     uint32_t lights[64];
     int n = 0;
     for_each_effect(c, [&](uint32_t list, uint32_t o) {
@@ -523,6 +556,154 @@ struct AnimState {
 };
 std::vector<AnimState> g_prev_anim;
 uint64_t g_blend_frames = 0;
+
+// Jointed models (the player, and enemies such as level 3's soldiers and level 4's walkers:
+// flag 0x0004 in +0x00) are drawn from joint matrices their update computes (8007D148: a block
+// that +0x164 points to, 24 bytes per joint, as many joints as the model has: the count is the
+// word before the model's frame table, model table 0x800EAEF8[type +0x1B] +0x10), not from their
+// animation state, so the ghost render cannot blend them. The render after a tick that changed
+// them draws them half way (element by element; a joint turns little from one update to the
+// next, see joint_half): after a world update every jointed object, after a player-only tick the player (at
+// one animation frame per 30 Hz update, standing and slow moves, its matrices change only on
+// every other tick). So every model shows a new pose on every frame.
+constexpr int kJoints = 0x164, kJointSize = 24, kJointed = 0x0004;
+constexpr uint32_t kModelTable = 0x800EAEF8, kMaxJoints = 64;
+constexpr int kJointJump = 0x800;  // (not a rotation) a larger change is drawn as it is
+struct Joints {
+    uint32_t obj = 0, begin = 0, end = 0;
+    uint32_t serial = 0, size_word = 0;  // the block's heap header (see heap_block) before the tick
+    std::vector<int16_t> before, after, mid;
+    bool written = false;
+};
+std::vector<Joints> g_joints;
+
+// The block is one of the game's heap blocks (8006B864, header before it: see heap_block) and
+// must hold every joint: an object can keep pointing at a block that was freed and given to
+// something else (a crash in level 3: the half-way pose went over a ring effect's list link).
+bool joints_range(R3000* c, uint32_t p, uint32_t* begin, uint32_t* end) {
+    if (!(MEM_R16(c, p) & kJointed)) return false;
+    *begin = MEM_R32(c, p + kJoints);
+    const uint32_t frames = MEM_R32(c, kModelTable + 64 * (uint32_t)MEM_R8(c, p + kType) + 0x10);
+    if (!valid_ptr(*begin) || !valid_ptr(frames)) return false;
+    const uint32_t n = MEM_R32(c, frames - 4);
+    *end = *begin + n * kJointSize;
+    const uint32_t size = MEM_R32(c, *begin - 4) >> 4;
+    return n > 0 && n <= kMaxJoints && size >= n * kJointSize && size < n * kJointSize + 0x100;
+}
+// Before a tick: the joints of the player (all_lists: of every object the world update runs).
+void joints_before(R3000* c, bool all_lists) {
+    g_joints.clear();
+    for (uint32_t head : {kPlayerList, kOtherLists[0], kOtherLists[1], kOtherLists[2], kOtherLists[3], kOtherLists[4]}) {
+        uint32_t o = MEM_R32(c, head);
+        for (int n = 0; valid_ptr(o) && n < 4096; n++, o = MEM_R32(c, o + 0x1C)) {
+            Joints j;
+            if (!joints_range(c, o, &j.begin, &j.end)) continue;
+            j.obj = o;
+            j.serial = MEM_R32(c, j.begin - 8);
+            j.size_word = MEM_R32(c, j.begin - 4);
+            j.before.resize((j.end - j.begin) / 2);
+            for (size_t i = 0; i < j.before.size(); i++) j.before[i] = (int16_t)MEM_R16(c, j.begin + 2 * (uint32_t)i);
+            g_joints.push_back(std::move(j));
+        }
+        if (!all_lists) break;
+    }
+}
+// A joint half way: the 3x3 rotation (4.12) averaged and made a rotation again (rows scaled to
+// unit length and square to each other), which for a turn about one axis is exactly the half
+// turn (the rotors of level 4's walkers turn 45 degrees per update); the offset averaged. A
+// joint that is not a rotation, or turns more than about 120 degrees, is drawn as it is.
+void joint_half(const int16_t* a, const int16_t* b, int16_t* out) {
+    double m[3][3];
+    for (int r = 0; r < 3; r++) {
+        double la = 0, lb = 0;
+        for (int k = 0; k < 3; k++) {
+            la += (double)a[3 * r + k] * a[3 * r + k];
+            lb += (double)b[3 * r + k] * b[3 * r + k];
+            m[r][k] = (a[3 * r + k] + b[3 * r + k]) / 2.0;
+        }
+        if (std::abs(std::sqrt(la) - 4096) > 400 || std::abs(std::sqrt(lb) - 4096) > 400) {  // not a rotation
+            for (int k = 0; k < 9; k++) out[k] = std::abs(b[k] - a[k]) > kJointJump ? b[k] : (int16_t)((a[k] + b[k]) / 2);
+            for (int k = 9; k < 12; k++) out[k] = (int16_t)((a[k] + b[k]) / 2);
+            return;
+        }
+    }
+    auto dot = [](const double* x, const double* y) { return x[0] * y[0] + x[1] * y[1] + x[2] * y[2]; };
+    auto norm = [&](double* x) {
+        const double l = std::sqrt(dot(x, x));
+        if (l < 4096 * 0.5) return false;  // turned too far to tell half way
+        for (int k = 0; k < 3; k++) x[k] /= l;
+        return true;
+    };
+    bool ok = norm(m[0]);
+    const double d = dot(m[0], m[1]);
+    for (int k = 0; k < 3; k++) m[1][k] -= d * m[0][k];
+    ok = ok && norm(m[1]);
+    double z[3] = {m[0][1] * m[1][2] - m[0][2] * m[1][1], m[0][2] * m[1][0] - m[0][0] * m[1][2], m[0][0] * m[1][1] - m[0][1] * m[1][0]};
+    if (dot(z, m[2]) < 0)
+        for (double& v : z) v = -v;
+    if (!ok) {
+        for (int k = 0; k < 12; k++) out[k] = b[k];
+        return;
+    }
+    for (int k = 0; k < 3; k++) {
+        out[k] = (int16_t)std::lround(m[0][k] * 4096);
+        out[3 + k] = (int16_t)std::lround(m[1][k] * 4096);
+        out[6 + k] = (int16_t)std::lround(z[k] * 4096);
+        out[9 + k] = (int16_t)((a[9 + k] + b[9 + k]) / 2);
+    }
+}
+// Writes the half-way poses after a tick (objects still linked in their lists, same block).
+void joints_mid(R3000* c) {
+    const bool lists_were_ok = small_lists_ok(c);
+    std::vector<uint32_t> live;
+    for (uint32_t head : {kPlayerList, kOtherLists[0], kOtherLists[1], kOtherLists[2], kOtherLists[3], kOtherLists[4]}) {
+        uint32_t o = MEM_R32(c, head);
+        for (int n = 0; valid_ptr(o) && n < 4096; n++, o = MEM_R32(c, o + 0x1C)) live.push_back(o);
+    }
+    std::sort(live.begin(), live.end());
+    for (Joints& j : g_joints) {
+        j.written = false;
+        uint32_t begin, end;
+        if (!std::binary_search(live.begin(), live.end(), j.obj) || !joints_range(c, j.obj, &begin, &end) ||
+            begin != j.begin || end != j.end || MEM_R32(c, begin - 8) != j.serial || MEM_R32(c, begin - 4) != j.size_word)
+            continue;  // gone, or the block was freed (and maybe given out again) since
+        j.after.resize(j.before.size());
+        bool changed = false;
+        for (size_t i = 0; i < j.after.size(); i++) {
+            j.after[i] = (int16_t)MEM_R16(c, begin + 2 * (uint32_t)i);
+            changed |= j.after[i] != j.before[i];
+        }
+        if (!changed) continue;
+        j.mid.resize(j.after.size());
+        for (size_t i = 0; i + kJointSize / 2 <= j.after.size(); i += kJointSize / 2)
+            joint_half(&j.before[i], &j.after[i], &j.mid[i]);
+        for (size_t i = 0; i < j.after.size(); i++) MEM_W16(c, begin + 2 * (uint32_t)i, (uint16_t)j.mid[i]);
+        j.written = true;
+    }
+    // Safety net, as for the effects: if a list broke, every pose goes back before the render
+    if (lists_were_ok && !small_lists_ok(c)) {
+        static int told = 0;
+        if (told++ < 3)
+            log_msg(LogCat::Host, "sim60: half-way joints broke an object list; undone (frame %llu)",
+                    (unsigned long long)host_frame_count());
+        for (Joints& j : g_joints)
+            if (j.written) {
+                for (size_t i = 0; i < j.after.size(); i++) MEM_W16(c, j.begin + 2 * (uint32_t)i, (uint16_t)j.after[i]);
+                j.written = false;
+            }
+    }
+}
+// Back to the real poses (only entries the render left as written).
+void joints_restore(R3000* c) {
+    for (Joints& j : g_joints) {
+        if (!j.written) continue;
+        for (size_t i = 0; i < j.after.size(); i++) {
+            const uint32_t e = j.begin + 2 * (uint32_t)i;
+            if ((int16_t)MEM_R16(c, e) == j.mid[i]) MEM_W16(c, e, (uint16_t)j.after[i]);
+        }
+    }
+    g_joints.clear();
+}
 
 // Screen tint (the red damage flash and the game's other fades): red, green and blue as
 // 16.16 values that the world update steps (8001BF34); the render draws a full-screen
@@ -582,13 +763,99 @@ struct Raw {
 };
 Raw g_raw[1 + 8 + 1][4];  // player, up to 8 cameras, the view camera
 
+// The player's vectors just before and just after its own update in the current tick
+// (psx_hook_contacts). A world update also runs everything else, and other objects act on the
+// player too: force zones (the sewer's currents and the chute add to its velocity every
+// update), knockback, platforms. Those run at 30 Hz, once per world update, so their change is
+// kept whole; only what the player's update did is retimed. (Halving everything, a current
+// carried the player at a quarter of its speed down level 2's chute.)
+struct Own {
+    uint32_t player = 0;
+    bool begun = false, done = false;
+    Vec3 begin[std::size(kPlayerVecs)], end[std::size(kPlayerVecs)];
+};
+Own g_own;
+
+// Force zones (level 2's currents and chute; list gp+0x5B4, made by 8003A154): an object's
+// 30 Hz update calls one (8003A8B0), which adds a push along its direction, scaled by its
+// strength (+0x0A), to the velocity of the objects of a list (+0x1C, +0x20: list heads) and
+// marks the player as in the zone (+0x210). The player's update clears that mark and moves
+// differently while it is set, so for the player the zones run on every 60 Hz tick, each at
+// half strength (the odd tick str/2, the world update the rest): the same push per 30 Hz
+// update, and the mark set on every update as before. Other lists get the full push once.
+constexpr uint32_t kZoneList = kGp + 0x5B4, kZoneClass = 0x800A1DD0;
+constexpr int kZoneType = 0x08, kZoneStrength = 0x0A;
+constexpr uint32_t kZonePush[] = {0x8003A288, 0x8003A5CC, 0x8003A76C, 0x8003A288};  // by type
+struct Zone {
+    uint32_t zone;
+    int16_t strength;  // its own value
+};
+std::vector<Zone> g_zones;          // zones that pushed the player in the last world update
+std::vector<Zone> g_zones_changed;  // strengths changed during this world update (put back after)
+bool g_zones_odd = false;           // the odd tick is running them (psx_hook_zone leaves them be)
+
+bool zone_live(R3000* c, uint32_t z) {
+    if (MEM_R32(c, z) != kZoneClass) return false;
+    uint32_t o = MEM_R32(c, kZoneList);
+    for (int n = 0; valid_ptr(o) && n < 256; n++, o = MEM_R32(c, o + 4))
+        if (o == z) return true;
+    return false;
+}
+
+void zones_odd_tick(R3000* c) {
+    for (const Zone& z : g_zones) {
+        if (!zone_live(c, z.zone) || (int16_t)MEM_R16(c, z.zone + kZoneStrength) != z.strength) continue;
+        const uint8_t type = (uint8_t)MEM_R8(c, z.zone + kZoneType);
+        if (type > 3) continue;
+        MEM_W16(c, z.zone + kZoneStrength, (uint16_t)(z.strength / 2));
+        g_zones_odd = true;
+        c->r[5] = kPlayerList;
+        call(c, kZonePush[type], z.zone);
+        g_zones_odd = false;
+        MEM_W16(c, z.zone + kZoneStrength, (uint16_t)z.strength);
+    }
+}
+
+// The controller is read (80070748) by the world update only, so the player's extra update
+// acted on input up to 1/30 s old: the odd tick reads it too. What the read counts (per button
+// the updates held / released at +4/+8/+12 of the button table, the reads gp+0x974 and
+// 800FF814) keeps its 30 Hz rate: the odd read's step of 1 is undone.
+constexpr uint32_t kPadRead = 0x80070748, kButtons = 0x800EC0F8;
+constexpr uint32_t kPadCounts[] = {kGp + 0x974, 0x800FF814};
+
+void pad_odd_tick(R3000* c) {
+    static const bool off = std::getenv("APOC_NO_PAD60") != nullptr;  // for A/B comparisons
+    if (off) return;
+    uint32_t before[16][3], counts[std::size(kPadCounts)];
+    for (int b = 0; b < 16; b++)
+        for (int k = 0; k < 3; k++) before[b][k] = MEM_R32(c, kButtons + 16 * b + 4 + 4 * k);
+    for (size_t i = 0; i < std::size(kPadCounts); i++) counts[i] = MEM_R32(c, kPadCounts[i]);
+    call(c, kPadRead);
+    for (int b = 0; b < 16; b++)
+        for (int k = 0; k < 3; k++) {
+            const uint32_t a = kButtons + 16 * b + 4 + 4 * k;
+            if (MEM_R32(c, a) == before[b][k] + 1) MEM_W32(c, a, before[b][k]);
+        }
+    for (size_t i = 0; i < std::size(kPadCounts); i++)
+        if (MEM_R32(c, kPadCounts[i]) == counts[i] + 1) MEM_W32(c, kPadCounts[i], counts[i]);
+}
+
+// After a world update: every strength back to its own value (only where it still holds ours).
+void zones_restore(R3000* c) {
+    for (const Zone& z : g_zones_changed)
+        if (MEM_R32(c, z.zone) == kZoneClass && (int16_t)MEM_R16(c, z.zone + kZoneStrength) == z.strength - z.strength / 2)
+            MEM_W16(c, z.zone + kZoneStrength, (uint16_t)z.strength);
+    g_zones_changed.clear();
+}
+
 // Moves a vector back to halfway between its old and new value. Jumps larger than any
 // real motion (teleports, respawns, a reused object) are left alone. A component the update
 // set to the same value as the update before it is a value the game assigns (the rising
 // speed of a jump, 0 on landing, a position held during a climb) rather than one it
 // integrates, and is kept: halving it again every update would only ease towards it (the
 // jump started slowly and peaked 12% lower).
-void halve(R3000* c, uint32_t addr, const Vec3& old, Raw& raw) {
+// `own` (optional): the part of the change the object's own update made; the rest is kept.
+void halve(R3000* c, uint32_t addr, const Vec3& old, Raw& raw, const Vec3* own = nullptr) {
     Vec3 now = rd(c, addr);
     const bool same_obj = raw.addr == addr;
     raw.addr = addr;
@@ -602,8 +869,8 @@ void halve(R3000* c, uint32_t addr, const Vec3& old, Raw& raw) {
     // speed the game set to 0 stayed at 1 or 2)
     for (int k = 0; k < 3; k++) {
         if (same_obj && now.v[k] == prev.v[k]) continue;
-        int32_t d = now.v[k] - old.v[k];
-        MEM_W32(c, addr + 4 * k, (uint32_t)(old.v[k] + (d + (d > 0) - (d < 0)) / 2));
+        const int32_t d = own ? own->v[k] : now.v[k] - old.v[k];
+        MEM_W32(c, addr + 4 * k, (uint32_t)(now.v[k] - d + (d + (d > 0) - (d < 0)) / 2));
     }
 }
 
@@ -611,8 +878,14 @@ void retime(R3000* c, const Before& b, bool odd) {
     uint32_t p = MEM_R32(c, kPlayerList);
     if (valid_ptr(p) && p == b.player) {
         const bool placed = ledge_state(b.state) || ledge_state(MEM_R32(c, p + kPlayerState));
-        for (size_t i = 0; i < std::size(kPlayerVecs); i++)
-            if (!placed) halve(c, p + kPlayerVecs[i], b.pv[i], g_raw[0][i]);
+        static const bool no_split = std::getenv("APOC_NO_SPLIT") != nullptr;  // for A/B comparisons
+        const bool split = g_own.player == p && g_own.done && !no_split;
+        for (size_t i = 0; i < std::size(kPlayerVecs); i++) {
+            if (placed) continue;
+            Vec3 own;
+            for (int k = 0; k < 3; k++) own.v[k] = g_own.end[i].v[k] - g_own.begin[i].v[k];
+            halve(c, p + kPlayerVecs[i], b.pv[i], g_raw[0][i], split ? &own : nullptr);
+        }
         if (MEM_R8(c, p + kAnimId) == b.anim_id && MEM_R16(c, p + kAnimStart) == b.anim_start) {
             const int32_t was = (int32_t)b.clock[2] << 16 | b.clock[1];
             const int32_t now = (int32_t)MEM_R16(c, p + 0x134) << 16 | MEM_R16(c, p + 0x12C);
@@ -683,9 +956,9 @@ void trace_player(R3000* c, uint32_t t) {
     static const bool on = std::getenv("APOC_SIM60_TRACE") != nullptr;
     uint32_t p = on ? MEM_R32(c, kPlayerList) : 0;
     if (p)
-        log_msg(LogCat::Host, "sim60 f=%llu tick=%u player %d %d %d health %d flash %d anim %d", (unsigned long long)host_frame_count(), t,
+        log_msg(LogCat::Host, "sim60 f=%llu tick=%u player %d %d %d health %d flash %d anim %d at %08X", (unsigned long long)host_frame_count(), t,
                 (int32_t)MEM_R32(c, p + 4), (int32_t)MEM_R32(c, p + 8), (int32_t)MEM_R32(c, p + 12),
-                (int16_t)MEM_R16(c, p + kPlayerHealth), (int16_t)MEM_R16(c, p + kFlash), (int16_t)MEM_R16(c, p + 0x18));
+                (int16_t)MEM_R16(c, p + kPlayerHealth), (int16_t)MEM_R16(c, p + kFlash), (int16_t)MEM_R16(c, p + 0x18), p);
     // APOC_SIM60_DUMP=FROM,TO: the player object's first 0x300 bytes as words, each tick
     static const char* dump = std::getenv("APOC_SIM60_DUMP");
     if (p && dump) {
@@ -770,7 +1043,9 @@ int sim60_render(R3000* c) {
     if (!g_mid_pending) {
         const uint32_t ra = c->r[31], sp = c->r[29];
         g_in_render = true;
+        joints_mid(c);
         call(c, kRender);
+        joints_restore(c);
         g_in_render = false;
         c->r[31] = ra;
         c->r[29] = sp;
@@ -843,12 +1118,17 @@ int sim60_render(R3000* c) {
     const uint32_t ra = c->r[31], sp = c->r[29];
     g_in_render = true;
     check_small(c, "mid words");
+    // jointed models half way in both renders: they are drawn from their joints, not their
+    // animation state, so the ghost render must draw the same pose (recording the pose after
+    // the update pulled them on to 3/4 of the way, and their parts could not be paired)
+    joints_mid(c);
     const bool blend = record_previous_pose(c);
     check_small(c, "ghost render");
     gte_blend_begin(blend ? GteBlendMode::Blend : GteBlendMode::Off);
     call(c, kRender);
     check_small(c, "mid render");
     gte_blend_begin(GteBlendMode::Off);
+    joints_restore(c);
     g_in_render = false;
     c->r[31] = ra;
     c->r[29] = sp;
@@ -884,9 +1164,46 @@ int sim60_render(R3000* c) {
 extern "C" void psx_hook_player(R3000* c) {
     const uint32_t p = c->r[4];
     if (!valid_ptr(p) || p != MEM_R32(c, kPlayerList)) return;
+    weapons_check(c, p);
     if (MEM_R32(c, p + kPlayerState) != 2 || MEM_R8(c, p + kJumpRise) == 0) return;
     const uint32_t buttons = MEM_R32(c, p + 0x1BC);
     if (valid_ptr(buttons)) MEM_W8(c, buttons + 0x110, 1);
+}
+
+extern "C" void psx_hook_contacts(R3000* c, int after) {
+    if (!psx_opt_sim60 || !g_in_tick_any || core_in_ghost()) return;
+    const uint32_t p = MEM_R32(c, kPlayerList);
+    if (!valid_ptr(p)) return;
+    if (!after) {
+        g_own = Own{};
+        g_own.player = p;
+        g_own.begun = true;
+        for (size_t i = 0; i < std::size(kPlayerVecs); i++) g_own.begin[i] = rd(c, p + kPlayerVecs[i]);
+    } else if (g_own.begun && g_own.player == p && !g_own.done) {
+        g_own.done = true;
+        for (size_t i = 0; i < std::size(kPlayerVecs); i++) g_own.end[i] = rd(c, p + kPlayerVecs[i]);
+    }
+}
+
+extern "C" void psx_hook_zone(R3000* c) {
+    if (!psx_opt_sim60 || !g_in_tick || g_zones_odd || core_in_ghost()) return;
+    const uint32_t z = c->r[4];
+    if (!valid_ptr(z)) return;
+    // the same zone pushes its second list next: its own strength again
+    int16_t own = (int16_t)MEM_R16(c, z + kZoneStrength);
+    for (const Zone& w : g_zones_changed)
+        if (w.zone == z) own = w.strength;
+    if (c->r[5] != kPlayerList) {
+        MEM_W16(c, z + kZoneStrength, (uint16_t)own);
+        return;
+    }
+    bool known = false;
+    for (const Zone& w : g_zones_changed) known |= w.zone == z;
+    if (!known) g_zones_changed.push_back({z, own});
+    known = false;
+    for (const Zone& w : g_zones) known |= w.zone == z;
+    if (!known) g_zones.push_back({z, own});
+    MEM_W16(c, z + kZoneStrength, (uint16_t)(own - own / 2));
 }
 
 extern "C" int psx_hook_tick(R3000* c) {
@@ -898,6 +1215,9 @@ extern "C" int psx_hook_tick(R3000* c) {
 
     const uint32_t ra = c->r[31], sp = c->r[29];
     const Before before = capture(c);
+    joints_before(c, !(t & 1));
+    g_own = Own{};
+    g_in_tick_any = true;
 
     if (!(t & 1)) {
         // even: the game's full update (it advances the counters itself)
@@ -923,9 +1243,11 @@ extern "C" int psx_hook_tick(R3000* c) {
         }
         for (int k = 0; k < 3; k++) g_tint_before[k] = (int32_t)MEM_R32(c, kTint + 4 * k);
         effects_before(c);
+        g_zones.clear();
         g_in_tick = true;
         call(c, kTick);
         g_in_tick = false;
+        zones_restore(c);
         effects_after(c);
         for (int k = 0; k < 3; k++) g_tint_after[k] = (int32_t)MEM_R32(c, kTint + 4 * k);
         g_moved.clear();
@@ -948,18 +1270,22 @@ extern "C" int psx_hook_tick(R3000* c) {
         MEM_W32(c, kHalfTicks, t + 1);
         MEM_W32(c, kHalfTicks2, MEM_R32(c, kHalfTicks2) + 1);
         if (world_frozen(c)) {
+            g_in_tick_any = false;
             c->r[31] = ra;
             c->r[29] = sp;
             return 1;
         }
+        pad_odd_tick(c);
         call(c, kContactsBegin);
         call(c, kUpdateList, kPlayerList);
         call(c, kContactsEnd);
+        zones_odd_tick(c);
         call(c, kUpdateCameras, MEM_R32(c, kCameraList));
         check_small(c, "odd tick");
         flicker_lights(c);
         check_small(c, "flicker");
     }
+    g_in_tick_any = false;
     retime(c, before, t & 1);
     c->r[31] = ra;
     c->r[29] = sp;

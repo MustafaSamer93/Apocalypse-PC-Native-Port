@@ -10,6 +10,10 @@
 
 #include "psx.h"
 
+uint64_t g_prof_submits = 0, g_prof_waits = 0;  // APOC_PROFILE (gpu_vk.cpp)
+uint64_t g_prof_fence_ns = 0;                    // time the CPU waited for the GPU
+uint64_t g_prof_gpu_ns = 0;                      // time the GPU spent on our command buffers
+
 namespace vkc {
 
 VkInstance instance = VK_NULL_HANDLE;
@@ -103,18 +107,52 @@ bool pick_gpu() {
     return gpu != VK_NULL_HANDLE;
 }
 
+// APOC_PROFILE: GPU timestamps at the start and end of each command buffer.
+VkQueryPool g_ts_pool = VK_NULL_HANDLE;
+double g_ts_period = 0;  // ns per tick
+bool g_ts_written[kSlots] = {};
+
+void ts_read(int slot) {  // the slot's fence has been waited for
+    if (!g_ts_pool || !g_ts_written[slot]) return;
+    uint64_t t[2] = {};
+    const VkResult r = vkGetQueryPoolResults(device, g_ts_pool, (uint32_t)slot * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT);
+    if (r == VK_SUCCESS && t[1] > t[0])
+        g_prof_gpu_ns += (uint64_t)((double)(t[1] - t[0]) * g_ts_period);
+    g_ts_written[slot] = false;
+}
+
 void begin_if_needed() {
     if (g_recording) return;
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_cmd, &bi);
+    static const bool prof = std::getenv("APOC_PROFILE") != nullptr;
+    if (prof && !g_ts_pool) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(gpu, &p);
+        g_ts_period = p.limits.timestampPeriod;
+        VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = kSlots * 2;
+        vkCreateQueryPool(device, &qi, nullptr, &g_ts_pool);
+    }
+    if (g_ts_pool) {
+        vkCmdResetQueryPool(g_cmd, g_ts_pool, (uint32_t)g_slot * 2, 2);
+        vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_ts_pool, (uint32_t)g_slot * 2);
+    }
     g_recording = true;
 }
 
 // Submits the slot's commands; `wait` = until the GPU has finished all work so far.
 void submit(VkSemaphore signal, bool wait) {
+    g_prof_submits++;
+    if (wait) g_prof_waits++;
     end_rendering();
     begin_if_needed();  // an empty frame still needs a submit to signal / wait on semaphores
+    if (g_ts_pool) {
+        vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_ts_pool, (uint32_t)g_slot * 2 + 1);
+        g_ts_written[g_slot] = true;
+    }
     vkEndCommandBuffer(g_cmd);
     g_recording = false;
     VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -132,11 +170,15 @@ void submit(VkSemaphore signal, bool wait) {
     }
     check(vkQueueSubmit(queue, 1, &si, g_fences[g_slot]), "queue submit");
     g_wait_sem = VK_NULL_HANDLE;
+    const uint64_t t0 = SDL_GetTicksNS();
     if (wait) vkWaitForFences(device, kSlots, g_fences, VK_TRUE, UINT64_MAX);
+    if (wait) ts_read(g_slot);
     // on to the next slot, once its previous work is done
     g_slot = (g_slot + 1) % kSlots;
     g_cmd = g_cmds[g_slot];
     vkWaitForFences(device, 1, &g_fences[g_slot], VK_TRUE, UINT64_MAX);
+    ts_read(g_slot);
+    g_prof_fence_ns += SDL_GetTicksNS() - t0;
     vkResetFences(device, 1, &g_fences[g_slot]);
     vkResetCommandBuffer(g_cmd, 0);
     g_stage_off = (VkDeviceSize)g_slot * kSlotStaging;
@@ -384,6 +426,8 @@ void end_rendering() {
     g_rendering = nullptr;
 }
 
+VkDeviceSize stage_limit() { return kSlotStaging; }
+
 Staging stage(VkDeviceSize size) {
     size = (size + 255) & ~VkDeviceSize(255);
     if (g_stage_off + size > (VkDeviceSize)(g_slot + 1) * kSlotStaging) submit_wait();  // slot's half is full
@@ -436,8 +480,8 @@ VkPipelineLayout make_layout(uint32_t push_bytes) {
     return l;
 }
 
-// Vertex layout shared with gpu_vk.cpp (VkVtx): pos, colour, uv, info, w.
-static constexpr uint32_t kVtxStride = 32;
+// Vertex layout shared with gpu_vk.cpp (VkVtx): pos, colour, uv, info, w, box.
+static constexpr uint32_t kVtxStride = 36;
 
 VkPipeline make_pipeline(const PipelineDesc& d) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
@@ -450,18 +494,19 @@ VkPipeline make_pipeline(const PipelineDesc& d) {
     st[1].pName = "main";
 
     VkVertexInputBindingDescription bind{0, kVtxStride, VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attrs[5] = {
+    VkVertexInputAttributeDescription attrs[6] = {
         {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
         {1, 0, VK_FORMAT_R8G8B8A8_UNORM, 8},
         {2, 0, VK_FORMAT_R32G32_SFLOAT, 12},
         {3, 0, VK_FORMAT_R32G32_UINT, 20},
         {4, 0, VK_FORMAT_R32_SFLOAT, 28},
+        {5, 0, VK_FORMAT_R32_UINT, 32},
     };
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     if (d.vertices != Vertices::None) {
         vi.vertexBindingDescriptionCount = 1;
         vi.pVertexBindingDescriptions = &bind;
-        vi.vertexAttributeDescriptionCount = d.vertices == Vertices::Vram ? 5 : 1;
+        vi.vertexAttributeDescriptionCount = d.vertices == Vertices::Vram ? 6 : 1;
         vi.pVertexAttributeDescriptions = attrs;
     }
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};

@@ -2,7 +2,11 @@
 // brings up the hardware and jumps to the recompiled entry point.
 #include <algorithm>
 #include <cstring>
+#include <chrono>
+#include <ctime>
+#include <sys/stat.h>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -55,10 +59,11 @@ void usage() {
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
         "  --smooth K         K images per game step (1 = original 30 fps; default: match the display)\n"
         "  --refresh HZ       display refresh rate to assume (if the detected one is wrong)\n"
-        "  --sim60            60 Hz simulation in every level (default: level 1 only; F1 menu)\n"
+        "  --sim60            60 Hz simulation in every level (default: levels 1-4 only; F1 menu)\n"
+        "  --chapter N        start at chapter N (saves/chapters; F2 or F1 -> Chapter lists them)\n"
         "  --renderer R       opengl or vulkan (default: the F1 setting, OpenGL at first)\n"
         "keys: arrows, Z=Cross X=Circle A=Square S=Triangle Q/W=L1/R1 1/2=L2/R2\n"
-        "      Enter=Start Backspace=Select Tab=fast-forward F11=fullscreen Esc=quit\n");
+        "      Enter=Start Backspace=Select Tab=fast-forward F2=chapters F11=fullscreen Esc=quit\n");
 }
 
 // Returns the EXE's entry point.
@@ -98,7 +103,30 @@ void attach_console() {
 #endif
 }
 
+#ifdef _WIN32
+// A crash in the runtime itself (not the game's code): write where it happened to the log, so a
+// silent close can be tracked down (the address is relative to the exe; see the .map file).
+static LONG WINAPI log_native_crash(EXCEPTION_POINTERS* e) {
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto at = (uintptr_t)e->ExceptionRecord->ExceptionAddress;
+    std::fprintf(stderr, "NATIVE CRASH: exception %08lX at exe+%llX (address %p)\n", e->ExceptionRecord->ExceptionCode,
+                 (unsigned long long)(at - base), (void*)at);
+    // the stack at the crash: every word that points into the exe (return addresses among them)
+    const auto* sp = (const uintptr_t*)e->ContextRecord->Rsp;
+    const auto* nt = (const IMAGE_NT_HEADERS*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const uintptr_t end = base + nt->OptionalHeader.SizeOfImage;
+    int found = 0;
+    for (int i = 0; i < 512 && found < 24; i++)
+        if (sp[i] > base && sp[i] < end) std::fprintf(stderr, "  stack+%X: exe+%llX\n", i * 8, (unsigned long long)(sp[i] - base)), found++;
+    std::fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(log_native_crash);
+#endif
     attach_console();
     // Everything the game uses sits next to the exe (the assets and saves folders,
     // settings.ini), wherever it was started from.
@@ -113,6 +141,19 @@ int main(int argc, char** argv) {
     if (HANDLE err = GetStdHandle(STD_ERROR_HANDLE); !GetConsoleWindow() && (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN)) {
         std::error_code ec;
         std::filesystem::create_directories("debug", ec);
+        // a log that ended in a crash is kept (debug/crash_DATE_TIME.log) instead of being
+        // rotated away by the next two runs
+        for (const char* old : {"debug/apocalypse.old.log", "debug/apocalypse.log"}) {
+            std::ifstream in(old);
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            in.close();
+            if (text.find("FATAL") == std::string::npos && text.find("NATIVE CRASH") == std::string::npos) continue;
+            struct _stat64 st{};
+            const std::time_t t = _stat64(old, &st) == 0 ? (std::time_t)st.st_mtime : std::time(nullptr);
+            char name[64];
+            std::strftime(name, sizeof name, "debug/crash_%Y%m%d_%H%M%S.log", std::localtime(&t));
+            std::filesystem::rename(old, name, ec);
+        }
         std::filesystem::rename("debug/apocalypse.log", "debug/apocalypse.old.log", ec);
         FILE* f;
         if (freopen_s(&f, "debug/apocalypse.log", "a", stderr) == 0) std::setvbuf(stderr, nullptr, _IONBF, 0);
@@ -157,6 +198,14 @@ int main(int argc, char** argv) {
         else if (a == "--smooth") {  // --smooth K: K images per game step (1 = original 30 fps)
             extern int g_force_smooth;
             g_force_smooth = std::clamp(std::atoi(next().c_str()), 1, 5);
+        }
+        else if (a == "--chapter") {  // --chapter N: load chapter N (1 = the first) once running
+            extern bool host_parse_state_script(const char*);
+            const int n = std::atoi(next().c_str());
+            if (n < 1 || !host_parse_state_script(("load" + std::to_string(kChapterBase + n - 1) + "@30").c_str())) {
+                usage();
+                return 1;
+            }
         }
         else if (a == "--states") {
             extern bool host_parse_state_script(const char*);

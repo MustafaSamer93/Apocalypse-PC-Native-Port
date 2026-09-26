@@ -116,6 +116,34 @@ void gte_blend_begin(GteBlendMode m);
 
 // Draw distance (drawdist.cpp): percent of the game's own view distance (100 = original)
 extern int g_draw_distance;
+extern bool g_smooth_font;  // setting: draw the game's text and button icons with smoothed textures (gpu.cpp)
+extern int g_menu_zoom;     // setting: the game's menus at this percent of their size (game_menu.cpp)
+// Enhancement settings, shared by F1 and the game's Options -> Enhancements (host_sdl.cpp).
+enum EnhSetting { E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_RES, E_ASPECT, E_DISPLAY, E_AUTOSAVE, E_SUBTITLES, E_AA,
+                   E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS,
+                   E_FPS_COUNTER };
+const char* enh_name(int id);
+std::string enh_value(int id);
+void enh_change(int id, int dir);
+void game_menu_reset(bool state_loaded);  // a saved state was loaded / a level starts (game_menu.cpp)
+// Shows `text` (at most 10 characters) the way the game shows a pickup (game_menu.cpp).
+void game_message(R3000* c, const char* text);
+// A subtitle for `seconds` on a random side, tilted (game_menu.cpp); subtitles.cpp decides when.
+void game_subtitle(R3000* c, const char* text, float seconds);
+void subtitle_note_xa(uint32_t lba, int chan);  // cdrom.cpp: an XA sector is being played
+void subtitle_poll(R3000* c);                    // once per frame (savestate.cpp)
+void game_voice_poll(R3000* c);                  // once per frame: queued pickup lines (game_menu.cpp)
+float subtitle_tilt(uint32_t text);
+void game_test_pickup(R3000* c, int what);
+// Cheats (cheats.cpp): 0 health, 1 lives, 2 weapons, 3 ammo, 4 smart bombs. Off at start, not saved.
+bool cheat_on(int which);
+void cheat_set(int which, bool on);
+void cheats_frame(R3000* c);                     // once per frame (savestate.cpp)
+bool cheat_quiet();
+void weapons_check(R3000* c, uint32_t player);  // a freed weapon left in a slot is dropped (cheats.cpp)                              // the cheat is giving a weapon: no voice line
+void cheat_note_pickup(uint32_t player, int type);  // a weapon pickup (8005E260)  // debug: APOC_TEST_PICKUP (game_menu.cpp)  // gpu.cpp: the angle to draw the text at `text` with (0 = level)
+extern bool g_subtitles;  // setting (subtitles.cpp)
+extern bool g_autosave;  // setting: auto-save at checkpoints (savestate.cpp)
 
 // 60 Hz simulation (sim60.cpp)
 extern int g_sim60_setting;    // 0 = 30 Hz, 1 = 60 Hz in level 1, 2 = 60 Hz in every level
@@ -187,6 +215,7 @@ void host_rumble(int port, uint8_t small_motor, uint8_t large_motor);
 void host_poll();                    // pump OS events
 uint64_t host_frame_count();
 bool host_quit_requested();
+void host_request_quit();            // close the game (as closing the window does)
 void host_present(const GpuDisplay& d);
 void host_throttle_frame();          // sleep to hold 60 Hz
 void host_audio_push(const int16_t* stereo, int frames);
@@ -200,6 +229,8 @@ void bios_call_b0(R3000* c);
 void bios_call_c0(R3000* c);
 void bios_take_interrupt(R3000* c);
 void bios_vblank(R3000* c);          // BIOS-side pad/card polling at VBlank
+void bios_pad_refresh(R3000* c);     // the pads into their BIOS buffers
+extern bool g_display_flipped;       // the game set the display start since VBlank (gpu.cpp)
 void bios_deliver_event(R3000* c, uint32_t cls, uint32_t spec);
 
 void dispatch_register(const RecompFunc* table, uint32_t count);

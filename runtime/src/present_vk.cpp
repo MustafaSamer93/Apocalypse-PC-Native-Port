@@ -9,6 +9,7 @@
 
 #include "present.h"
 #include "psx.h"
+#include "ui_text.h"
 #include "render_backend.h"
 #include "vk_context.h"
 
@@ -19,6 +20,11 @@
 #include "quad.vert.h"
 
 void vk_renderer_destroy();
+
+uint64_t g_prof_present_ns = 0;  // time in acquire / present (APOC_PROFILE, gpu_vk.cpp)
+uint64_t g_prof_input_ns = 0, g_prof_input_n = 0;  // controller read -> its frame on screen
+uint64_t g_input_read_ns = 0;  // when the controller was read for the frame being shown (core.cpp)
+static uint64_t g_input_shown_from = 0;
 
 namespace {
 
@@ -41,7 +47,8 @@ VkPipeline g_plain_aa = VK_NULL_HANDLE;  // plain, into the FXAA intermediate im
 
 VkImg g_aa;       // the scaled image, for the FXAA pass
 VkImg g_sw;       // the software renderer's picture
-VkImg g_ov_img;   // the 640x480 overlay
+VkImg g_ov_img;   // the overlay (present_overlay_size)
+VkImg g_badge;    // present_badge's image
 SDL_Surface* g_ov_surf = nullptr;
 SDL_Renderer* g_ov_ren = nullptr;
 
@@ -115,8 +122,10 @@ bool create_swapchain() {
     }
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = vkc::surface;
+    // With vsync, two images: a third only lets the CPU queue another refresh ahead of the
+    // display (~17 ms more input lag; the GPU needs ~2 ms a frame, so it gains nothing).
     ci.minImageCount = std::max(caps.minImageCount, 2u);
-    if (caps.maxImageCount) ci.minImageCount = std::min(ci.minImageCount + 1, caps.maxImageCount);
+    if (caps.maxImageCount && !g_vsync) ci.minImageCount = std::min(ci.minImageCount + 1, caps.maxImageCount);
     ci.imageFormat = fmt.format;
     ci.imageColorSpace = fmt.colorSpace;
     ci.imageExtent = ext;
@@ -177,7 +186,14 @@ VkImg* frame() {
     if (g_have_image) return &g_swap_imgs[g_index];
     for (int attempt = 0; attempt < 3; attempt++) {
         if ((g_swap_dirty || !g_swap) && !recreate_swapchain()) return nullptr;
+        const uint64_t t0 = SDL_GetTicksNS();
         VkResult r = vkAcquireNextImageKHR(vkc::device, g_swap, UINT64_MAX, g_acquired[vkc::frame_slot()], VK_NULL_HANDLE, &g_index);
+        g_prof_present_ns += SDL_GetTicksNS() - t0;
+        if (g_input_shown_from) {
+            g_prof_input_ns += SDL_GetTicksNS() - g_input_shown_from;
+            g_prof_input_n++;
+            g_input_shown_from = 0;
+        }
         if (r == VK_ERROR_OUT_OF_DATE_KHR) {
             g_swap_dirty = true;
             continue;
@@ -275,11 +291,7 @@ bool vk_present_init(SDL_Window* window) {
         log_msg(LogCat::Host, "Vulkan: could not create the swapchain");
         return false;
     }
-    g_ov_surf = SDL_CreateSurface(640, 480, SDL_PIXELFORMAT_ARGB8888);
-    g_ov_ren = SDL_CreateSoftwareRenderer(g_ov_surf);
-    vkc::create_image(g_ov_img, 640, 480, VK_FORMAT_B8G8R8A8_UNORM,
-                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    return g_ov_ren && g_plain && g_crt && g_fxaa && g_overlay;
+    return g_plain && g_crt && g_fxaa && g_overlay;
 }
 
 void vk_present_shutdown() {
@@ -291,7 +303,7 @@ void vk_present_shutdown() {
     vkDeviceWaitIdle(vkc::device);
     vk_renderer_destroy();
     destroy_swapchain();
-    for (VkImg* im : {&g_aa, &g_sw, &g_ov_img}) vkc::destroy_image(*im);
+    for (VkImg* im : {&g_aa, &g_sw, &g_ov_img, &g_badge}) vkc::destroy_image(*im);
     for (VkPipeline* p : {&g_plain, &g_crt, &g_fxaa, &g_overlay, &g_plain_aa})
         if (*p) vkDestroyPipeline(vkc::device, *p, nullptr), *p = VK_NULL_HANDLE;
     for (VkPipelineLayout* l : {&g_layout, &g_fxaa_layout})
@@ -300,6 +312,7 @@ void vk_present_shutdown() {
         if (*m) vkDestroyShaderModule(vkc::device, *m, nullptr), *m = VK_NULL_HANDLE;
     for (VkSemaphore& s : g_acquired)
         if (s) vkDestroySemaphore(vkc::device, s, nullptr), s = VK_NULL_HANDLE;
+    ui_text_reset(g_ov_ren);
     if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren), g_ov_ren = nullptr;
     if (g_ov_surf) SDL_DestroySurface(g_ov_surf), g_ov_surf = nullptr;
     vkc::shutdown();
@@ -351,6 +364,17 @@ void vk_present_redraw(const PresentOptions& o) {
 }
 
 SDL_Renderer* vk_present_overlay_begin() {
+    int ww, wh, ow, oh;
+    SDL_GetWindowSizeInPixels(g_win, &ww, &wh);
+    present_overlay_size(ww, wh, &ow, &oh);
+    if (!g_ov_surf || g_ov_surf->w != ow || g_ov_surf->h != oh) {  // (re)made at the window's size
+        ui_text_reset(g_ov_ren);
+        if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren);
+        if (g_ov_surf) SDL_DestroySurface(g_ov_surf);
+        g_ov_surf = SDL_CreateSurface(ow, oh, SDL_PIXELFORMAT_ARGB8888);
+        g_ov_ren = SDL_CreateSoftwareRenderer(g_ov_surf);
+    }
+    SDL_SetRenderScale(g_ov_ren, (float)oh / 480.0f, (float)oh / 480.0f);
     SDL_SetRenderDrawColor(g_ov_ren, 0, 0, 0, 0);
     SDL_SetRenderDrawBlendMode(g_ov_ren, SDL_BLENDMODE_NONE);
     SDL_RenderClear(g_ov_ren);
@@ -361,15 +385,21 @@ void vk_present_overlay_end() {
     SDL_RenderPresent(g_ov_ren);  // software renderer: flushes into the surface
     VkImg* target = frame();
     if (!target) return;
-    vkc::Staging st = vkc::stage(640 * 480 * 4);
-    for (int y = 0; y < 480; y++)
-        std::memcpy(st.ptr + (size_t)y * 640 * 4, (const uint8_t*)g_ov_surf->pixels + (size_t)y * g_ov_surf->pitch, 640 * 4);
+    const int ow = g_ov_surf->w, oh = g_ov_surf->h;
     vkc::end_rendering();
+    if (g_ov_img.w != ow || g_ov_img.h != oh) {
+        vkc::destroy_image(g_ov_img);
+        vkc::create_image(g_ov_img, ow, oh, VK_FORMAT_B8G8R8A8_UNORM,
+                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    }
+    vkc::Staging st = vkc::stage((VkDeviceSize)ow * oh * 4);
+    for (int y = 0; y < oh; y++)
+        std::memcpy(st.ptr + (size_t)y * ow * 4, (const uint8_t*)g_ov_surf->pixels + (size_t)y * g_ov_surf->pitch, (size_t)ow * 4);
     vkc::transition(g_ov_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy bic{};
     bic.bufferOffset = st.offset;
     bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    bic.imageExtent = {640, 480, 1};
+    bic.imageExtent = {(uint32_t)ow, (uint32_t)oh, 1};
     vkCmdCopyBufferToImage(cb(), st.buffer, g_ov_img.image, g_ov_img.layout, 1, &bic);
     vkc::transition(g_ov_img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     // the overlay covers the whole window, keeping 4:3
@@ -379,6 +409,32 @@ void vk_present_overlay_end() {
     vkc::begin_rendering(*target);
     viewport((ww - cw) * 0.5f, (wh - ch) * 0.5f, cw, ch);
     draw_quad(g_overlay, g_layout, g_ov_img, nullptr, 0);
+}
+
+void vk_present_badge(const uint32_t* px, int w, int h, int margin, bool changed) {
+    VkImg* target = frame();
+    if (!target) return;
+    vkc::end_rendering();
+    if (g_badge.w != w || g_badge.h != h) {
+        vkc::destroy_image(g_badge);
+        vkc::create_image(g_badge, w, h, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        target = frame();
+        changed = true;
+    }
+    if (changed) {
+        vkc::Staging st = vkc::stage((VkDeviceSize)w * h * 4);
+        std::memcpy(st.ptr, px, (size_t)w * h * 4);
+        vkc::transition(g_badge, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy bic{};
+        bic.bufferOffset = st.offset;
+        bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        bic.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+        vkCmdCopyBufferToImage(cb(), st.buffer, g_badge.image, g_badge.layout, 1, &bic);
+    }
+    vkc::transition(g_badge, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkc::begin_rendering(*target);
+    viewport((float)margin, (float)(target->h - margin - h), (float)w, (float)h);
+    draw_quad(g_overlay, g_layout, g_badge, nullptr, 0);
 }
 
 void vk_present_swap() {
@@ -393,12 +449,17 @@ void vk_present_swap() {
     pi.swapchainCount = 1;
     pi.pSwapchains = &g_swap;
     pi.pImageIndices = &g_index;
+    const uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkQueuePresentKHR(vkc::queue, &pi);
+    g_prof_present_ns += SDL_GetTicksNS() - t0;
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) g_swap_dirty = true;
     g_have_image = false;
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(g_win, &pw, &ph);
     if (!g_swap_imgs.empty() && (pw != g_swap_imgs[0].w || ph != g_swap_imgs[0].h)) g_swap_dirty = true;
+    // APOC_PROFILE: the controller read this frame was made from, to the frame on the screen
+    // (with vsync, when the next image is free; it is acquired at the next present)
+    if (g_input_read_ns) g_input_shown_from = g_input_read_ns;
 }
 
 // --screenshot FRAME PATH support: saves the frame drawn so far as a BMP.

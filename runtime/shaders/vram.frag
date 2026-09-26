@@ -11,6 +11,7 @@ layout(push_constant) uniform PC {
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
 layout(location = 2) flat in uvec2 v_info;
+layout(location = 3) flat in uint v_box;
 layout(location = 0) out vec4 o_color;
 
 uint fetch16(ivec2 p) {
@@ -54,6 +55,51 @@ vec4 texel(ivec2 t, vec2 sub, out bool transparent) {
     return unpack(w);
 }
 
+// Game text and icons (HwPrim::smooth): their texels as pixel art at high resolution. Each
+// pixel takes the colour that has the most weight around it (a cubic B-spline over 4x4 texels,
+// transparent counting as a colour of its own): edges become smooth curves at any slope, and
+// colours are never mixed, so the letters stay sharp. Only the glyph's own texels (v_box) count:
+// the ones around it in the font are someone else's, and a glyph drawn in parts must not show
+// where they meet.
+vec4 glyph_key(ivec2 t) {
+    ivec2 lo = ivec2(int(v_box & 255u), int((v_box >> 8) & 255u));
+    ivec2 hi = ivec2(int((v_box >> 16) & 255u), int(v_box >> 24));
+    bool transparent;
+    vec4 c = texel(clamp(t, lo, hi), vec2(0.0), transparent);
+    return transparent ? vec4(-1.0) : c;
+}
+
+vec4 bspline(float f) {
+    float g = 1.0 - f;
+    return vec4(g * g * g, 4.0 - 6.0 * f * f + 3.0 * f * f * f, 4.0 - 6.0 * g * g + 3.0 * g * g * g, f * f * f) / 6.0;
+}
+
+vec4 text_texel(vec2 uv, out bool transparent) {
+    vec2 st = uv - 0.5;
+    vec2 fl = floor(st + 0.001);
+    vec2 f = st - fl;
+    ivec2 b = ivec2(fl) - 1;
+    vec4 wx = bspline(f.x), wy = bspline(f.y);
+    vec4 col[16];
+    float w[16];
+    for (int j = 0; j < 4; j++)
+        for (int i = 0; i < 4; i++) {
+            col[j * 4 + i] = glyph_key(b + ivec2(i, j));
+            w[j * 4 + i] = wx[i] * wy[j];
+        }
+    // the winner is one of the four texels around the pixel
+    vec4 best = col[5];
+    float best_w = -1.0;
+    for (int k = 0; k < 4; k++) {
+        vec4 cand = col[k == 0 ? 5 : k == 1 ? 6 : k == 2 ? 9 : 10];
+        float s = 0.0;
+        for (int n = 0; n < 16; n++) s += col[n] == cand ? w[n] : 0.0;
+        if (s > best_w) { best_w = s; best = cand; }
+    }
+    transparent = best.a < 0.0;
+    return best;
+}
+
 void main() {
     bool textured = ((v_info.x >> 22) & 1u) != 0u;
     bool raw = ((v_info.x >> 23) & 1u) != 0u;
@@ -65,7 +111,9 @@ void main() {
         vec2 uv = v_uv - 0.5 * dFdx(v_uv) - 0.5 * dFdy(v_uv);
         vec4 tc;
         bool transparent;
-        if (pc.filter_ != 0) {
+        if (((v_info.x >> 24) & 1u) != 0u) {  // game text
+            tc = text_texel(uv, transparent);
+        } else if (pc.filter_ != 0) {
             vec2 st = uv - 0.5;
             ivec2 b = ivec2(floor(st));
             vec2 f = st - vec2(b);

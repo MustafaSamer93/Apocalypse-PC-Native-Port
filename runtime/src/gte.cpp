@@ -1,6 +1,7 @@
 // Geometry Transformation Engine (COP2), bit-accurate per the psx-spx documentation.
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -17,21 +18,60 @@ float g_gte_widescreen = 1.0f;
 
 // Pose blending (sim60.cpp): one render records every transformed vertex and output colour,
 // a second render of the same scene replaces each with the average of the two. The two
-// renders differ only in animation state, so the n-th vertex of one is the n-th vertex of
-// the other; a pair that is not (different model, different vertex count) is left alone.
+// renders differ only in animation state, but that changes how much work a model does (faces
+// turned away get no lighting, near polygons are split, a model posed off screen is skipped),
+// so the streams are not paired by one running index: they are cut into segments, one per
+// load of the GTE translation (each model, each jointed part, each lighting pass), and each
+// segment is paired with the next recorded one whose translation is the same or close (a
+// part posed differently sits a little elsewhere), looking a few segments ahead; inside a
+// segment the n-th vertex or colour goes with the n-th. A count that differs then only upsets
+// that one segment instead of every vertex and colour after it (colours were a few apart on
+// most frames, so the cave lighting and the models drawn after an animated one were averaged
+// with the wrong entries). A pair that is not the same vertex is left alone.
 GteBlendMode g_gte_blend = GteBlendMode::Off;
 static std::vector<GteBlendVtx> g_blend_vtx;
 static std::vector<uint32_t> g_blend_rgb;
-static size_t g_blend_vi = 0, g_blend_ci = 0;
 uint32_t g_blend_stats[3];  // vertices blended, vertices skipped, colours blended
 
+namespace {
+struct BlendSeg {
+    int32_t tr[3];
+    uint32_t ra;  // the code that drew it (its return address)
+    uint32_t v0, v1, c0, c1;  // recorded vertices [v0, v1), colours [c0, c1)
+};
+constexpr uint32_t kSegLookAhead = 24;
+constexpr int64_t kSegNear = 512;  // largest distance (sum of |dx|, |dy|, |dz|) of paired translations
+std::vector<BlendSeg> g_blend_segs;  // recorded
+bool g_tr_loaded = true;             // the translation was loaded since the current segment began
+const BlendSeg* g_seg_rec = nullptr;  // blend pass: the recorded segment paired with the current one
+uint32_t g_seg_next = 0;              // blend pass: the first recorded segment not paired yet
+uint32_t g_seg_misses = 0;            // blend pass: segments in a row left unpaired
+uint32_t g_seg_vi = 0, g_seg_ci = 0;  // blend pass: vertices and colours so far in the current segment
+uint32_t g_seg_stats[3];  // APOC_BLEND_DEBUG: segments paired, paired with a different count, unpaired
+bool g_seg_open = false;
+void seg_close();
+}  // namespace
+
 void gte_blend_begin(GteBlendMode m) {
+    static const bool dbg = std::getenv("APOC_BLEND_DEBUG") != nullptr;
+    if (dbg && g_gte_blend == GteBlendMode::Blend) {
+        seg_close();
+        static int n = 0;
+        if (++n % 60 == 0)
+            std::fprintf(stderr, "BLENDDBG segments paired %u, count differs %u, unpaired %u\n", g_seg_stats[0],
+                         g_seg_stats[1], g_seg_stats[2]);
+    }
     g_gte_blend = m;
     if (m == GteBlendMode::Record) {
         g_blend_vtx.clear();
         g_blend_rgb.clear();
+        g_blend_segs.clear();
     }
-    g_blend_vi = g_blend_ci = 0;
+    g_tr_loaded = true;
+    g_seg_open = false;
+    g_seg_rec = nullptr;
+    g_seg_next = 0;
+    g_seg_misses = 0;
 }
 
 // Precise vertices (F1 -> Precise 3D). The GTE hands the game whole-pixel screen positions,
@@ -263,6 +303,52 @@ void set_mac_ir(int i, int64_t v, int shift, bool lm) {
     IR(i) = lim_ir(i, MAC(i), lm);
 }
 
+// APOC_BLEND_DEBUG: how the segment just finished was paired.
+void seg_close() {
+    if (g_gte_blend != GteBlendMode::Blend || !g_seg_open) return;
+    if (!g_seg_rec) g_seg_stats[2]++;
+    else if (g_seg_vi != g_seg_rec->v1 - g_seg_rec->v0 || g_seg_ci != g_seg_rec->c1 - g_seg_rec->c0) g_seg_stats[1]++;
+    else g_seg_stats[0]++;
+}
+// The segment the next vertex or colour belongs to (see pose blending, above).
+void blend_segment() {
+    if (!g_tr_loaded) return;
+    seg_close();
+    g_tr_loaded = false;
+    g_seg_open = true;
+    const int32_t tr[3] = {K(5), K(6), K(7)};
+    if (g_gte_blend == GteBlendMode::Record) {
+        g_blend_segs.push_back({{tr[0], tr[1], tr[2]}, C->r[31], (uint32_t)g_blend_vtx.size(), (uint32_t)g_blend_vtx.size(),
+                                (uint32_t)g_blend_rgb.size(), (uint32_t)g_blend_rgb.size()});
+        return;
+    }
+    // Drawn by the same code (return address) and, looking ahead from the first segment not
+    // paired yet: (1) a part at exactly the same place (a translation other than 0, which
+    // lighting and level passes share, identifies it) up to kSegLookAhead ahead; (2) else one of
+    // the next few at the same or a nearby place (a part posed a little elsewhere: level 2's
+    // zombies compute their joints while drawing); (3) after a run of misses, the same
+    // translation up to kSegLookAhead ahead, to find the thread again. A segment only one render
+    // has (a lighting pass for a part turned away, a model split differently) stays unpaired.
+    g_seg_rec = nullptr;
+    g_seg_vi = g_seg_ci = 0;
+    const uint32_t ra = C->r[31];
+    const bool zero = !tr[0] && !tr[1] && !tr[2];
+    auto dist = [&](const BlendSeg& r) {
+        return std::abs((int64_t)r.tr[0] - tr[0]) + std::abs((int64_t)r.tr[1] - tr[1]) + std::abs((int64_t)r.tr[2] - tr[2]);
+    };
+    auto find = [&](uint32_t n, int64_t near) -> const BlendSeg* {
+        const uint32_t end = std::min<uint32_t>((uint32_t)g_blend_segs.size(), g_seg_next + n);
+        for (uint32_t j = g_seg_next; j < end; j++)
+            if (g_blend_segs[j].ra == ra && dist(g_blend_segs[j]) <= near) return &g_blend_segs[j];
+        return nullptr;
+    };
+    if (!zero) g_seg_rec = find(kSegLookAhead, 0);
+    if (!g_seg_rec) g_seg_rec = find(4, zero ? 0 : kSegNear);
+    if (!g_seg_rec && g_seg_misses >= 3) g_seg_rec = find(kSegLookAhead, 0);
+    g_seg_misses = g_seg_rec ? 0 : g_seg_misses + 1;
+    if (g_seg_rec) g_seg_next = (uint32_t)(g_seg_rec - g_blend_segs.data()) + 1;
+}
+
 uint8_t lim_color(int i, int32_t v) {
     if (v < 0) { set_flag(22 - i); return 0; }
     if (v > 0xFF) { set_flag(22 - i); return 0xFF; }
@@ -275,12 +361,22 @@ void push_color() {
     uint32_t r = lim_color(1, MAC(1) >> 4), g = lim_color(2, MAC(2) >> 4), b = lim_color(3, MAC(3) >> 4);
     D(22) = (int32_t)(r | g << 8 | b << 16 | (uint32_t)rgbc(3) << 24);
     if (g_gte_blend == GteBlendMode::Record) {
+        blend_segment();
         g_blend_rgb.push_back((uint32_t)D(22));
-    } else if (g_gte_blend == GteBlendMode::Blend && g_blend_ci < g_blend_rgb.size()) {
-        uint32_t o = g_blend_rgb[g_blend_ci++], n = (uint32_t)D(22), m = n & 0xFF000000u;
-        for (int s = 0; s < 24; s += 8) m |= ((((o >> s) & 0xFF) + ((n >> s) & 0xFF) + 1) / 2) << s;
-        D(22) = (int32_t)m;
-        g_blend_stats[2]++;
+        g_blend_segs.back().c1++;
+    } else if (g_gte_blend == GteBlendMode::Blend) {
+        blend_segment();
+        const uint32_t i = g_seg_rec ? g_seg_rec->c0 + g_seg_ci++ : 0;
+        if (g_seg_rec && i < g_seg_rec->c1) {
+            uint32_t o = g_blend_rgb[i], n = (uint32_t)D(22), m = n & 0xFF000000u;
+            bool near = true;  // a colour a pose apart; a very different one is another vertex's
+            for (int s = 0; s < 24; s += 8) near &= std::abs((int)((o >> s) & 0xFF) - (int)((n >> s) & 0xFF)) <= 64;
+            if (near) {
+                for (int s = 0; s < 24; s += 8) m |= ((((o >> s) & 0xFF) + ((n >> s) & 0xFF) + 1) / 2) << s;
+                D(22) = (int32_t)m;
+                g_blend_stats[2]++;
+            }
+        }
     }
 }
 
@@ -436,11 +532,15 @@ void rtp(int n, const Cmd& c, bool last) {
     }
     g_precise_stats[4]++;
     if (g_gte_blend == GteBlendMode::Record) {
+        blend_segment();
         g_blend_vtx.push_back({(int16_t)x, (int16_t)y, (int16_t)z, D(14), D(19), px, py, pw});
+        g_blend_segs.back().v1++;
     } else if (g_gte_blend == GteBlendMode::Blend) {
         // Pair up with the recorded vertex: same model vertex (segmented models) or a nearby
         // one (keyframed meshes), and not far away on screen.
-        const GteBlendVtx* r = g_blend_vi < g_blend_vtx.size() ? &g_blend_vtx[g_blend_vi++] : nullptr;
+        blend_segment();
+        const uint32_t i = g_seg_rec ? g_seg_rec->v0 + g_seg_vi++ : 0;
+        const GteBlendVtx* r = g_seg_rec && i < g_seg_rec->v1 ? &g_blend_vtx[i] : nullptr;
         int ox = r ? lo16(r->sxy) : 0, oy = r ? hi16(r->sxy) : 0, nx = lo16(D(14)), ny = hi16(D(14));
         if (r && std::abs(r->vx - x) + std::abs(r->vy - y) + std::abs(r->vz - z) < 512 &&
             std::abs(ox - nx) < 64 && std::abs(oy - ny) < 64) {
@@ -607,6 +707,7 @@ extern "C" void gte_write_ctrl(R3000* c, int r, uint32_t v) {
     C = c;
     if (g_gte_dump_frame && host_frame_count() == g_gte_dump_frame && r <= 7 && g_gte_dumped < 12)
         log_msg(LogCat::Gpu, "ctc2 %d = %08X (ra=%08X a0=%08X)", r, v, c->r[31], c->r[4]);
+    if (r >= 5 && r <= 7) g_tr_loaded = true;  // a new pose-blend segment
     switch (r) {
         case 4: case 12: case 20: case 26: case 27: case 29: case 30:
             c->gte_ctrl[r] = (int16_t)v; break;

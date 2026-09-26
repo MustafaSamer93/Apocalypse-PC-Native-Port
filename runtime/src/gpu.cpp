@@ -8,6 +8,8 @@
 #include "gpu_hw.h"
 #include "psx.h"
 
+bool g_smooth_font = true;  // psx.h
+
 namespace {
 
 constexpr int VRAM_W = 1024, VRAM_H = 512;
@@ -62,6 +64,27 @@ uint32_t g_2d_from = 0, g_2d_mid = 0, g_2d_to = 0;  // packets: HUD from..mid, t
                                                     // up to the tint's (phys)
 // Packets the text and icon routines made since the last frame was drawn (phys from, to).
 std::vector<std::pair<uint32_t, uint32_t>> g_text_packets;
+// HwPrim::box for texels u0..u1, v0..v1 at the vertices (the far ones are not drawn).
+uint32_t smooth_box(int u0, int v0, int u1, int v1) {
+    u1 = std::max(u0, u1 - 1), v1 = std::max(v0, v1 - 1);
+    return (uint32_t)(u0 & 255) | (uint32_t)(v0 & 255) << 8 | (uint32_t)(u1 & 255) << 16 | (uint32_t)(v1 & 255) << 24;
+}
+
+// Text drawn tilted (subtitles, game_menu.cpp): the packets of one text routine call, turned by
+// `angle` (radians, clockwise on screen) around its anchor (the routine's x, y).
+struct Tilt {
+    uint32_t from, to;
+    float x, y, angle;
+};
+std::vector<Tilt> g_tilts;
+uint32_t g_last_text_from = 0;  // packet the last text / icon routine call started at
+
+const Tilt* tilt_of(uint32_t a) {
+    for (const auto& t : g_tilts)
+        if (a >= t.from && a < t.to) return &t;
+    return nullptr;
+}
+
 bool text_packet(uint32_t a) {
     for (const auto& r : g_text_packets)
         if (a >= r.first && a < r.second) return true;
@@ -385,6 +408,13 @@ void draw_polygon(const uint32_t* w) {
     if (hw_active()) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi; p.gouraud = gouraud;
+        p.smooth = textured && g_smooth_font && g_gpu_packet_addr && text_packet(g_gpu_packet_addr);
+        if (p.smooth) {  // smoothing stays inside the glyph (its neighbours in the font are close)
+            int u0 = v[0].u, u1 = v[0].u, v0 = v[0].v, v1 = v[0].v;
+            for (int i = 1; i < nv; i++)
+                u0 = std::min(u0, v[i].u), u1 = std::max(u1, v[i].u), v0 = std::min(v0, v[i].v), v1 = std::max(v1, v[i].v);
+            p.box = smooth_box(u0, v0, u1, v1);
+        }
         p.semi_mode = S.semi_mode;
         p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;
         p.clut_x = tex.clut_x; p.clut_y = tex.clut_y;
@@ -393,6 +423,18 @@ void draw_polygon(const uint32_t* w) {
         for (int i = 0; i < nv; i++) {
             h[i] = hw_vtx(v[i]);
             if (k != 1.0f) h[i].x = cx + (h[i].x - cx) * k;
+        }
+        if (const Tilt* t = g_gpu_packet_addr && !g_tilts.empty() ? tilt_of(g_gpu_packet_addr) : nullptr) {
+            // turned on the screen, where a VRAM pixel is 0.625 lines wide (320 x 240 shown as 4:3)
+            constexpr float kPixel = 320.0f / 512.0f;
+            float px = t->x + (float)S.off_x, py = t->y + (float)S.off_y;
+            if (k != 1.0f) px = cx + (px - cx) * k;
+            const float cs = std::cos(t->angle), sn = std::sin(t->angle);
+            for (int i = 0; i < nv; i++) {
+                const float dx = (h[i].x - px) * kPixel, dy = h[i].y - py;
+                h[i].x = px + (dx * cs - dy * sn) / kPixel;
+                h[i].y = py + dx * sn + dy * cs;
+            }
         }
         // Precise 3D (gte.cpp): each vertex the GTE projected goes to its exact position (all of
         // them, so neighbouring polygons still share their edges); when every vertex was, the
@@ -502,6 +544,11 @@ void draw_rect(const uint32_t* w) {
     if (hw_active()) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi;
+        p.smooth = textured && g_smooth_font && g_gpu_packet_addr && text_packet(g_gpu_packet_addr);
+        if (p.smooth) {
+            const int ue = S.rect_flip_x ? u0 - wdt : u0 + wdt, ve = S.rect_flip_y ? v0 - hgt : v0 + hgt;
+            p.box = smooth_box(std::min(u0, ue), std::min(v0, ve), std::max(u0, ue), std::max(v0, ve));
+        }
         p.semi_mode = S.semi_mode;
         p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;
         p.clut_x = tex.clut_x; p.clut_y = tex.clut_y;
@@ -766,7 +813,7 @@ void gpu_write_gp1(R3000* c, uint32_t v) {
             DS.start_x = v & 0x3FE;
             DS.start_y = (v >> 10) & 0x1FF;
             LOG(Gpu, "display start %d,%d", DS.start_x, DS.start_y);
-            if (!core_in_ghost()) smooth_on_flip();
+            if (!core_in_ghost()) smooth_on_flip(), g_display_flipped = true;
             break;
         case 0x06: DS.h1 = v & 0xFFF; DS.h2 = (v >> 12) & 0xFFF; break;
         case 0x07: DS.v1 = v & 0x3FF; DS.v2 = (v >> 10) & 0x3FF; break;
@@ -869,6 +916,8 @@ void gpu_vblank() {
 }
 bool gpu_is_interlaced_odd_field() { return g_odd_line; }
 
+bool g_display_flipped = false;
+
 GpuDisplay gpu_display() {
     GpuDisplay d;
     d.vram = g_vram;
@@ -911,11 +960,23 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
     if (inside[which]) return 0;
     const uint32_t ra = c->r[31], sp = c->r[29];
     const uint32_t from = MEM_R32(c, kNextPacket) & 0x1FFFFC;
+    // Packets come from one buffer in order. When the next free packet is back below where the
+    // last call started, the frame is being built again (the 60 Hz and smooth-frame renders build
+    // one, drop it and build it again before it is drawn): the ranges noted for the dropped build
+    // would now cover other packets (the HUD, other text), so they go.
+    if (from < g_last_text_from) {
+        g_text_packets.clear();
+        g_tilts.clear();
+    }
+    g_last_text_from = from;
+    const float tilt = which == 0 ? subtitle_tilt(c->r[6]) : 0.0f;  // (a2 = the text)
+    const float tx = (float)(int32_t)c->r[4], ty = (float)(int32_t)c->r[5];
     inside[which] = true;
     call_indirect(c, kFn[which]);
     inside[which] = false;
     const uint32_t to = MEM_R32(c, kNextPacket) & 0x1FFFFC;
     if (to > from && g_text_packets.size() < 256) g_text_packets.push_back({from, to});
+    if (to > from && tilt != 0.0f && g_tilts.size() < 16) g_tilts.push_back({from, to, tx, ty, tilt});
     c->r[31] = ra;
     c->r[29] = sp;
     return 1;
@@ -935,6 +996,8 @@ void gpu_list_done() {
     }
     gte_precise_clear();
     g_text_packets.clear();
+    g_tilts.clear();
+    g_last_text_from = 0;
     g_2d_from = g_2d_mid = g_2d_to = 0;
 }
 

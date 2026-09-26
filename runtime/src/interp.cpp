@@ -114,6 +114,9 @@ static bool optional_call_skipped(uint32_t pc) {
         case 0x80030BCC: return psx_opt_skip_frame_wait != 0;
         case 0x80030B80:
         case 0x80030BBC: return psx_opt_sim60 != 0;
+        case 0x800145BC: return psx_opt_menu60 != 0;
+        case 0x80012F10:
+        case 0x80012F18: return psx_opt_menu_odd != 0;
         default: return false;
     }
 }

@@ -36,8 +36,9 @@ struct VkVtx {
     float u, v;
     uint32_t info0, info1;
     float w;  // 1, or view depth for perspective-correct texturing (HwVtx::w)
+    uint32_t box;  // HwPrim::box
 };
-static_assert(sizeof(VkVtx) == 32, "vertex layout (vk_context.cpp kVtxStride)");
+static_assert(sizeof(VkVtx) == 36, "vertex layout (vk_context.cpp kVtxStride)");
 
 struct VramPush {
     int32_t scale, pass, set_mask, filter;
@@ -96,8 +97,15 @@ void set_viewport_scissor(int sx, int sy, int sw, int sh) {
     vkCmdSetScissor(cb(), 0, 1, &sc);
 }
 
+// APOC_PROFILE: what the renderer did, logged every 2 seconds (vk_profile_frame).
+struct Prof {
+    uint64_t flushes, verts, syncs, sync_px, readbacks, read_px, uploads, up_px, copies, caps;
+} g_prof;
+
 void flush() {
     if (g_batch.empty()) return;
+    g_prof.flushes++;
+    g_prof.verts += g_batch.size();
     // textures come from `read`; once it is readable, batches follow each other in one rendering
     if (g_read.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         vkc::end_rendering();
@@ -136,6 +144,8 @@ void flush() {
 void sync_read() {
     flush();
     if (!g_dirty) return;
+    g_prof.syncs++;
+    g_prof.sync_px += (uint64_t)(g_dx1 - g_dx0) * (g_dy1 - g_dy0);
     vkc::end_rendering();
     vkc::transition(g_draw, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     vkc::transition(g_read, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -177,12 +187,12 @@ void begin_prim(const HwPrim& p, const HwState& s) {
 
 uint32_t info0(const HwPrim& p) {
     return (uint32_t)(p.page_x & 1023) | (uint32_t)(p.page_y & 511) << 10 | (uint32_t)p.depth << 20 |
-           (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23;
+           (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24;
 }
 uint32_t info1(const HwPrim& p) { return (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10; }
 
 void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f) {
-    g_batch.push_back(VkVtx{x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b, 255, u, v, info0(p), info1(p), w});
+    g_batch.push_back(VkVtx{x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b, 255, u, v, info0(p), info1(p), w, p.box});
 }
 
 void draw_area_dirty(int x0, int y0, int x1, int y1, const HwState& s) {
@@ -440,6 +450,8 @@ void vk_hw_fill(int x, int y, int w, int h, uint16_t color) {
 }
 
 void vk_hw_upload(int x, int y, int w, int h, const uint16_t* vram) {
+    g_prof.uploads++;
+    g_prof.up_px += (uint64_t)w * h;
     flush();
     for (int yy = y; yy < y + h;) {  // the region may wrap around the edges of VRAM
         int ry = yy & 511, rh = std::min(y + h - yy, 512 - ry);
@@ -467,22 +479,29 @@ void vk_hw_draw_picture(int x, int y, int w, int h, const uint32_t* rgba) {
     if (!vkc::create_image(pic, w * S, h * S, VK_FORMAT_R8G8B8A8_UNORM,
                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return;
-    const VkDeviceSize bytes = (VkDeviceSize)w * S * h * S * 4;
-    vkc::Staging st = vkc::stage(bytes);
-    std::memcpy(st.ptr, rgba, bytes);
-    vkc::end_rendering();
-    vkc::transition(pic, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    VkBufferImageCopy bic{};
-    bic.bufferOffset = st.offset;
-    bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    bic.imageExtent = {(uint32_t)(w * S), (uint32_t)(h * S), 1};
-    vkCmdCopyBufferToImage(cb(), st.buffer, pic.image, pic.layout, 1, &bic);
+    // in bands of rows that fit the staging buffer (a big picture at 8x is larger than it)
+    const VkDeviceSize row_bytes = (VkDeviceSize)w * S * 4;
+    const int band = (int)std::max<VkDeviceSize>(1, vkc::stage_limit() / row_bytes);
+    for (int r0 = 0; r0 < h * S; r0 += band) {
+        const int rows = std::min(band, h * S - r0);
+        vkc::Staging st = vkc::stage(row_bytes * rows);
+        std::memcpy(st.ptr, rgba + (size_t)r0 * w * S, row_bytes * rows);
+        vkc::end_rendering();
+        vkc::transition(pic, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy bic{};
+        bic.bufferOffset = st.offset;
+        bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        bic.imageOffset = {0, r0, 0};
+        bic.imageExtent = {(uint32_t)(w * S), (uint32_t)rows, 1};
+        vkCmdCopyBufferToImage(cb(), st.buffer, pic.image, pic.layout, 1, &bic);
+    }
     draw_copy(pic, x * S, y * S, 1, x, y, w, h);
     vkc::destroy_image(pic);  // waits for the GPU (rare: when a replaced picture appears)
     mark_dirty(x, y, x + w, y + h);
 }
 
 void vk_hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
+    g_prof.copies++;
     if (w <= 0 || h <= 0) return;
     if (overlaps_dirty(sx, sy, sx + w, sy + h)) sync_read();
     else flush();
@@ -498,26 +517,34 @@ void vk_hw_readback(int x, int y, int w, int h, uint16_t* vram) {
     w = std::min(w, 1024 - x);
     h = std::min(h, 512 - y);
     if (w <= 0 || h <= 0) return;
+    g_prof.readbacks++;
+    g_prof.read_px += (uint64_t)w * h;
     sync_read();
     vkc::end_rendering();
     vkc::transition(g_read, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    const VkDeviceSize bytes = (VkDeviceSize)w * S * h * S * 4;
-    vkc::Staging st = vkc::stage(bytes);
-    VkBufferImageCopy bic{};
-    bic.bufferOffset = st.offset;
-    bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    bic.imageOffset = {x * S, y * S, 0};
-    bic.imageExtent = {(uint32_t)(w * S), (uint32_t)(h * S), 1};
-    vkCmdCopyImageToBuffer(cb(), g_read.image, g_read.layout, st.buffer, 1, &bic);
-    vkc::submit_wait();
-    const uint32_t* px = (const uint32_t*)st.ptr;
-    for (int j = 0; j < h; j++) {
-        for (int i = 0; i < w; i++) {
-            uint32_t c = px[(size_t)j * S * w * S + (size_t)i * S];
-            auto q = [](uint32_t v) { return (uint16_t)((v * 31 + 127) / 255); };
-            uint16_t p = (uint16_t)(q(c & 0xFF) | q((c >> 8) & 0xFF) << 5 | q((c >> 16) & 0xFF) << 10 |
-                                    ((c >> 24) > 127 ? 0x8000 : 0));
-            vram[(y + j) * 1024 + x + i] = p;
+    // in bands of rows that fit the staging buffer (all of VRAM at 8x is 128 MB, the buffer 32 MB:
+    // saving a state on Vulkan at high resolutions crashed)
+    const VkDeviceSize row_bytes = (VkDeviceSize)w * S * S * 4;
+    const int band = (int)std::max<VkDeviceSize>(1, vkc::stage_limit() / row_bytes);
+    for (int y0 = 0; y0 < h; y0 += band) {
+        const int bh = std::min(band, h - y0);
+        vkc::Staging st = vkc::stage(row_bytes * bh);
+        VkBufferImageCopy bic{};
+        bic.bufferOffset = st.offset;
+        bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        bic.imageOffset = {x * S, (y + y0) * S, 0};
+        bic.imageExtent = {(uint32_t)(w * S), (uint32_t)(bh * S), 1};
+        vkCmdCopyImageToBuffer(cb(), g_read.image, g_read.layout, st.buffer, 1, &bic);
+        vkc::submit_wait();
+        const uint32_t* px = (const uint32_t*)st.ptr;
+        for (int j = 0; j < bh; j++) {
+            for (int i = 0; i < w; i++) {
+                uint32_t c = px[(size_t)j * S * w * S + (size_t)i * S];
+                auto q = [](uint32_t v) { return (uint16_t)((v * 31 + 127) / 255); };
+                uint16_t p = (uint16_t)(q(c & 0xFF) | q((c >> 8) & 0xFF) << 5 | q((c >> 16) & 0xFF) << 10 |
+                                        ((c >> 24) > 127 ? 0x8000 : 0));
+                vram[(y + y0 + j) * 1024 + x + i] = p;
+            }
         }
     }
 }
@@ -534,6 +561,7 @@ unsigned vk_hw_display_texture(int x, int y, int w, int h, int* px, int* py, int
 }
 
 void vk_hw_capture(int slot, int x, int y, int w, int h) {
+    g_prof.caps++;
     if (!S || slot < 0 || slot >= 16 || !clip_rect(x, y, w, h)) return;
     copy_out(g_caps[slot], x, y, w, h);
 }
@@ -577,4 +605,34 @@ void vk_renderer_destroy() {
         if (*m) vkDestroyShaderModule(vkc::device, *m, nullptr), *m = VK_NULL_HANDLE;
     for (VkPipelineLayout* l : {&g_layout, &g_copy_layout})
         if (*l) vkDestroyPipelineLayout(vkc::device, *l, nullptr), *l = VK_NULL_HANDLE;
+}
+
+extern uint64_t g_prof_submits, g_prof_waits, g_prof_fence_ns, g_prof_present_ns, g_prof_gpu_ns;
+extern uint64_t g_prof_input_ns, g_prof_input_n;
+
+// APOC_PROFILE: logs the renderer's work per second every 120 frames (host_sdl.cpp).
+void vk_profile_frame(uint64_t frame) {
+    static const bool on = std::getenv("APOC_PROFILE") != nullptr;
+    if (!on || frame % 120 != 0) return;
+    const Prof& p = g_prof;
+    std::fprintf(stderr,
+                 "PROF frame %llu per s: %llu batches, %llu verts, %llu syncs (%llu kpx), %llu readbacks (%llu kpx), "
+                 "%llu uploads (%llu kpx), %llu copies, %llu captures, %llu submits, %llu GPU waits\n",
+                 (unsigned long long)frame, (unsigned long long)p.flushes / 2, (unsigned long long)p.verts / 2,
+                 (unsigned long long)p.syncs / 2, (unsigned long long)p.sync_px / 2000, (unsigned long long)p.readbacks / 2,
+                 (unsigned long long)p.read_px / 2000, (unsigned long long)p.uploads / 2, (unsigned long long)p.up_px / 2000,
+                 (unsigned long long)p.copies / 2, (unsigned long long)p.caps / 2, (unsigned long long)g_prof_submits / 2,
+                 (unsigned long long)g_prof_waits / 2);
+    static uint64_t last = 0;
+    const uint64_t now = SDL_GetTicksNS();
+    if (last)
+        std::fprintf(stderr, "PROF time: %.1f ms a frame; GPU busy %.1f ms; waiting for GPU %.1f ms, for the display %.1f ms; "
+                     "controller read to screen %.1f ms\n",
+                     (double)(now - last) / 120e6, (double)g_prof_gpu_ns / 120e6, (double)g_prof_fence_ns / 120e6, (double)g_prof_present_ns / 120e6,
+                     g_prof_input_n ? (double)g_prof_input_ns / 1e6 / (double)g_prof_input_n : 0.0);
+    last = now;
+    g_prof_input_ns = g_prof_input_n = 0;
+    g_prof_fence_ns = g_prof_present_ns = g_prof_gpu_ns = 0;
+    g_prof = Prof{};
+    g_prof_submits = g_prof_waits = 0;
 }

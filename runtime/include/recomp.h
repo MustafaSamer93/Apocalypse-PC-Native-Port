@@ -233,10 +233,26 @@ int psx_hook_render(R3000* c);  // nonzero: the render was done by the hook
 int psx_hook_frustum(R3000* c);  // nonzero: the culling planes were built by the hook (drawdist.cpp)
 int psx_hook_tick(R3000* c);  // nonzero: the tick was handled (sim60.cpp)
 void psx_hook_player(R3000* c);  // entry of the player's update, a0 = player (sim60.cpp)
+void psx_hook_contacts(R3000* c, int after);  // just before (0) / after (1) the player's update in a tick (sim60.cpp)
+void psx_hook_zone(R3000* c);  // a force zone pushes a list, a0 = zone, a1 = list head (sim60.cpp)
+// the game's menus (game_menu.cpp): add item, destroy, move selection, draw, read select/back
+void psx_hook_menu_init(R3000* c);
+void psx_hook_menu_add(R3000* c);
+void psx_hook_menu_free(R3000* c);
+int psx_hook_menu_update(R3000* c);
+int psx_hook_menu_camera(R3000* c);
+int psx_hook_menu_draw(R3000* c);  // nonzero: drawn by the hook
+int psx_hook_menu_keys(R3000* c);  // nonzero: read by the hook
+int psx_hook_voice(R3000* c);     // 8002FC64 play a voice clip (a0 block, a1 channel); nonzero: silent
+void psx_hook_weapon_pickup(R3000* c);  // 8005E260 give a weapon (a0 player, a1 type)
+void psx_hook_free(R3000* c);           // 8002FF34 free (debug trace, cheats.cpp)
+void psx_hook_message(R3000* c);  // 8001B788 show a message (a0 text)
 
 // Runtime switches for patched call sites (see OPTIONAL_CALLS in tools/recomp/emit.py).
 extern int psx_opt_skip_frame_wait;  // 1 = skip the main loop's second VBlank wait (60 fps)
 extern int psx_opt_sim60;            // 1 = 60 Hz simulation prototype (sim60.cpp)
+extern int psx_opt_menu60;           // 1 = the front end (menus) runs at 60 Hz (game_menu.cpp)
+extern int psx_opt_menu_odd;         // 1 = this front end loop is an in-between one (60 Hz)
 // `jr reg` that is not a known switch: a tail call if `addr` is a function or BIOS
 // vector, otherwise a jump inside the current function (interpreted until it returns
 // to `func_ra`, the address the current function was called with).

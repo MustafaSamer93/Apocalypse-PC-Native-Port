@@ -18,6 +18,8 @@ struct HwVtx {
 // Per-primitive drawing state (texture page, palette, blending) as the GPU had it.
 struct HwPrim {
     bool textured = false, raw = false, semi = false, gouraud = false;
+    bool smooth = false;           // smooth the texture (game text and icons, psx.h g_smooth_font)
+    uint32_t box = 0;              // smooth: the texels it may use, u0 | v0 << 8 | u1 << 16 | v1 << 24
     int semi_mode = 0;             // 0..3
     int page_x = 0, page_y = 0;    // texture page base (VRAM pixels)
     int depth = 0;                 // 0 = 4bpp, 1 = 8bpp, 2 = 15bpp

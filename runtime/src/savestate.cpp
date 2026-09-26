@@ -31,6 +31,7 @@ void host_audio_clear();
 void host_toast(const std::string& text);
 
 std::jmp_buf g_resume_jmp;  // set in main()
+bool g_autosave = true;  // psx.h
 
 namespace {
 
@@ -51,6 +52,11 @@ uint64_t g_progress_frame = 0;
 std::string g_saved_level, g_saved_restart;  // the point of the last auto-save (or the start)
 bool g_demo_loaded = false;          // a .dem file was loaded since the last level start
 uint64_t g_last_load_frame = 0;      // last time the game loaded a file
+
+// The auto-save's progress point ("sewr_t Re_Chute_Sewr"), kept next to it for the menus.
+constexpr const char* kAutoInfo = "saves/autosave.txt";
+std::string g_auto_info;
+bool g_auto_info_read = false;
 
 std::string ram_string(uint32_t addr, size_t max) {
     std::string s;
@@ -209,6 +215,7 @@ void state_poll_load(R3000* c) {
     g_demo_loaded = false;
     read_progress(&g_saved_level, &g_saved_restart);
     smooth_reset();
+    game_menu_reset(true);
     std::longjmp(g_resume_jmp, 1);  // unwind the native stack; main() resumes
 }
 
@@ -220,6 +227,9 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
     uint64_t frame = host_frame_count();
 
     state_poll_load(c);
+    subtitle_poll(c);
+    game_voice_poll(c);
+    cheats_frame(c);
 
     if (g_save_request >= 0) {
         int slot = g_save_request;
@@ -233,6 +243,12 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
        // respawns there (as after a death, without losing a life), which creates that chapter.
        // Level 1 restart nodes: 1 Start, 296 Cat1, 867 Cat1andhalf, 410 Cell, 52 Trips,
        // 495 Cat2, 1467 Cat2andhalf, 558 Prisoners, 739 Tank (type-8 nodes in prsn_t.trg).
+       // Level 2 (sewr_t.trg), in play order: 1 Start, 54 CollectingTunnel, 159 FlameJets,
+       // 207 Cavern2, 1062 Cavern3, 285 Rat, 740 Tunnel02, 1038 Chute, 1515 Croc.
+       // Level 3 (city_t.trg): 0 Start, 79 City2, 150 City3, 217 City4, 239 City5, 318 City6,
+       // 319 City7, 338 City8, 346 City8a, 615 City10; level 3a (death_t.trg): 0 Start.
+       // Level 4 (roof_t.trg): 1183 Roof_Start, 56 Roof5, 590 Heli, 625 HeliAfter, 368 Roof12,
+       // 515 Roof18, 543 Roof24, 674 Roof24a, 589 Roof25, 1379 Heli_Boss2, 914 De_Heli_Boss.
         static const char* t = std::getenv("APOC_TEST_CHECKPOINT");
         static bool done = false;
         unsigned long long tf = 0;
@@ -253,6 +269,39 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             }
         }
     }
+    {  // Debug: APOC_TEST_WARP=FRAME:LEVEL:RESTART (e.g. 200:city_t:Re_Start_City) starts another
+       // level: it becomes the recorded progress point and the level loop's state is set to 3,
+       // which loads the level of the progress point (80031424) as "continue" does. The first
+       // point reached there is kept as a chapter; APOC_TEST_CHECKPOINT then warps within it.
+        static const char* t = std::getenv("APOC_TEST_WARP");
+        static bool done = false;
+        unsigned long long tf = 0;
+        char lv[16] = "", rs[32] = "";
+        if (t && !done && std::sscanf(t, "%llu:%15[^:]:%31s", &tf, lv, rs) == 3 && frame >= tf) {
+            done = true;
+            for (uint32_t i = 0; i < 9; i++) MEM_W8(c, kProgressLevel + i, i < std::strlen(lv) ? (uint8_t)lv[i] : 0);
+            for (uint32_t i = 0; i < 24; i++) MEM_W8(c, kProgressRestart + i, i < std::strlen(rs) ? (uint8_t)rs[i] : 0);
+            MEM_W32(c, 0x800FEEBC + 0x430, 3);
+        }
+    }
+    {  // Debug: APOC_TEST_SUBTITLE=FRAME shows a subtitle for 60 seconds from FRAME (timing tests)
+        static const char* t = std::getenv("APOC_TEST_SUBTITLE");
+        static bool done = false;
+        if (t && !done && frame >= std::strtoull(t, nullptr, 10)) {
+            done = true;
+            game_subtitle(c, "Kill them all, let God sort them out!", 60.0f);
+        }
+    }
+    {  // Debug: APOC_TEST_PICKUP=FRAME:N gives weapon pickup N (1-7) or, with 0, Extra Life's message
+        static const char* t = std::getenv("APOC_TEST_PICKUP");
+        static bool done = false;
+        unsigned long long tf = 0;
+        int what = 0;
+        if (t && !done && std::sscanf(t, "%llu:%d", &tf, &what) == 2 && frame >= tf) {
+            done = true;
+            game_test_pickup(c, what);
+        }
+    }
     // Auto-save a moment after the game records a new progress point (once any level
     // loading has finished), never in attract-mode demos.
     if (g_progress_pending && frame >= std::max(g_progress_frame, g_last_load_frame) + 90) {
@@ -267,12 +316,18 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             return;
         }
         if (level == g_saved_level && restart == g_saved_restart) return;  // respawn at the same point
-        const bool new_level = level != g_saved_level;
+        if (!g_autosave) return;  // switched off (Options -> Enhancements -> Autosave)
         if (save_to(kAutoSlot, c, pc)) {
-            host_toast(new_level ? "Level complete - auto-saved" : "Checkpoint - auto-saved");
             log_msg(LogCat::Core, "auto-save: %s %s", level.c_str(), restart.c_str());
             g_saved_level = level;
             g_saved_restart = restart;
+            g_auto_info = level + " " + restart;
+            g_auto_info_read = true;
+            if (FILE* f = std::fopen(kAutoInfo, "w")) {
+                std::fprintf(f, "%s\n", g_auto_info.c_str());
+                std::fclose(f);
+            }
+            game_message(c, "Auto Saved");  // as the game shows a pickup (game_menu.cpp)
         }
     }
 }
@@ -303,6 +358,27 @@ std::vector<std::string> state_chapter_names() {
     return names;
 }
 
+std::string state_autosave_level() {
+    if (!g_auto_info_read) {
+        g_auto_info_read = true;
+        if (FILE* f = std::fopen(kAutoInfo, "r")) {
+            char line[128] = "";
+            if (std::fgets(line, sizeof line, f)) g_auto_info = line;
+            std::fclose(f);
+        }
+    }
+    // level file name -> the name the game's own saves use
+    static const struct { const char* file; const char* name; } kLevels[] = {
+        {"prsn", "Prison"}, {"sewr", "Sewers"},   {"city", "City"},   {"death", "Death"},
+        {"roof", "Rooftops"}, {"grav", "Graveyard"}, {"pest", "Plague"}, {"tube", "War Factory"},
+        {"war", "War"},       {"wh", "White House"}, {"bst", "The Beast"},
+    };
+    const std::string file = g_auto_info.substr(0, g_auto_info.find('_'));
+    for (const auto& l : kLevels)
+        if (file == l.file) return l.name;
+    return "";  // a save from before the level was recorded
+}
+
 std::string state_slot_label(int slot) {
     std::error_code ec;
     auto t = std::filesystem::last_write_time(slot_path(slot), ec);
@@ -317,7 +393,10 @@ std::string state_slot_label(int slot) {
 
 extern "C" void psx_hook_level_start(void) { state_note_level_start(); }
 
-void state_note_level_start() { smooth_reset(); }
+void state_note_level_start() {
+    smooth_reset();
+    game_menu_reset(false);
+}
 
 void state_note_file_loaded(const std::string& name) {
     sim60_note_file(name);

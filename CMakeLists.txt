@@ -39,6 +39,12 @@ FetchContent_Declare(glslang
     URL https://github.com/KhronosGroup/glslang/archive/refs/tags/14.0.0.tar.gz)
 FetchContent_MakeAvailable(VulkanHeaders glslang volk)
 
+# ---------------------------------------------------------------- stb_truetype (menu text)
+FetchContent_Declare(stb  # header only (SOURCE_SUBDIR skips the missing CMake)
+    URL https://github.com/nothings/stb/archive/2c980bb59875b0d32144a71867fbdebb2f77cd20.tar.gz
+    SOURCE_SUBDIR none)
+FetchContent_MakeAvailable(stb)
+
 # Vulkan shaders (runtime/shaders/*.vert|frag) -> SPIR-V as C arrays in the build tree.
 set(SHADER_OUT ${CMAKE_BINARY_DIR}/shaders)
 file(GLOB VK_SHADERS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/shaders/*.vert ${CMAKE_SOURCE_DIR}/runtime/shaders/*.frag)
@@ -106,8 +112,12 @@ add_executable(apocalypse
     runtime/src/vk_context.cpp
     runtime/src/gpu_vk.cpp
     runtime/src/present_vk.cpp
+    runtime/src/ui_text.cpp
+    runtime/src/game_menu.cpp
+    runtime/src/subtitles.cpp
+    runtime/src/cheats.cpp
     ${volk_SOURCE_DIR}/volk.c)
-target_include_directories(apocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${SHADER_OUT})
+target_include_directories(apocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
 target_compile_definitions(apocalypse PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
 add_dependencies(apocalypse vk_shaders)
 # The game is a single self-contained exe (static SDL and C runtime) in the project folder,
@@ -130,6 +140,7 @@ endif()
 if(MSVC)
     target_compile_options(apocalypse PRIVATE /W3 /permissive- $<$<NOT:$<CXX_COMPILER_ID:Clang>>:/Zc:preprocessor>)
     target_compile_definitions(apocalypse PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_link_options(apocalypse PRIVATE /MAP)  # apocalypse.map: names for crash addresses (main.cpp)
 else()
     target_compile_options(apocalypse PRIVATE -Wall -Wno-unused-function)
 endif()

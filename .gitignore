@@ -14,3 +14,6 @@ __pycache__/
 dist/
 settings.ini
 *.log
+/apocalypse.map
+debug/
+/apocalypse.old.exe

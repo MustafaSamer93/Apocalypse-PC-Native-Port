@@ -71,6 +71,7 @@ struct Staging {
     uint8_t* ptr;
 };
 Staging stage(VkDeviceSize size);
+VkDeviceSize stage_limit();  // the largest single stage() (bigger transfers go in parts)
 
 // A combined image sampler descriptor for an image (cached per image and filter).
 VkDescriptorSetLayout sampler_layout();

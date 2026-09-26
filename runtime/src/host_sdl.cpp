@@ -16,8 +16,16 @@
 #include "psx.h"
 #include "savestate.h"
 #include "smooth.h"
+#include "ui_text.h"
 
-constexpr const char* kVersion = "v0.1.1 beta";
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <io.h>
+#endif
+
+constexpr const char* kVersion = "v0.1.2 beta";
 int g_force_smooth = 0;  // --smooth K: images per game step regardless of the display
 void host_toast(const std::string& text);
 int g_renderer_override = -1;  // --renderer opengl|vulkan: 0 / 1, -1 = the saved setting
@@ -90,18 +98,60 @@ enum : uint16_t {
 std::string g_toast;
 uint64_t g_toast_until = 0;
 
+// FPS counter (Enhancements): the images shown per second, in the window's lower-left corner.
+// Drawn into its own small surface only when the number changes (present_badge keeps it).
+bool g_fps_counter = false;
+double g_fps_shown = 0;  // images per second over the last second (host_present)
+
+void draw_fps_counter() {
+    if (!g_fps_counter) return;
+    static SDL_Surface* surf = nullptr;
+    static SDL_Renderer* ren = nullptr;
+    static int last_value = -1, last_h = 0;
+    int ww = 0, wh = 0;
+    SDL_GetWindowSizeInPixels(g_window, &ww, &wh);
+    const int size = std::max(12, wh * 26 / 1080), pad = size / 3;  // 26 px at 1080 lines
+    const int value = (int)std::lround(g_fps_shown);
+    bool changed = false;
+    if (!surf || last_h != wh) {  // made for the window's size
+        if (ren) ui_text_reset(ren), SDL_DestroyRenderer(ren);
+        if (surf) SDL_DestroySurface(surf);
+        surf = SDL_CreateSurface(size * 4 + 2 * pad, size + pad, SDL_PIXELFORMAT_ARGB8888);
+        ren = surf ? SDL_CreateSoftwareRenderer(surf) : nullptr;
+        last_h = wh;
+        last_value = -1;
+    }
+    if (!ren) return;
+    if (value != last_value) {
+        last_value = value;
+        changed = true;
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);
+        SDL_RenderClear(ren);
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        const std::string text = std::to_string(value) + " FPS";
+        const float tw = ui_text_width(ren, text.c_str(), (float)size);
+        // green at the display rate or more, yellow below it, red under half
+        const double rate = std::max(30.0, (double)g_refresh_hz);
+        if (value >= rate - 2) SDL_SetRenderDrawColor(ren, 120, 255, 120, 255);
+        else if (value >= rate / 2) SDL_SetRenderDrawColor(ren, 255, 220, 90, 255);
+        else SDL_SetRenderDrawColor(ren, 255, 110, 90, 255);
+        ui_text(ren, ((float)surf->w - tw) * 0.5f, (float)pad * 0.5f, text.c_str(), (float)size);
+        SDL_RenderPresent(ren);
+    }
+    present_badge((const uint32_t*)surf->pixels, surf->w, surf->h, size / 2, changed);
+}
+
 void draw_toast() {
     if (g_toast.empty() || SDL_GetTicksNS() >= g_toast_until) return;
     SDL_Renderer* r = present_overlay_begin();
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderScale(r, 2.0f, 2.0f);
-    float w = 8.0f * (float)g_toast.size() + 12.0f;
-    SDL_FRect box{8, 8, w, 16};
+    constexpr float kSize = 18.0f;
+    SDL_FRect box{8, 8, ui_text_width(r, g_toast.c_str(), kSize) + 16.0f, kSize + 6.0f};
     SDL_SetRenderDrawColor(r, 0, 0, 0, 180);
     SDL_RenderFillRect(r, &box);
     SDL_SetRenderDrawColor(r, 255, 230, 180, 255);
-    SDL_RenderDebugText(r, 14, 12, g_toast.c_str());
-    SDL_SetRenderScale(r, 1.0f, 1.0f);
+    ui_text(r, 16, 11, g_toast.c_str(), kSize);
     present_overlay_end();
 }
 
@@ -123,7 +173,7 @@ std::string msaa_label() {
 
 // Settings screen text for the simulation rate choice.
 std::string sim60_label() {
-    const char* names[] = {"30 Hz original", "60 Hz level 1", "60 Hz all (beta)"};
+    const char* names[] = {"30 Hz original", "60 Hz levels 1-4", "60 Hz all (beta)"};
     std::string s = names[std::clamp(g_sim60_setting, 0, 2)];
     if (psx_opt_sim60) s += " ON";  // active in the current level
     return s;
@@ -178,6 +228,8 @@ void apply_graphics() {
     if (!g_gl_ok) g_active_scale = 0;
     hw_set_texture_filter(g_gfx.texture_filter);
     smooth_set_factor(smooth_target());
+    // The menus run at 60 Hz with a frame rate of 60 or more (game_menu.cpp slows what they animate).
+    psx_opt_menu60 = (g_gfx.fps ? g_gfx.fps : 30 * smooth_factor_for_refresh(g_refresh_hz)) >= 60;
     // A 60 Hz display at 60 images/s shows one image per emulated vblank (vsync pacing);
     // other combinations present from host_throttle_frame: in step with the display when
     // it is at least as fast as the image rate, otherwise on a timer without vsync.
@@ -204,10 +256,15 @@ struct Layout {
     Bind bind[16];  // indexed by PS1 pad bit number
 };
 std::map<std::string, Layout> g_layouts;
-const char* kSettingsFile = "settings.ini";
+// (debug: APOC_SETTINGS=PATH uses another file, so test runs leave the player's alone)
+const char* settings_file() {
+    static const char* f = std::getenv("APOC_SETTINGS") ? std::getenv("APOC_SETTINGS") : "settings.ini";
+    return f;
+}
 // Remapped keyboard: one key per PS1 button (bit number), used when g_key_custom.
 SDL_Scancode g_keys[16] = {};
 bool g_key_custom = false;
+bool g_fullscreen = true;  // start in fullscreen (F11 switches; saved as "fullscreen N")
 
 // Order the settings screen asks for buttons in.
 const struct { uint16_t bit; const char* name; } kRemapOrder[] = {
@@ -247,8 +304,11 @@ bool bind_active(SDL_Joystick* j, const Bind& b) {
     }
 }
 
+// Written to a new file, flushed to the disk and then put in place of the old one: a crash or
+// power loss while saving leaves the old settings, never a file of zeros.
 void save_settings() {
-    FILE* f = std::fopen(kSettingsFile, "w");
+    const std::string tmp = std::string(settings_file()) + ".new";
+    FILE* f = std::fopen(tmp.c_str(), "w");
     if (!f) return;
     std::fprintf(f, "# Written by the game's settings screen (F1). Safe to delete to reset.\n");
     std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d\n", g_gfx.scale, (int)g_gfx.aspect,
@@ -256,6 +316,12 @@ void save_settings() {
     std::fprintf(f, "sim %d\n", g_sim60_setting);
     std::fprintf(f, "drawdist %d\n", g_draw_distance);
     std::fprintf(f, "precise %d\n", g_gte_precise ? 1 : 0);
+    std::fprintf(f, "font %d\n", g_smooth_font ? 1 : 0);
+    std::fprintf(f, "menuzoom %d\n", g_menu_zoom);
+    std::fprintf(f, "autosave %d\n", g_autosave ? 1 : 0);
+    std::fprintf(f, "subtitles %d\n", g_subtitles ? 1 : 0);
+    std::fprintf(f, "fpscounter %d\n", g_fps_counter ? 1 : 0);
+    std::fprintf(f, "fullscreen %d\n", g_fullscreen ? 1 : 0);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
     std::fprintf(f, "msaa %d\n", g_gfx.msaa);
     std::fprintf(f, "renderer %s\n", g_gfx.vulkan ? "vulkan" : "opengl");
@@ -275,11 +341,20 @@ void save_settings() {
         }
         std::fprintf(f, "\n");
     }
+    const bool ok = std::fflush(f) == 0 && !std::ferror(f);
+#ifdef _WIN32
+    if (ok) _commit(_fileno(f));
+#endif
     std::fclose(f);
+#ifdef _WIN32
+    if (ok) MoveFileExA(tmp.c_str(), settings_file(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+#else
+    if (ok) std::rename(tmp.c_str(), settings_file());
+#endif
 }
 
 void load_settings() {
-    FILE* f = std::fopen(kSettingsFile, "r");
+    FILE* f = std::fopen(settings_file(), "r");
     if (!f) return;
     char line[1024];
     while (std::fgets(line, sizeof line, f)) {
@@ -305,6 +380,30 @@ void load_settings() {
         }
         if (int aa; std::sscanf(line, "aa %d", &aa) == 1) {
             g_gfx.aa = std::clamp(aa, 0, 3);
+            continue;
+        }
+        if (int fs; std::sscanf(line, "fullscreen %d", &fs) == 1) {
+            g_fullscreen = fs != 0;
+            continue;
+        }
+        if (int sf; std::sscanf(line, "font %d", &sf) == 1) {
+            g_smooth_font = sf != 0;
+            continue;
+        }
+        if (int fc; std::sscanf(line, "fpscounter %d", &fc) == 1) {
+            g_fps_counter = fc != 0;
+            continue;
+        }
+        if (int st; std::sscanf(line, "subtitles %d", &st) == 1) {
+            g_subtitles = st != 0;
+            continue;
+        }
+        if (int as; std::sscanf(line, "autosave %d", &as) == 1) {
+            g_autosave = as != 0;
+            continue;
+        }
+        if (int mz; std::sscanf(line, "menuzoom %d", &mz) == 1) {
+            g_menu_zoom = std::clamp(mz, 30, 100);
             continue;
         }
         if (int pr; std::sscanf(line, "precise %d", &pr) == 1) {
@@ -384,6 +483,41 @@ void remove_device(SDL_JoystickID id) {
 
 }  // namespace
 
+// Some OpenGL drivers crash while SDL sets up an OpenGL window (seen on a PC with DisplayLink USB
+// display adapters next to its AMD GPU; every build closed there without a word). On Windows the
+// crash is caught, but SDL is left broken by it (the game then hung on a black screen), so the
+// renderer setting is switched to Vulkan and the game starts again as a new process.
+static bool g_gl_crashed = false;
+static SDL_Window* create_window(const char* title, int w, int h, SDL_WindowFlags flags) {
+#ifdef _WIN32
+    __try {
+        return SDL_CreateWindow(title, w, h, flags);
+    } __except (1) {
+        g_gl_crashed = true;
+        return nullptr;
+    }
+#else
+    return SDL_CreateWindow(title, w, h, flags);
+#endif
+}
+
+#ifdef _WIN32
+// Starts this exe again with the same command line (and standard handles), then ends this one.
+[[noreturn]] static void restart_self() {
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = GetCommandLineW();
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(exe, cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    std::_Exit(0);
+}
+#endif
+
 bool host_init(const char* title, int scale) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
         log_msg(LogCat::Host, "SDL_Init failed: %s", SDL_GetError());
@@ -393,12 +527,12 @@ bool host_init(const char* title, int scale) {
     if (SDL_AddGamepadMappingsFromFile("gamecontrollerdb.txt") > 0)
         log_msg(LogCat::Host, "loaded extra controller mappings from gamecontrollerdb.txt");
     load_settings();
-    // Window shaped like the picture. `scale` N asks for 240*N lines; 0 (the default) asks for
-    // 1080: a 1080p window if the desktop has room, else the largest window that fits. Always a
-    // window (so screenshot tools can capture it); F11 switches to fullscreen.
+    // Fullscreen (on the desktop's own mode) unless the player chose a window with F11. The
+    // window, for then: shaped like the picture; `scale` N asks for 240*N lines; 0 (the
+    // default) asks for 1080: a 1080p window if the desktop has room, else the largest that fits.
     const float ratio = g_gfx.aspect == Aspect::A16_9 ? 16.0f / 9 : g_gfx.aspect == Aspect::A16_10 ? 16.0f / 10 : 4.0f / 3;
     int win_h = scale > 0 ? 240 * scale : 1080;
-    bool fullscreen = false;
+    const bool fullscreen = g_fullscreen;
     SDL_DisplayID display = SDL_GetPrimaryDisplay();
     SDL_Rect usable{};
     const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display);
@@ -420,9 +554,9 @@ bool host_init(const char* title, int scale) {
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
             SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
         }
-        g_window = SDL_CreateWindow(title, win_w, win_h,
-                                    SDL_WINDOW_RESIZABLE | (b == Backend::Vulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL) |
-                                        (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+        g_window = create_window(title, win_w, win_h,
+                                 SDL_WINDOW_RESIZABLE | (b == Backend::Vulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL) |
+                                     (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
         if (!g_window) return false;
         if (present_init(g_window)) return true;
         present_shutdown();
@@ -437,6 +571,20 @@ bool host_init(const char* title, int scale) {
         host_toast("Vulkan unavailable - using OpenGL");
     }
     if (!g_gl_ok) g_gl_ok = open_window(Backend::OpenGL);
+#ifdef _WIN32
+    if (g_gl_crashed && !want_vulkan && g_renderer_override != 0) {  // (not when --renderer opengl asks for it)
+        log_msg(LogCat::Host, "the OpenGL driver crashed while opening the window: switching to Vulkan and restarting");
+        g_gfx.vulkan = true;
+        g_renderer_override = -1;
+        save_settings();
+        restart_self();
+    }
+#endif
+    if (!g_gl_ok && !want_vulkan) {  // OpenGL failed: Vulkan instead
+        log_msg(LogCat::Host, "OpenGL did not start; using Vulkan");
+        g_gl_ok = open_window(Backend::Vulkan);
+        if (g_gl_ok) host_toast("OpenGL unavailable - using Vulkan");
+    }
     if (!g_gl_ok) fatal("Could not start the graphics: this needs OpenGL 3.3 or Vulkan 1.3.");
     log_msg(LogCat::Host, "renderer: %s", render_backend_name(render_backend()));
     // On a ~60 Hz display, pace the emulation by vsync: one emulated frame per refresh
@@ -469,10 +617,11 @@ void host_shutdown() {
 }
 
 static void run_settings_menu();
+static void run_chapter_menu();
 static bool g_shot_key = false;  // F12: save the next frame to debug/ (maybe_screenshot)
 
 void host_poll() {
-    bool open_menu = false;
+    bool open_menu = false, open_chapters = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
@@ -480,6 +629,7 @@ void host_poll() {
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) g_quit = true;
                 if (e.key.scancode == SDL_SCANCODE_F1 && !e.key.repeat) open_menu = true;
+                if (e.key.scancode == SDL_SCANCODE_F2 && !e.key.repeat) open_chapters = true;
                 if (e.key.scancode == SDL_SCANCODE_F5 && !e.key.repeat) state_request_save(1);
                 if (e.key.scancode == SDL_SCANCODE_F9 && !e.key.repeat) state_request_load(1);
                 if (e.key.scancode == SDL_SCANCODE_F8 && !e.key.repeat) {  // issue marker + state saves/slot1NN.state
@@ -495,8 +645,9 @@ void host_poll() {
                 }
                 if (e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) g_shot_key = true;
                 if (e.key.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
-                    bool fs = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
-                    SDL_SetWindowFullscreen(g_window, !fs);
+                    g_fullscreen = !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN);
+                    SDL_SetWindowFullscreen(g_window, g_fullscreen);
+                    save_settings();  // the next start opens the same way
                 }
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: apply_graphics(); break;
@@ -516,12 +667,15 @@ void host_poll() {
     uint16_t held = (uint16_t)~host_pad(0).buttons;
     combo_frames = ((held & B_SELECT) && (held & B_START)) ? combo_frames + 1 : 0;
     if (combo_frames == 90) open_menu = true;
+    if (static const char* t = std::getenv("APOC_MENU_AT"); t && g_frame == std::strtoull(t, nullptr, 10)) open_menu = true;  // tests
     if (open_menu && g_gl_ok) run_settings_menu();
+    else if (open_chapters && g_gl_ok) run_chapter_menu();
 }
 
 void host_set_turbo(bool on) { g_force_turbo = on; }
 
 bool host_quit_requested() { return g_quit; }
+void host_request_quit() { g_quit = true; }
 
 // "--press START@1200+10,CROSS@1500" : button@frame[+duration frames, default 6]
 bool host_parse_press_script(const char* spec) {
@@ -629,6 +783,24 @@ PadState host_pad(int port, bool analog) {
                 if (k[m.sc]) pressed |= m.bit;
         }
         pressed |= mouse_buttons();
+        // Debug: APOC_PAD_SCRIPT=FRAME:BUTTON[:FRAMES],... presses a button (start, select, x, o,
+        // t = triangle, sq = square, up, down, left, right, lone/rone/ltwo/rtwo = L1/R1/L2/R2) from
+        // each FRAME, for FRAMES frames (6 if not given).
+        static const char* script = std::getenv("APOC_PAD_SCRIPT");
+        for (const char* p = script; p && *p;) {
+            unsigned long long f = 0, len = 6;
+            char name[16] = "";
+            if (std::sscanf(p, "%llu:%15[a-z]:%llu", &f, name, &len) < 2) break;
+            static const std::pair<const char*, uint16_t> kNames[] = {
+                {"start", B_START}, {"x", B_CROSS}, {"o", B_CIRCLE}, {"t", B_TRIANGLE}, {"sq", B_SQUARE},
+                {"up", B_UP}, {"down", B_DOWN}, {"left", B_LEFT}, {"right", B_RIGHT}, {"select", B_SELECT},
+                {"lone", B_L1}, {"rone", B_R1}, {"ltwo", B_L2}, {"rtwo", B_R2}};
+            if (g_frame >= f && g_frame < f + len)
+                for (auto& [n, bit] : kNames)
+                    if (!std::strcmp(n, name)) pressed |= bit;
+            p = std::strchr(p, ',');
+            if (p) p++;
+        }
     }
     for (auto& dev : g_devices) {
         if (port != 0) break;
@@ -733,6 +905,14 @@ bool host_parse_state_script(const char* spec) {
     return true;
 }
 
+// Debug: APOC_SHOT_OVERLAYS=FRAME:PATH saves the picture with the toasts and FPS counter on it.
+static void maybe_screenshot_overlays() {
+    static const char* t = std::getenv("APOC_SHOT_OVERLAYS");
+    unsigned long long f = 0;
+    char path[260] = "";
+    if (t && std::sscanf(t, "%llu:%259s", &f, path) == 2 && g_frame == f) present_save_bmp(path);
+}
+
 static void maybe_screenshot() {
     for (uint64_t f : g_shot_frames)
         if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
@@ -818,6 +998,8 @@ static void draw_game(const GpuDisplay& d, double frac) {
         g_last_image = image;
         maybe_screenshot();  // before the toasts: the picture is the game alone
         draw_toast();
+        draw_fps_counter();
+        maybe_screenshot_overlays();
         present_swap();
         return;
     }
@@ -849,6 +1031,8 @@ static void draw_game(const GpuDisplay& d, double frac) {
     present_game_pixels(g_pixels.data() + (size_t)crop * w, w, h - 2 * crop, opt);
     maybe_screenshot();
     draw_toast();
+    draw_fps_counter();
+    maybe_screenshot_overlays();
     present_swap();
 }
 
@@ -874,6 +1058,7 @@ void host_present(const GpuDisplay& d) {
         uint64_t now = SDL_GetTicksNS();
         double secs = (double)(now - fps_t0) / 1e9;
         double fps = 60.0 / secs, images = (double)(g_images - fps_images0) / secs;
+        g_fps_shown = images;
         extern int g_audio_underruns, g_audio_drops, g_audio_min_queued;
         LOG(Host, "frame times: min %.2f ms, max %.2f ms; audio: queue min %d, underruns %d, drops %d",
             dt_min / 1e6, dt_max / 1e6, g_audio_min_queued, g_audio_underruns, g_audio_drops);
@@ -890,8 +1075,155 @@ void host_present(const GpuDisplay& d) {
         fps_images0 = g_images;
     }
     g_last_display = d;
+    if (render_backend() == Backend::Vulkan) {
+        void vk_profile_frame(uint64_t frame);
+        vk_profile_frame(g_frame);
+    }
     if (g_multi_present && !g_turbo) return;  // host_throttle_frame shows it over several refreshes
     draw_game(d, 0.0);
+}
+
+// ================================================================ enhancement settings
+// Settings changed from the menus: the settings screen (F1 -> Enhancements, ids 0..5) and the
+// game's own Options -> Enhancements page (game_menu.cpp). Changes apply and save at once.
+
+// Font scaling of the game's menus (percent, game_menu.cpp).
+constexpr int kFontScaleChoices[] = {30, 60, 90};
+const char* const kFontScaleNames[] = {"Small", "Medium", "Big"};
+// Frame rates offered in the menus (30 = the original).
+constexpr int kMenuFpsChoices[] = {30, 60, 90};
+// Resolution choices: render scale (lines = 240 x scale, the first at or above the named lines;
+// the renderer works in whole multiples of the PS1's 240) and name.
+constexpr int kResChoices[] = {1, 3, 4, 5};
+const char* const kResNames[] = {"Original", "720", "800", "1080"};
+
+// The Resolution choice for the current setting: the highest at or below it (a scale set in F1
+// between choices, e.g. 8x = 1920 lines on a 1080p screen, shows as 1080).
+// Display choices: resolution and aspect ratio together (the game's Enhancements page).
+const struct { const char* name; int scale; Aspect aspect; } kDisplays[] = {
+    {"320x240 (Original)", 1, Aspect::A4_3},     {"960x720", 3, Aspect::A4_3},
+    {"1280x720 (Widescreen)", 3, Aspect::A16_9}, {"1280x800 (Steam Deck)", 4, Aspect::A16_10},
+    {"1440x1080", 5, Aspect::A4_3},              {"1920x1080 (Widescreen)", 5, Aspect::A16_9},
+};
+
+// The Display choice for the current settings: same aspect ratio (16:10 for Stretch), the highest
+// resolution at or below the setting (8x on a 1080p screen shows as 1080).
+int display_choice() {
+    const Aspect a = g_gfx.aspect == Aspect::Stretch ? Aspect::A16_10 : g_gfx.aspect;
+    int k = -1;
+    for (int i = 0; i < (int)std::size(kDisplays); i++)
+        if (kDisplays[i].aspect == a && (k < 0 || kDisplays[i].scale <= g_gfx.scale)) k = i;
+    return std::max(k, 0);
+}
+
+int res_choice() {
+    int k = 0;
+    for (int i = 0; i < (int)std::size(kResChoices); i++)
+        if (kResChoices[i] <= g_gfx.scale) k = i;
+    return k;
+}
+
+const char* enh_name(int id) {
+    static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
+                                  "Font scaling", "Renderer", "Screen mode", "Resolution", "Aspect ratio", "Display",
+                                  "Autosave", "One-liners", "Anti-aliasing", "Infinite health", "Infinite lives",
+                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "FPS counter"};
+    return id >= 0 && id < (int)std::size(names) ? names[id] : "";
+}
+
+std::string enh_value(int id) {
+    switch (id) {
+        case E_FPS: return g_gfx.fps == 30 ? "30 (original)" : fps_label();
+        case E_SIM: return sim60_label();
+        case E_DRAWDIST: return drawdist_label();
+        case E_PRECISE: return g_gte_precise ? "On (no wobble)" : "Off (original)";
+        case E_SMOOTH_FONT: return g_smooth_font ? "On" : "Off (original)";
+        case E_FONT_SCALE: {
+            for (int i = 0; i < 3; i++)
+                if (g_menu_zoom == kFontScaleChoices[i]) return kFontScaleNames[i];
+            return std::to_string(g_menu_zoom) + "%";
+        }
+        case E_RENDERER:
+            return std::string(g_gfx.vulkan ? "Vulkan" : "OpenGL") +
+                   ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)");
+        case E_SCREEN: return g_fullscreen ? "Full" : "Window";
+        case E_ASPECT: {
+            static const char* names[] = {"Original", "Widescreen", "Widescreen (Steam Deck)", "Stretch"};  // 4:3, 16:9, 16:10
+            return names[std::clamp((int)g_gfx.aspect, 0, 3)];
+        }
+        case E_RES: return kResNames[res_choice()];
+        case E_DISPLAY: return kDisplays[display_choice()].name;
+        case E_AUTOSAVE: return g_autosave ? "On" : "Off";
+        case E_SUBTITLES: return g_subtitles ? "On" : "Off";
+        case E_AA: return kAaNames[std::clamp(g_gfx.aa, 0, 3)];
+        case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
+        case E_CHEAT_HEALTH:
+        case E_CHEAT_LIVES:
+        case E_CHEAT_WEAPONS:
+        case E_CHEAT_AMMO:
+        case E_CHEAT_BOMBS: return cheat_on(id - E_CHEAT_HEALTH) ? "On" : "Off";
+    }
+    return "";
+}
+
+// The next (dir 1) or previous (dir -1) choice of setting `id`.
+void enh_change(int id, int dir) {
+    auto cycle = [dir](const int* list, int n, int cur) {
+        int k = 0;
+        while (k < n && list[k] != cur) k++;
+        if (k == n) return list[dir > 0 ? 0 : n - 1];  // not one of the choices: start at an end
+        return list[(k + dir + n) % n];
+    };
+    switch (id) {
+        case E_FPS: g_gfx.fps = cycle(kMenuFpsChoices, 3, g_gfx.fps); break;
+        case E_SIM: {  // 60 Hz simulation (sim60.cpp)
+            static const int order[] = {1, 0, 2};  // level 1, off, all levels
+            g_sim60_setting = cycle(order, 3, g_sim60_setting);
+            sim60_apply();
+            break;
+        }
+        case E_DRAWDIST: g_draw_distance = cycle(kDrawDistChoices, (int)std::size(kDrawDistChoices), g_draw_distance); break;
+        case E_PRECISE: g_gte_precise = !g_gte_precise; break;  // gte.cpp
+        case E_SMOOTH_FONT: g_smooth_font = !g_smooth_font; break;  // gpu.cpp
+        case E_FONT_SCALE: g_menu_zoom = cycle(kFontScaleChoices, 3, g_menu_zoom); break;  // game_menu.cpp
+        case E_RENDERER: g_gfx.vulkan = !g_gfx.vulkan; break;  // takes effect when the game is started again
+        case E_SCREEN:
+            g_fullscreen = !g_fullscreen;
+            if (g_window) SDL_SetWindowFullscreen(g_window, g_fullscreen);
+            break;
+        case E_ASPECT: {  // 4:3, 16:9, 16:10 (Stretch, from F1, goes to the next end)
+            static const int order[] = {(int)Aspect::A4_3, (int)Aspect::A16_9, (int)Aspect::A16_10};
+            g_gfx.aspect = (Aspect)cycle(order, 3, (int)g_gfx.aspect);
+            break;
+        }
+        case E_AUTOSAVE: g_autosave = !g_autosave; break;  // savestate.cpp
+        case E_SUBTITLES: g_subtitles = !g_subtitles; break;  // subtitles.cpp
+        case E_AA: g_gfx.aa = (g_gfx.aa + dir + 4) % 4; break;
+        case E_FPS_COUNTER: g_fps_counter = !g_fps_counter; break;
+        case E_CHEAT_HEALTH:
+        case E_CHEAT_LIVES:
+        case E_CHEAT_WEAPONS:
+        case E_CHEAT_AMMO:
+        case E_CHEAT_BOMBS:  // cheats.cpp; never saved
+            cheat_set(id - E_CHEAT_HEALTH, !cheat_on(id - E_CHEAT_HEALTH));
+            return;
+        case E_DISPLAY: {  // (supersampling, which renders more, is the Anti-aliasing row's)
+            const int n = (int)std::size(kDisplays), k = (display_choice() + dir + n) % n;
+            g_gfx.scale = kDisplays[k].scale;
+            g_gfx.aspect = kDisplays[k].aspect;
+            break;
+        }
+        case E_RES: {
+            // the chosen lines exactly: supersampling (which renders more) is switched off
+            const int n = (int)std::size(kResChoices);
+            g_gfx.scale = kResChoices[(res_choice() + dir + n) % n];
+            g_gfx.aa &= ~2;
+            break;
+        }
+        default: return;
+    }
+    apply_graphics();
+    save_settings();
 }
 
 // ================================================================ settings screen (F1)
@@ -940,29 +1272,62 @@ bool any_input_held(SDL_Joystick* j) {
     return false;
 }
 
+// A centred menu box over the game. lines[0] is the title; a '	' splits a line into
+// a label and a value column. Sizes are in the overlay's 640x480 units.
 void draw_panel(const std::vector<std::string>& lines, int highlight) {
-    g_renderer = present_overlay_begin();
-    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 200);
-    SDL_FRect bg{0, 0, 640, 480};
-    SDL_RenderFillRect(g_renderer, &bg);
-    SDL_SetRenderScale(g_renderer, 2.0f, 2.0f);  // 8x8 debug font -> 16x16; 40x30 character grid
-    for (int i = 0; i < (int)lines.size(); i++) {
-        float y = 10.0f + 11.0f * (float)i;
-        if (i == highlight) {
-            SDL_SetRenderDrawColor(g_renderer, 200, 60, 20, 255);
-            SDL_FRect r{12, y - 2, 296, 11};
-            SDL_RenderFillRect(g_renderer, &r);
+    constexpr float kLine = 15.0f, kTitle = 21.0f, kPad = 12.0f, kGap = 26.0f;
+    SDL_Renderer* r = g_renderer = present_overlay_begin();
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+
+    const int n = (int)lines.size();
+    float label_w = 0, value_w = 0, whole_w = n ? ui_text_width(r, lines[0].c_str(), kTitle) : 0;
+    for (int i = 1; i < n; i++) {
+        const size_t tab = lines[i].find('	');
+        if (tab == std::string::npos) {
+            whole_w = std::max(whole_w, ui_text_width(r, lines[i].c_str(), kLine));
+        } else {
+            label_w = std::max(label_w, ui_text_width(r, lines[i].substr(0, tab).c_str(), kLine));
+            value_w = std::max(value_w, ui_text_width(r, lines[i].c_str() + tab + 1, kLine));
         }
-        SDL_SetRenderDrawColor(g_renderer, 255, 230, 180, 255);
-        SDL_RenderDebugText(g_renderer, 16, y, lines[i].c_str());
     }
-    SDL_SetRenderScale(g_renderer, 1.0f, 1.0f);
+    const float col = label_w > 0 ? label_w + kGap : 0;
+    const float w = std::min(620.0f, std::max({whole_w, col + value_w, 300.0f}) + 2 * kPad);
+    const float h = kPad + kTitle + 8 + kLine * (float)std::max(0, n - 1) + kPad;
+    const float x0 = std::round((640 - w) * 0.5f), y0 = std::round(std::max(4.0f, (480 - h) * 0.5f));
+
+    SDL_FRect box{x0, y0, w, h};
+    SDL_SetRenderDrawColor(r, 14, 10, 8, 235);
+    SDL_RenderFillRect(r, &box);
+    SDL_SetRenderDrawColor(r, 200, 60, 20, 255);
+    SDL_RenderRect(r, &box);
+    if (n) {
+        SDL_SetRenderDrawColor(r, 255, 170, 90, 255);
+        ui_text(r, x0 + (w - ui_text_width(r, lines[0].c_str(), kTitle)) * 0.5f, y0 + kPad - 4, lines[0].c_str(), kTitle);
+        SDL_SetRenderDrawColor(r, 200, 60, 20, 160);
+        SDL_FRect rule{x0 + kPad, y0 + kPad + kTitle, w - 2 * kPad, 1};
+        SDL_RenderFillRect(r, &rule);
+    }
+    for (int i = 1; i < n; i++) {
+        const float y = y0 + kPad + kTitle + 8 + kLine * (float)(i - 1);
+        if (i == highlight) {
+            SDL_SetRenderDrawColor(r, 200, 60, 20, 255);
+            SDL_FRect bar{x0 + kPad - 6, y, w - 2 * kPad + 12, kLine};
+            SDL_RenderFillRect(r, &bar);
+        }
+        SDL_SetRenderDrawColor(r, 255, 230, 180, 255);
+        const size_t tab = lines[i].find('	');
+        ui_text(r, x0 + kPad, y, lines[i].substr(0, tab).c_str(), kLine);
+        if (tab != std::string::npos) ui_text(r, x0 + kPad + col, y, lines[i].c_str() + tab + 1, kLine);
+    }
     present_redraw(present_options());
     present_overlay_end();
-    if (static const char* shot = std::getenv("APOC_MENU_SHOT"); shot && *shot) {  // tests: first menu image
-        present_save_bmp(shot);
-        shot = "";
+    // tests: APOC_MENU_SHOT=path.bmp saves menu image number APOC_MENU_SHOT_N (default the first)
+    if (static const char* shot = std::getenv("APOC_MENU_SHOT"); shot && *shot) {
+        static int n = 0, want = std::getenv("APOC_MENU_SHOT_N") ? std::atoi(std::getenv("APOC_MENU_SHOT_N")) : 0;
+        if (n++ == want) {
+            present_save_bmp(shot);
+            shot = "";
+        }
     }
     present_swap();
 }
@@ -971,6 +1336,13 @@ enum class MenuResult { Continue, Close, Quit };
 
 // Pumps events for the settings screen; returns key presses as SDL scancodes.
 MenuResult pump_menu_events(std::vector<SDL_Scancode>& keys) {
+    // tests: APOC_MENU_KEYS="d,d,d,e,r,e" (up/down/left/right/enter/x = escape), one key per pass
+    if (static const char* mk = std::getenv("APOC_MENU_KEYS"); mk && *mk) {
+        const char k = *mk;
+        mk += mk[1] == ',' ? 2 : 1;
+        keys.push_back(k == 'u' ? SDL_SCANCODE_UP : k == 'd' ? SDL_SCANCODE_DOWN : k == 'l' ? SDL_SCANCODE_LEFT
+                       : k == 'r' ? SDL_SCANCODE_RIGHT : k == 'x' ? SDL_SCANCODE_ESCAPE : SDL_SCANCODE_RETURN);
+    }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
@@ -1058,14 +1430,100 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
 
 }  // namespace
 
+// A pad press as a menu key. The default keyboard keys also drive the pad (arrows = d-pad),
+// so a key already seen as a key event this pass is not added again (it would move twice).
+static void push_pad_key(std::vector<SDL_Scancode>& keys, SDL_Scancode k) {
+    if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
+}
+
+// The chapter list (F1 -> Chapter, Enter): every chapter kept so far, in the order reached.
+// Up/down move, left/right jump to the previous/next level, Enter loads, Esc goes back.
+// Returns true (with the chosen index in *chapter) to load it.
+static bool pick_chapter(const std::vector<std::string>& chapters, int* chapter, bool* quit) {
+    const int n = (int)chapters.size();
+    auto level_of = [&](int i) {  // "12: Rat (sewr)" -> "(sewr)"
+        const size_t o = chapters[i].rfind('(');
+        return o == std::string::npos ? std::string() : chapters[i].substr(o);
+    };
+    auto level_start = [&](int i) {
+        while (i > 0 && level_of(i - 1) == level_of(i)) i--;
+        return i;
+    };
+    int cur = std::clamp(*chapter, 0, n - 1);
+    uint16_t prev_pad = host_pad(0).buttons;
+    for (;;) {
+        std::vector<SDL_Scancode> keys;
+        if (pump_menu_events(keys) == MenuResult::Quit) {
+            *quit = true;
+            return false;
+        }
+        const uint16_t pad = host_pad(0).buttons, pressed = (uint16_t)(prev_pad & ~pad);
+        prev_pad = pad;
+        if (pressed & B_UP) push_pad_key(keys, SDL_SCANCODE_UP);
+        if (pressed & B_DOWN) push_pad_key(keys, SDL_SCANCODE_DOWN);
+        if (pressed & (B_LEFT | B_L1)) push_pad_key(keys, SDL_SCANCODE_LEFT);
+        if (pressed & (B_RIGHT | B_R1)) push_pad_key(keys, SDL_SCANCODE_RIGHT);
+        if (pressed & (B_CROSS | B_START)) push_pad_key(keys, SDL_SCANCODE_RETURN);
+        if (pressed & B_CIRCLE) push_pad_key(keys, SDL_SCANCODE_ESCAPE);
+        for (auto k : keys) {
+            if (k == SDL_SCANCODE_ESCAPE || k == SDL_SCANCODE_F1 || k == SDL_SCANCODE_F2) return false;
+            if (k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER) {
+                *chapter = cur;
+                return true;
+            }
+            if (k == SDL_SCANCODE_UP) cur = (cur + n - 1) % n;
+            if (k == SDL_SCANCODE_DOWN) cur = (cur + 1) % n;
+            if (k == SDL_SCANCODE_RIGHT) {  // the first chapter of the next level (after the last: the first)
+                int i = cur;
+                while (i < n && level_of(i) == level_of(cur)) i++;
+                cur = i < n ? i : 0;
+            }
+            if (k == SDL_SCANCODE_LEFT) {  // the start of this level, or of the one before
+                const int s0 = level_start(cur);
+                cur = cur != s0 ? s0 : level_start(s0 > 0 ? s0 - 1 : n - 1);
+            }
+        }
+        constexpr int kShown = 16;
+        const int first = std::clamp(cur - kShown / 2, 0, std::max(0, n - kShown));
+        std::vector<std::string> lines = {"CHAPTERS", ""};
+        for (int i = first; i < std::min(n, first + kShown); i++) lines.push_back(" " + chapters[i].substr(0, 35));
+        lines.push_back("");
+        lines.push_back("Up/Down: choose  Left/Right: level");
+        lines.push_back("Enter/X: load    Esc/O: back");
+        draw_panel(lines, 2 + cur - first);
+        SDL_Delay(10);
+    }
+}
+
+static int g_chapter_sel = 0;  // the chapter last chosen (shared by F1 -> Chapter and F2)
+
+// F2: the chapter list on its own, straight from the game. Paused like the settings screen.
+static void run_chapter_menu() {
+    const std::vector<std::string> chapters = state_chapter_names();
+    if (chapters.empty()) return;
+    if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
+    if (g_chapter_sel >= (int)chapters.size()) g_chapter_sel = 0;
+    bool quit = false;
+    if (pick_chapter(chapters, &g_chapter_sel, &quit)) state_request_load(kChapterBase + g_chapter_sel);
+    if (quit) g_quit = true;
+    if (g_audio) SDL_ResumeAudioStreamDevice(g_audio);
+    g_next_frame_ns = SDL_GetTicksNS();  // don't try to "catch up" the paused time
+}
+
 // Modal settings screen. The game is paused while it is open (this runs inside the
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER, R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_DEVICE, R_REMAP,
-               R_RESET, R_BACK, R_COUNT };
+    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
+               R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
+               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
+    // the main page, and the Enhancements page (what goes beyond the original game)
+    static const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA,
+                                               R_ASPECT, R_CRT, R_FILTER, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
+    static const std::vector<Row> kEnhRows = {R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_ENH_BACK};
+    bool enh_page = false;
     static int slot = 1;
-    static int chapter = 0;
+    int& chapter = g_chapter_sel;
     const std::vector<std::string> chapters = state_chapter_names();
     if (chapter >= (int)chapters.size()) chapter = 0;
     size_t dev_index = 0;
@@ -1081,27 +1539,40 @@ static void run_settings_menu() {
         // controller navigation (edge-triggered) using the current layout
         uint16_t pad = host_pad(0).buttons, pressed = (uint16_t)(prev_pad & ~pad);
         prev_pad = pad;
-        if (pressed & B_UP) keys.push_back(SDL_SCANCODE_UP);
-        if (pressed & B_DOWN) keys.push_back(SDL_SCANCODE_DOWN);
-        if (pressed & B_LEFT) keys.push_back(SDL_SCANCODE_LEFT);
-        if (pressed & B_RIGHT) keys.push_back(SDL_SCANCODE_RIGHT);
-        if (pressed & (B_CROSS | B_START)) keys.push_back(SDL_SCANCODE_RETURN);
-        if (pressed & B_CIRCLE) keys.push_back(SDL_SCANCODE_ESCAPE);
+        if (pressed & B_UP) push_pad_key(keys, SDL_SCANCODE_UP);
+        if (pressed & B_DOWN) push_pad_key(keys, SDL_SCANCODE_DOWN);
+        if (pressed & B_LEFT) push_pad_key(keys, SDL_SCANCODE_LEFT);
+        if (pressed & B_RIGHT) push_pad_key(keys, SDL_SCANCODE_RIGHT);
+        if (pressed & (B_CROSS | B_START)) push_pad_key(keys, SDL_SCANCODE_RETURN);
+        if (pressed & B_CIRCLE) push_pad_key(keys, SDL_SCANCODE_ESCAPE);
 
         // controls device: entry 0 is the keyboard, entries 1.. are the connected controllers
         const size_t entries = 1 + g_devices.size();
         if (dev_index >= entries) dev_index = 0;
         const bool is_keyboard = dev_index == 0;
         bool gfx_changed = false;
+        auto open_page = [&](bool enh) {  // back to the main page lands on "Enhancements"
+            sel = enh ? 0 : (int)(std::find(kMainRows.begin(), kMainRows.end(), R_ENHANCE) - kMainRows.begin());
+            enh_page = enh;
+            status = "";
+        };
         for (auto k : keys) {
+            const std::vector<Row>& rows = enh_page ? kEnhRows : kMainRows;
+            const int count = (int)rows.size();
             int dir = k == SDL_SCANCODE_LEFT ? -1 : k == SDL_SCANCODE_RIGHT ? 1 : 0;
-            if (k == SDL_SCANCODE_UP) sel = (sel + R_COUNT - 1) % R_COUNT;
-            if (k == SDL_SCANCODE_DOWN) sel = (sel + 1) % R_COUNT;
-            if (k == SDL_SCANCODE_ESCAPE || k == SDL_SCANCODE_F1) open = false;
+            if (k == SDL_SCANCODE_UP) sel = (sel + count - 1) % count;
+            if (k == SDL_SCANCODE_DOWN) sel = (sel + 1) % count;
+            if (k == SDL_SCANCODE_F1) open = false;
+            if (k == SDL_SCANCODE_ESCAPE) {
+                if (enh_page) open_page(false);
+                else open = false;
+                continue;
+            }
             bool enter = k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER;
+            const Row row = rows[sel];
             if (dir || enter) {
                 int step = dir ? dir : 1;
-                switch (sel) {
+                switch (row) {
                     case R_RES: g_gfx.scale = (g_gfx.scale + step + 9) % 9; gfx_changed = true; break;
                     case R_AA: g_gfx.aa = (g_gfx.aa + step + 4) % 4; gfx_changed = true; break;
                     case R_RENDERER:  // saved; takes effect when the game is started again
@@ -1120,30 +1591,15 @@ static void run_settings_menu() {
                     case R_ASPECT: g_gfx.aspect = (Aspect)(((int)g_gfx.aspect + step + 4) % 4); gfx_changed = true; break;
                     case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
                     case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
-                    case R_FPS: {
-                        int n = (int)std::size(kFpsChoices), i = 0;
-                        while (i < n - 1 && kFpsChoices[i] != g_gfx.fps) i++;
-                        g_gfx.fps = kFpsChoices[(i + step + n) % n];
+                    case R_FPS:
+                    case R_SIM:
+                    case R_DRAWDIST:
+                    case R_PRECISE:
+                    case R_FONT:
+                    case R_MENU_SIZE:
+                        enh_change(row - R_FPS, step);
                         gfx_changed = true;
                         break;
-                    }
-                    case R_SIM: {  // 60 Hz simulation (sim60.cpp)
-                        static const int order[] = {1, 0, 2};  // level 1, off, all levels
-                        int i = 0;
-                        while (i < 2 && order[i] != g_sim60_setting) i++;
-                        g_sim60_setting = order[(i + step + 3) % 3];
-                        sim60_apply();
-                        gfx_changed = true;
-                        break;
-                    }
-                    case R_DRAWDIST: {  // takes effect at the next render (drawdist.cpp)
-                        int n = (int)std::size(kDrawDistChoices), i = 0;
-                        while (i < n - 1 && kDrawDistChoices[i] != g_draw_distance) i++;
-                        g_draw_distance = kDrawDistChoices[(i + step + n) % n];
-                        gfx_changed = true;
-                        break;
-                    }
-                    case R_PRECISE: g_gte_precise = !g_gte_precise; gfx_changed = true; break;  // gte.cpp
                     case R_CHAPTER:
                         if (dir && !chapters.empty()) chapter = (chapter + step + (int)chapters.size()) % (int)chapters.size();
                         break;
@@ -1156,27 +1612,30 @@ static void run_settings_menu() {
                 }
             }
             if (!enter) continue;
-            if (sel == R_BACK) {
+            if (row == R_BACK) {
                 open = false;
-            } else if (sel == R_SAVE) {
+            } else if (row == R_ENHANCE || row == R_ENH_BACK) {
+                open_page(row == R_ENHANCE);
+            } else if (row == R_SAVE) {
                 state_request_save(slot);  // taken at the next frame, once the menu closes
                 open = false;
-            } else if (sel == R_LOAD || sel == R_LOAD_AUTO) {
-                int s = sel == R_LOAD ? slot : kAutoSlot;
+            } else if (row == R_LOAD || row == R_LOAD_AUTO) {
+                int s = row == R_LOAD ? slot : kAutoSlot;
                 if (state_slot_exists(s)) {
                     state_request_load(s);
                     open = false;
                 } else {
                     status = "That slot is empty.";
                 }
-            } else if (sel == R_CHAPTER) {
+            } else if (row == R_CHAPTER) {
                 if (chapters.empty()) {
                     status = "Chapters appear as you reach checkpoints.";
-                } else {
+                } else if (pick_chapter(chapters, &chapter, &quit)) {
                     state_request_load(kChapterBase + chapter);
                     open = false;
                 }
-            } else if (sel == R_REMAP && is_keyboard) {
+                prev_pad = host_pad(0).buttons;
+            } else if (row == R_REMAP && is_keyboard) {
                 SDL_Scancode keys_new[16];
                 if (remap_keyboard(keys_new, &quit)) {
                     std::memcpy(g_keys, keys_new, sizeof g_keys);
@@ -1187,7 +1646,7 @@ static void run_settings_menu() {
                     status = "Cancelled, layout unchanged.";
                 }
                 prev_pad = host_pad(0).buttons;
-            } else if (sel == R_REMAP) {
+            } else if (row == R_REMAP) {
                 InputDevice dev = g_devices[dev_index - 1];
                 Layout lay;
                 if (remap_device(dev, &lay, &quit)) {
@@ -1198,7 +1657,7 @@ static void run_settings_menu() {
                     status = "Cancelled, layout unchanged.";
                 }
                 prev_pad = host_pad(0).buttons;
-            } else if (sel == R_RESET) {
+            } else if (row == R_RESET) {
                 if (is_keyboard) g_key_custom = false;
                 else g_layouts.erase(device_guid(g_devices[dev_index - 1]));
                 save_settings();
@@ -1221,37 +1680,48 @@ static void run_settings_menu() {
         std::string dev_line = is_keyboard ? std::string("Keyboard & mouse")
                                            : std::string(device_name(g_devices[dev_index - 1])).substr(0, 22);
         bool custom = is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 1])) > 0;
-        auto row = [](const char* label, const std::string& value) {
-            std::string s = label;
-            s.resize(16, ' ');
-            return s + "< " + value + " >";
-        };
+        auto choice = [](const char* label, const std::string& value) { return std::string(label) + "\t< " + value + " >"; };
         std::string slot_line = std::to_string(slot) + ": " + state_slot_label(slot);
-        draw_panel({"SETTINGS",
-                    row("Save state", slot_line),
-                    row("Load state", slot_line),
-                    row("Load auto-save", state_slot_label(kAutoSlot)),
-                    row("Chapter", chapters.empty() ? std::string("none yet") : chapters[chapter].substr(0, 26)),
-                    row("Renderer", std::string(g_gfx.vulkan ? "Vulkan" : "OpenGL") +
-                                        ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)")),
-                    row("Resolution", res),
-                    row("Anti-aliasing", kAaNames[g_gfx.aa]),
-                    row("AA rate (MSAA)", msaa_label()),
-                    row("Aspect ratio", kAspect[(int)g_gfx.aspect]),
-                    row("CRT filter", g_gfx.crt ? "On" : "Off"),
-                    row("Smooth textures", g_gfx.texture_filter ? "On" : "Off"),
-                    row("Frame rate", fps_label()),
-                    row("Simulation", sim60_label()),
-                    row("Draw distance", drawdist_label()),
-                    row("Precise 3D", g_gte_precise ? "On (no wobble)" : "Off (original)"),
-                    row("Controls", dev_line),
-                    std::string("Set up buttons") + (custom ? "  (custom)" : "  (default)"),
-                    "Reset buttons to default",
-                    "Back to game",
-                    status,
-                    "Arrows: change  Enter: pick  Esc: back",
-                    "F5/F9: save/load  Pad: SELECT+START"},
-                   1 + sel);
+        auto line = [&](Row r) -> std::string {
+            switch (r) {
+                case R_SAVE: return choice("Save state", slot_line);
+                case R_LOAD: return choice("Load state", slot_line);
+                case R_LOAD_AUTO: return choice("Load auto-save", state_slot_label(kAutoSlot));
+                case R_CHAPTER: return choice("Chapter", chapters.empty() ? std::string("none yet") : chapters[chapter].substr(0, 26));
+                case R_RENDERER:
+                    return choice("Renderer", std::string(g_gfx.vulkan ? "Vulkan" : "OpenGL") +
+                                                  ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)"));
+                case R_RES: return choice("Resolution", res);
+                case R_AA: return choice("Anti-aliasing", kAaNames[g_gfx.aa]);
+                case R_MSAA: return choice("AA rate (MSAA)", msaa_label());
+                case R_ASPECT: return choice("Aspect ratio", kAspect[(int)g_gfx.aspect]);
+                case R_CRT: return choice("CRT filter", g_gfx.crt ? "On" : "Off");
+                case R_FILTER: return choice("Smooth textures", g_gfx.texture_filter ? "On" : "Off");
+                case R_ENHANCE: return "Enhancements\t>";
+                case R_DEVICE: return choice("Controls", dev_line);
+                case R_REMAP: return std::string("Set up buttons\t") + (custom ? "(custom)" : "(default)");
+                case R_RESET: return "Reset buttons to default";
+                case R_BACK: return "Back to game";
+                case R_FPS:
+                case R_SIM:
+                case R_DRAWDIST:
+                case R_PRECISE:
+                case R_FONT:
+                case R_MENU_SIZE: return choice(enh_name(r - R_FPS), enh_value(r - R_FPS));
+                case R_ENH_BACK: return "Back";
+            }
+            return "";
+        };
+        std::vector<std::string> lines = {enh_page ? "ENHANCEMENTS" : "SETTINGS"};
+        for (Row r : enh_page ? kEnhRows : kMainRows) lines.push_back(line(r));
+        lines.push_back(status);
+        if (enh_page) {
+            lines.push_back("Beyond the original game. Also in the game's");
+            lines.push_back("own menu: Options -> Enhancements.");
+        }
+        lines.push_back("Arrows: change   Enter: pick   Esc: back");
+        if (!enh_page) lines.push_back("F2: chapters   F5/F9: save/load");
+        draw_panel(lines, 1 + sel);
         SDL_Delay(15);
     }
     if (quit) g_quit = true;
@@ -1260,6 +1730,13 @@ static void run_settings_menu() {
 }
 
 void host_throttle_frame() {
+    if (static const bool on = std::getenv("APOC_FRAME_TIMES") != nullptr; on) {  // debug: slow frames
+        static uint64_t last = 0;
+        const uint64_t now = SDL_GetTicksNS();
+        if (last && now - last > 25000000ull)
+            std::fprintf(stderr, "SLOW frame %llu: %.1f ms\n", (unsigned long long)g_frame, (double)(now - last) / 1e6);
+        last = now;
+    }
     bool multi = g_multi_present && !g_turbo && g_gl_ok;
     bool want_vsync = (multi ? g_present_vsync : g_vsync_pacing) && !g_turbo;
     if (want_vsync != g_vsync_active) {

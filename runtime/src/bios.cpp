@@ -560,7 +560,8 @@ void bios_take_interrupt(R3000* c) {
     if (irq_should_take(c)) sched_request_check(c);
 }
 
-void bios_vblank(R3000* c) {
+// The pads into their BIOS buffers (at VBlank, and again after the host waited for the display).
+void bios_pad_refresh(R3000* c) {
     if (g_pad_started) {
         for (int port = 0; port < 2; port++) {
             uint32_t buf = g_pad_buf[port];
@@ -577,6 +578,10 @@ void bios_vblank(R3000* c) {
             MEM_W32(c, g_pad_legacy_dest, ~(uint32_t)(p.buttons | (uint32_t)q.buttons << 16));
         }
     }
+}
+
+void bios_vblank(R3000* c) {
+    bios_pad_refresh(c);
     // Card I/O completes one frame after it was requested.
     size_t n = g_card_events.size();
     for (size_t i = 0; i < n; i++) {

@@ -22,6 +22,8 @@ void state_request_load(int slot);
 bool state_slot_exists(int slot);
 std::string state_slot_label(int slot);  // "empty" or the save time
 std::vector<std::string> state_chapter_names();  // "1: Cat1 (prsn)", ... in the order reached
+// The auto-save's level for menus ("Sewers"), or "" when it is not known.
+std::string state_autosave_level();
 
 // Auto-save triggers (see savestate.cpp).
 void state_note_level_start();

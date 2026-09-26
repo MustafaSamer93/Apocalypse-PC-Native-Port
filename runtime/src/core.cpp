@@ -3,6 +3,7 @@
 #include <csetjmp>
 #include <cstdarg>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <unordered_map>
 #include <vector>
@@ -89,10 +90,13 @@ void fatal(const char* fmt, ...) {
         // the whole RAM, for finding what led here (next to the log)
         std::error_code ec;
         std::filesystem::create_directories("debug", ec);
-        if (FILE* f = std::fopen("debug/crash_ram.bin", "wb")) {
+        char name[64];
+        const std::time_t now = std::time(nullptr);
+        std::strftime(name, sizeof name, "debug/crash_%Y%m%d_%H%M%S_ram.bin", std::localtime(&now));
+        if (FILE* f = std::fopen(name, "wb")) {
             std::fwrite(psx_ram, 1, PSX_RAM_SIZE, f);
             std::fclose(f);
-            std::fprintf(stderr, "  RAM saved to debug/crash_ram.bin\n");
+            std::fprintf(stderr, "  RAM saved to %s\n", name);
         }
     }
     trace_dump();
@@ -226,15 +230,44 @@ static void scanline_event(R3000* c) {
     bool vbl_end = g_scanline == 0;
     timers_scanline(c, vbl_start, vbl_end);
     spu_scanline();
+    // The picture goes to the screen when the game shows the frame it just drew: it waits for
+    // VBlank and then sets the display start (gpu.cpp g_display_flipped). Presented at the start
+    // of VBlank, before that, each frame reached the screen a refresh later. The host waits for
+    // the display there, and the controller is read after that wait, for the game's next frame.
+    // Without a new frame by the end of VBlank: a game drawing every frame (7 of the last 8) is
+    // late with this one, which is shown when it comes (or at the next VBlank); otherwise (30
+    // fps, loading) the picture is presented as it is.
+    static const bool at_vblank = std::getenv("APOC_PRESENT_AT_VBLANK") != nullptr;  // for A/B
+    static bool pending = false;
+    static uint32_t lines = 0;
+    static uint8_t flips = 0;  // one bit a frame: the game showed a new frame
+    auto present = [&] {
+        static uint64_t last_read = 0;
+        extern uint64_t g_input_read_ns;  // APOC_PROFILE: the read the frame was made from (present_vk.cpp)
+        g_input_read_ns = last_read;
+        pending = false;
+        host_present(gpu_display());
+        host_throttle_frame();
+        host_poll();
+        bios_pad_refresh(c);
+        last_read = SDL_GetTicksNS();
+        if (host_quit_requested()) std::exit(0);
+    };
     if (vbl_start) {
         irq_raise(c, IRQ_VBLANK);
         gpu_vblank();
         bios_vblank(c);
         spu_end_frame(c);
-        host_poll();
-        host_present(gpu_display());
-        host_throttle_frame();
-        if (host_quit_requested()) std::exit(0);
+        if (pending) present();  // no new frame all frame long
+        flips = (uint8_t)(flips << 1 | (g_display_flipped ? 1 : 0));
+        pending = true, lines = 0, g_display_flipped = false;
+        if (at_vblank) present();
+    } else if (pending) {
+        if (g_display_flipped) {
+            present();
+        } else if (++lines == SCANLINES_NTSC - VBLANK_START_LINE - 1 && __builtin_popcount(flips) < 7) {
+            present();
+        }
     }
     sched_next_period(c, Ev::Scanline, CYCLES_PER_SCANLINE_NTSC);
 }

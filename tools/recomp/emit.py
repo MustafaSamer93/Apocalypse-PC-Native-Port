@@ -30,10 +30,19 @@ def lbl(a: int) -> str:
 #   8002FF90 the level's tick: 60 Hz simulation prototype (sim60.cpp)
 #   800189EC the game records progress (level, restart point, health, weapons): auto-save
 #   8005F688 the player's update: every jump rises the full height (sim60.cpp)
+#   80063CC4 / 80063CF0 around the player's update in a tick: what the player itself changed
+#            (sim60.cpp: retimed) and what other objects did to it (kept)
+#   8003A288 / 8003A5CC / 8003A76C a force zone (currents, the chute) pushes the objects of a
+#            list: 60 Hz for the player (sim60.cpp)
 ENTRY_HOOKS = {
     0x8002FF90: "if (psx_hook_tick(c)) return;",
     0x800189EC: "psx_hook_progress(c);",
     0x8005F688: "psx_hook_player(c);",
+    0x80063CC4: "psx_hook_contacts(c, 0);",  # just before the player's update in a tick (sim60.cpp)
+    0x80063CF0: "psx_hook_contacts(c, 1);",  # just after it
+    0x8003A288: "psx_hook_zone(c);",  # a force zone pushes a list's objects (sim60.cpp)
+    0x8003A5CC: "psx_hook_zone(c);",
+    0x8003A76C: "psx_hook_zone(c);",
     0x8008632C: "psx_safepoint(c, 0x8008632Cu);",
     0x80030AD4: "psx_hook_level_start();",
     0x800307F0: "if (psx_hook_render(c)) return;",
@@ -47,6 +56,19 @@ ENTRY_HOOKS = {
     0x8001AA28: "if (psx_hook_2d_call(c, 0)) return;",  # text
     0x8006D028: "if (psx_hook_2d_call(c, 1)) return;",  # icons (button symbols, ...)
     0x8006D0D4: "if (psx_hook_2d_call(c, 2)) return;",
+    # the game's menus: size, and Options -> Enhancements (game_menu.cpp)
+    0x80015228: "psx_hook_menu_init(c);",
+    0x80015474: "psx_hook_menu_add(c);",
+    0x800152C4: "psx_hook_menu_free(c);",
+    0x80015BA4: "if (psx_hook_menu_update(c)) return;",
+    0x800156E0: "if (psx_hook_menu_draw(c)) return;",
+    0x80017364: "if (psx_hook_menu_keys(c)) return;",
+    0x800119C4: "if (psx_hook_menu_camera(c)) return;",  # once per front end loop (menus at 60 Hz)
+    # pickup voice lines: more of them, and one for Extra Life (game_menu.cpp)
+    0x8002FC64: "if (psx_hook_voice(c)) return;",
+    0x8005E260: "psx_hook_weapon_pickup(c);",  # cheats.cpp
+    0x8002FF34: "psx_hook_free(c);",  # debug: APOC_WEAPON_TRACE (cheats.cpp)
+    0x8001B788: "psx_hook_message(c);",
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.
@@ -57,6 +79,10 @@ OPTIONAL_CALLS = {
     0x80030BCC: "psx_opt_skip_frame_wait",
     0x80030B80: "psx_opt_sim60",
     0x80030BBC: "psx_opt_sim60",
+    0x800145BC: "psx_opt_menu60",  # the front end's (menus) second VBlank wait
+    # front end at 60 Hz, every other loop: no pad read, no controller / memory card check
+    0x80012F10: "psx_opt_menu_odd",
+    0x80012F18: "psx_opt_menu_odd",
 }
 
 

@@ -9,6 +9,7 @@
 
 #include "gl_api.h"
 #include "psx.h"
+#include "ui_text.h"
 
 namespace {
 
@@ -272,15 +273,13 @@ bool gl_present_init(SDL_Window* window) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
 
-    g_ov_surf = SDL_CreateSurface(640, 480, SDL_PIXELFORMAT_ARGB8888);
-    g_ov_ren = SDL_CreateSoftwareRenderer(g_ov_surf);
-    g_ov_tex = make_texture(640, 480, GL_LINEAR);
-    return g_ov_surf && g_ov_ren;
+    return true;
 }
 
 void gl_present_shutdown() {
-    if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren);
-    if (g_ov_surf) SDL_DestroySurface(g_ov_surf);
+    ui_text_reset(g_ov_ren);
+    if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren), g_ov_ren = nullptr;
+    if (g_ov_surf) SDL_DestroySurface(g_ov_surf), g_ov_surf = nullptr;
     if (g_ctx) SDL_GL_DestroyContext(g_ctx);
 }
 
@@ -320,6 +319,19 @@ void gl_present_redraw(const PresentOptions& o) {
 }
 
 SDL_Renderer* gl_present_overlay_begin() {
+    int ww, wh, ow, oh;
+    SDL_GetWindowSizeInPixels(g_win, &ww, &wh);
+    present_overlay_size(ww, wh, &ow, &oh);
+    if (!g_ov_surf || g_ov_surf->w != ow || g_ov_surf->h != oh) {  // (re)made at the window's size
+        ui_text_reset(g_ov_ren);
+        if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren);
+        if (g_ov_surf) SDL_DestroySurface(g_ov_surf);
+        if (g_ov_tex) glDeleteTextures(1, &g_ov_tex);
+        g_ov_surf = SDL_CreateSurface(ow, oh, SDL_PIXELFORMAT_ARGB8888);
+        g_ov_ren = SDL_CreateSoftwareRenderer(g_ov_surf);
+        g_ov_tex = make_texture(ow, oh, GL_LINEAR);
+    }
+    SDL_SetRenderScale(g_ov_ren, (float)oh / 480.0f, (float)oh / 480.0f);
     SDL_SetRenderDrawColor(g_ov_ren, 0, 0, 0, 0);
     SDL_SetRenderDrawBlendMode(g_ov_ren, SDL_BLENDMODE_NONE);
     SDL_RenderClear(g_ov_ren);
@@ -330,7 +342,7 @@ void gl_present_overlay_end() {
     SDL_RenderPresent(g_ov_ren);  // software renderer: flushes into the surface
     glBindTexture(GL_TEXTURE_2D, g_ov_tex);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, g_ov_surf->pitch / 4);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 640, 480, GL_BGRA, GL_UNSIGNED_BYTE, g_ov_surf->pixels);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_ov_surf->w, g_ov_surf->h, GL_BGRA, GL_UNSIGNED_BYTE, g_ov_surf->pixels);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     int ww, wh;
     SDL_GetWindowSizeInPixels(g_win, &ww, &wh);
@@ -339,6 +351,33 @@ void gl_present_overlay_end() {
     if (cw > (float)ww) { cw = (float)ww; ch = cw * 0.75f; }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport((GLint)(((float)ww - cw) * 0.5f), (GLint)(((float)wh - ch) * 0.5f), (GLsizei)cw, (GLsizei)ch);
+    glEnable(GL_BLEND);
+    glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+    glUseProgram(g_prog_overlay);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(glGetUniformLocation(g_prog_overlay, "u_tex"), 0);
+    draw_quad();
+    glDisable(GL_BLEND);
+}
+
+GLuint g_badge_tex = 0;
+int g_badge_w = 0, g_badge_h = 0;
+
+void gl_present_badge(const uint32_t* px, int w, int h, int margin, bool changed) {
+    if (!g_badge_tex || w != g_badge_w || h != g_badge_h) {
+        if (g_badge_tex) glDeleteTextures(1, &g_badge_tex);
+        g_badge_tex = make_texture(w, h, GL_LINEAR);
+        g_badge_w = w, g_badge_h = h;
+        changed = true;
+    }
+    glBindTexture(GL_TEXTURE_2D, g_badge_tex);
+    if (changed) {
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(margin, margin, w, h);  // (GL counts from the bottom)
     glEnable(GL_BLEND);
     glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);

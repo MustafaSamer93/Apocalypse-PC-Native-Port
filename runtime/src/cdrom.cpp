@@ -274,7 +274,8 @@ void command(R3000* c, uint8_t cmd) {
     std::vector<uint8_t> p = g_params;
     g_params.clear();
     g_busy = true;
-    LOG(Cd, "cmd %02X params=%zu", cmd, p.size());
+    LOG(Cd, "cmd %02X params=%zu [%02X %02X %02X] f=%llu", cmd, p.size(), p.size() > 0 ? p[0] : 0, p.size() > 1 ? p[1] : 0,
+        p.size() > 2 ? p[2] : 0, (unsigned long long)host_frame_count());
     auto stat = [&] { return std::vector<uint8_t>{g_stat}; };
     switch (cmd) {
         case 0x01: queue(c, 3, stat(), ACK); g_stat &= ~ST_SHELL; break;  // Getstat
@@ -422,7 +423,10 @@ void cdrom_read_event(R3000* c) {
     bool is_audio = (submode & 0x04) && (submode & 0x20);  // audio + form 2
     if ((g_mode & 0x40) && is_audio) {
         bool match = !(g_mode & 0x08) || (file == g_filter_file && chan == g_filter_chan);
-        if (match) xa_play_sector(raw);
+        if (match) {
+            subtitle_note_xa(lba, chan);
+            xa_play_sector(raw);
+        }
         return;  // real-time audio never reaches the data path
     }
     if ((g_mode & 0x08) && is_audio) return;
