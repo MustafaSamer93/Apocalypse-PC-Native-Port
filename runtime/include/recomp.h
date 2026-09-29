@@ -235,6 +235,7 @@ int psx_hook_tick(R3000* c);  // nonzero: the tick was handled (sim60.cpp)
 void psx_hook_player(R3000* c);  // entry of the player's update, a0 = player (sim60.cpp)
 void psx_hook_contacts(R3000* c, int after);  // just before (0) / after (1) the player's update in a tick (sim60.cpp)
 void psx_hook_zone(R3000* c);  // a force zone pushes a list, a0 = zone, a1 = list head (sim60.cpp)
+void psx_hook_glow_sort(R3000* c);  // glow renderer: v0 = ordering-table slot, a1 = depth, s4 = glow (sim60.cpp)
 // the game's menus (game_menu.cpp): add item, destroy, move selection, draw, read select/back
 void psx_hook_menu_init(R3000* c);
 void psx_hook_menu_add(R3000* c);

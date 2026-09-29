@@ -138,7 +138,17 @@ uint8_t g_vol[4] = {0x80, 0, 0x80, 0}, g_vol_pending[4] = {0x80, 0, 0x80, 0};
 // XA decoder history per channel
 int32_t g_xa_old[2] = {}, g_xa_older[2] = {};
 
-uint64_t sector_period() { return (g_mode & 0x80) ? PSX_CPU_HZ / 150 : PSX_CPU_HZ / 75; }
+// Data reads without XA audio run kFastData times faster than the drive: level section loads
+// froze the picture for 1-2 s. XA (voices, movie sound) keeps the real rate.
+constexpr uint64_t kFastData = 8;
+bool fast_data() {
+    static const bool real = std::getenv("APOC_CD_REAL") != nullptr;  // for A/B: the drive's own rate
+    return !real && !(g_mode & 0x40);
+}
+uint64_t sector_period() {
+    uint64_t p = (g_mode & 0x80) ? PSX_CPU_HZ / 150 : PSX_CPU_HZ / 75;
+    return fast_data() ? p / kFastData : p;
+}
 
 void schedule_next(R3000* c) {
     if (g_pending.empty()) {
@@ -411,6 +421,8 @@ void cdrom_read_event(R3000* c) {
     }
     if (!g_reading) return;
     sched_add(c, Ev::CdromRead, sector_period());
+    // a fast read waits for the game to take the previous sector instead of dropping it
+    if (fast_data() && (g_int_flag == 1 || (!g_pending.empty() && g_pending.back().irq == 1))) return;
     uint8_t raw[RAW];
     bool ok = read_raw(g_pos, raw);
     uint32_t lba = g_pos++;

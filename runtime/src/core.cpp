@@ -11,6 +11,7 @@
 #include <SDL3/SDL.h>
 
 #include "psx.h"
+#include "smooth.h"
 
 uint8_t psx_ram[PSX_RAM_SIZE];
 uint8_t psx_scratch[PSX_SCRATCH_SIZE];
@@ -214,6 +215,52 @@ constexpr uint32_t VBLANK_START_LINE = 240;
 uint64_t g_dump_ram_at = 0;
 std::string g_dump_ram_path;
 
+// Presenting (scanline_event): whether this refresh still waits for its picture, and the frame
+// shown early (core_frame_drawn) until the game flips to it.
+static bool g_pending = false, g_flip_seen = false, g_early_valid = false;
+static uint32_t g_lines = 0;
+static uint8_t g_flips = 0;  // one bit a frame: the game showed a new frame
+static GpuDisplay g_early{};
+static const bool g_at_vblank = std::getenv("APOC_PRESENT_AT_VBLANK") != nullptr;  // for A/B
+static const bool g_no_early = std::getenv("APOC_PRESENT_AT_FLIP") != nullptr;      // for A/B
+
+static void present_frame(R3000* c, const GpuDisplay& d) {
+    static uint64_t last_read = 0;
+    extern uint64_t g_input_read_ns;  // APOC_PROFILE: the read the frame was made from (present_vk.cpp)
+    g_input_read_ns = last_read;
+    g_pending = false;
+    host_present(d);
+    host_throttle_frame();
+    host_poll();
+    bios_pad_refresh(c);
+    last_read = SDL_GetTicksNS();
+    if (host_quit_requested()) std::exit(0);
+}
+
+// What the screen shows now: the frame shown early while the game has not flipped to it yet.
+static GpuDisplay shown_display() {
+    GpuDisplay d = gpu_display();
+    if (g_early_valid) d.x = g_early.x, d.y = g_early.y;
+    return d;
+}
+
+// gpu.cpp: the game drew a frame's ordering table (not in a ghost render). It goes to the screen
+// now, instead of a refresh later when the game flips to it: one frame less input lag. Only for
+// double-buffered frames the size of the display, one per refresh, and not with the smooth frame
+// rate (its extra images are timed from the game's flips). The 60 Hz simulation makes no extra
+// images: early there too (it was off at the automatic frame rate, a frame more input lag).
+void core_frame_drawn(R3000* c) {
+    GpuDisplay d;
+    if (g_no_early || g_at_vblank || !g_pending || host_multi_present() || (smooth_factor() >= 2 && !psx_opt_sim60) ||
+        !gpu_drawn_display(&d))
+        return;
+    const GpuDisplay now = gpu_display();
+    if (d.x == now.x && d.y == now.y) return;  // drawn where the screen is: shown as usual
+    g_early = d;
+    g_early_valid = true;
+    present_frame(c, d);
+}
+
 static void scanline_event(R3000* c) {
     if (g_dump_ram_at && c->cycles >= g_dump_ram_at) {
         g_dump_ram_at = 0;
@@ -230,43 +277,40 @@ static void scanline_event(R3000* c) {
     bool vbl_end = g_scanline == 0;
     timers_scanline(c, vbl_start, vbl_end);
     spu_scanline();
-    // The picture goes to the screen when the game shows the frame it just drew: it waits for
-    // VBlank and then sets the display start (gpu.cpp g_display_flipped). Presented at the start
-    // of VBlank, before that, each frame reached the screen a refresh later. The host waits for
-    // the display there, and the controller is read after that wait, for the game's next frame.
-    // Without a new frame by the end of VBlank: a game drawing every frame (7 of the last 8) is
-    // late with this one, which is shown when it comes (or at the next VBlank); otherwise (30
-    // fps, loading) the picture is presented as it is.
-    static const bool at_vblank = std::getenv("APOC_PRESENT_AT_VBLANK") != nullptr;  // for A/B
-    static bool pending = false;
-    static uint32_t lines = 0;
-    static uint8_t flips = 0;  // one bit a frame: the game showed a new frame
-    auto present = [&] {
-        static uint64_t last_read = 0;
-        extern uint64_t g_input_read_ns;  // APOC_PROFILE: the read the frame was made from (present_vk.cpp)
-        g_input_read_ns = last_read;
-        pending = false;
-        host_present(gpu_display());
-        host_throttle_frame();
-        host_poll();
-        bios_pad_refresh(c);
-        last_read = SDL_GetTicksNS();
-        if (host_quit_requested()) std::exit(0);
-    };
+    // One picture goes to the screen per refresh; the host waits for the display there, and the
+    // controller is read after that wait, for the game's next frame. Each frame is shown as soon
+    // as the game has drawn it (core_frame_drawn), a refresh before the game itself flips to it.
+    // Without that (movies, other screens), the picture goes at the game's flip (it waits for
+    // VBlank and then sets the display start, gpu.cpp g_display_flipped). Without a new frame by
+    // the end of VBlank: a game drawing every frame (7 of the last 8) is late with this one, which
+    // is shown when it comes (or at the next VBlank); otherwise (30 fps, loading) the picture is
+    // presented as it is.
     if (vbl_start) {
         irq_raise(c, IRQ_VBLANK);
         gpu_vblank();
         bios_vblank(c);
         spu_end_frame(c);
-        if (pending) present();  // no new frame all frame long
-        flips = (uint8_t)(flips << 1 | (g_display_flipped ? 1 : 0));
-        pending = true, lines = 0, g_display_flipped = false;
-        if (at_vblank) present();
-    } else if (pending) {
-        if (g_display_flipped) {
-            present();
-        } else if (++lines == SCANLINES_NTSC - VBLANK_START_LINE - 1 && __builtin_popcount(flips) < 7) {
-            present();
+        if (g_pending) present_frame(c, shown_display());  // no new frame all frame long
+        g_flips = (uint8_t)(g_flips << 1 | (g_display_flipped ? 1 : 0));
+        if (static const bool log = std::getenv("APOC_FLIP_LOG") != nullptr; log) {  // debug: game frames held
+            static int held = 0;
+            if (!g_display_flipped) held++;
+            else if (held) {
+                if (host_frame_count() > 100) log_msg(LogCat::Host, "no new game frame for %d refreshes (to frame %llu)", held, (unsigned long long)host_frame_count());
+                held = 0;
+            }
+        }
+        g_pending = true, g_lines = 0, g_display_flipped = false, g_flip_seen = false;
+        if (g_at_vblank) present_frame(c, gpu_display());
+    } else if (g_pending) {
+        if (g_display_flipped && !g_flip_seen) {
+            g_flip_seen = true;
+            const GpuDisplay d = gpu_display();
+            if (g_early_valid && d.x == g_early.x && d.y == g_early.y) g_early_valid = false;  // shown already
+            else present_frame(c, d);
+        } else if (!g_display_flipped && ++g_lines == SCANLINES_NTSC - VBLANK_START_LINE - 1 &&
+                   __builtin_popcount(g_flips) < 7) {
+            present_frame(c, shown_display());
         }
     }
     sched_next_period(c, Ev::Scanline, CYCLES_PER_SCANLINE_NTSC);

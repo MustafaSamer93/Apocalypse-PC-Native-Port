@@ -51,14 +51,23 @@ constexpr uint32_t kGpRepeat = 0x800FEEBC + 344, kUpdateCount = 0x800FF2F0;
 constexpr int kEnhSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_FPS, E_FPS_COUNTER, E_FONT_SCALE,
                                 E_AUTOSAVE, E_SUBTITLES};
 constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS};
+// The game's own options, for the pause menu (the front end has its own pages for them); ids
+// after the enhancement settings. Found in the front end (80011BA0) and 80016014 (options from
+// a save): the volumes are s16 at 800ECC78.., difficulty and vibration words.
+enum GameOpt { G_FX = 1000, G_MUSIC, G_VOICE, G_DIFFICULTY, G_VIBRATION };
+constexpr int kSoundSettings[] = {G_FX, G_MUSIC, G_VOICE};
+constexpr int kGameSettings[] = {G_DIFFICULTY, G_VIBRATION};
 struct Page {
     const char* label;
     const int* settings;
     int count;
+    bool pause_only;  // not in the front end's Options (it has its own)
 };
 constexpr Page g_pages[] = {
-    {"enhancements", kEnhSettings, (int)std::size(kEnhSettings)},
-    {"cheats", kCheatSettings, (int)std::size(kCheatSettings)},
+    {"sound", kSoundSettings, (int)std::size(kSoundSettings), true},
+    {"game", kGameSettings, (int)std::size(kGameSettings), true},
+    {"enhancements", kEnhSettings, (int)std::size(kEnhSettings), false},
+    {"cheats", kCheatSettings, (int)std::size(kCheatSettings), false},
 };
 constexpr int kPages = (int)std::size(g_pages);
 
@@ -88,9 +97,19 @@ constexpr uint32_t kMainMade = 0x80011F38;  // return address of the main menu's
 uint32_t g_main = 0, g_main_text = 0;
 bool g_main_drawn = false;
 
+// A theme song in the main menu (the original's is silent): one of the level songs (the table at
+// 800A5254, 24 bytes an entry, +8 its name: prison sewer plague death rooftops cemetary plague
+// warfact warboss backwall beast), loaded and played the way Options -> Sound's music test does
+// (80015F48 stops the song and loads NAME.VAB/.SEQ, 8006A428 plays it at the music level).
+// A level loads its own. APOC_MENU_SONG=N picks another (-1 = none).
+constexpr uint32_t kSongs = 0x800A5254, kSongLoad = 0x80015F48, kSongPlay = 0x8006A428,
+                   kSongStop = 0x8006A3F0;
+bool g_song_started = false;  // for this main menu
+
 // Load Game: the game lists the memory card saves in a menu and loads the one whose number is
 // selected, so the list is shown through a stand-in menu with "Auto Save" at the top; choosing a
-// card save selects it in the game's menu, choosing Auto Save loads saves/autosave.state.
+// card save selects it in the game's menu, choosing Auto Save loads the auto-save's record as a
+// card save (autoload_start).
 constexpr uint32_t kLoadMenuMade = 0x80014388;  // return address of the front end's init of that menu
 constexpr int kStrEmpty = 95;
 uint32_t g_load = 0, g_proxy = 0;  // the game's Load Game menu, and ours (with its texts after it)
@@ -132,10 +151,50 @@ uint32_t game_call(R3000* c, uint32_t fn, uint32_t a0 = 0, uint32_t a1 = 0, uint
     return v0;
 }
 
+// The game's options (GameOpt): address, step, largest value (the front end's own steps).
+struct GameOptInfo { const char* name; uint32_t addr; int step, max; bool word; };
+constexpr GameOptInfo kGameOpts[] = {
+    {"fx level", 0x800ECC7A, 1024, 16383, false},
+    {"music level", 0x800ECC78, 8, 127, false},
+    {"voice level", 0x800ECC7C, 16, 255, false},
+    {"difficulty", 0x800FF384, 1, 2, true},  // easy, normal, hard
+    {"vibration", 0x800FF2FC, 1, 2, true},   // none, some, full
+};
+constexpr uint32_t kSeqSetVol = 0x8008F56C, kGpSeq = 0x800FEEBC + 2032;  // music: (seq, left, right)
+
+int game_opt_get(R3000* c, const GameOptInfo& o) { return o.word ? (int32_t)MEM_R32(c, o.addr) : (int16_t)MEM_R16(c, o.addr); }
+
+std::string opt_name(int id) { return id >= G_FX ? kGameOpts[id - G_FX].name : enh_name(id); }
+
+std::string opt_value(R3000* c, int id) {
+    if (id < G_FX) return enh_value(id);
+    const GameOptInfo& o = kGameOpts[id - G_FX];
+    const int v = game_opt_get(c, o);
+    if (id == G_DIFFICULTY || id == G_VIBRATION) {
+        static const char* names[2][3] = {{"easy", "normal", "hard"}, {"none", "some", "full"}};
+        return names[id == G_VIBRATION][std::clamp(v, 0, 2)];
+    }
+    return std::to_string((v * 100 + o.max / 2) / o.max) + "%";
+}
+
+void opt_change(R3000* c, int id, int dir) {
+    if (id < G_FX) return enh_change(id, dir);
+    const GameOptInfo& o = kGameOpts[id - G_FX];
+    int v = game_opt_get(c, o) + dir * o.step;
+    if (o.word) v = (v + o.max + 1) % (o.max + 1);  // choices go round
+    else v = std::clamp(v, 0, o.max);
+    if (o.word) MEM_W32(c, o.addr, (uint32_t)v);
+    else MEM_W16(c, o.addr, (uint16_t)v);
+    // the music's volume is set on the playing sequence (the front end's 8006A428 would also
+    // restart a paused one); the other volumes are read when a sound starts
+    const int seq = (int16_t)MEM_R16(c, kGpSeq);
+    if (id == G_MUSIC && seq >= 0 && seq < 32) game_call(c, kSeqSetVol, (uint32_t)seq, (uint32_t)v, (uint32_t)v);
+}
+
 // A page's item texts: "setting  value", in characters the game's font has.
 void refresh_texts(R3000* c, uint32_t block, const Page& p) {
     for (int i = 0; i < p.count; i++) {
-        std::string s = std::string(enh_name(p.settings[i])) + "  " + enh_value(p.settings[i]);
+        std::string s = opt_name(p.settings[i]) + "  " + opt_value(c, p.settings[i]);
         s.erase(std::remove_if(s.begin(), s.end(), [](char ch) { return ch == '(' || ch == ')'; }), s.end());
         std::replace(s.begin(), s.end(), ':', 'x');  // the font has no ':' ("16:9" -> "16x9")
         for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
@@ -314,6 +373,7 @@ extern "C" void psx_hook_menu_add(R3000* c) {
     } guard;
     if (c->r[31] == kMainMade) {
         g_main = menu;
+        g_song_started = false;
         if (!g_main_text) g_main_text = game_call(c, kAlloc, 16);
         if (g_main_text) write_text(c, g_main_text, "exit to desktop", 16);
         return;
@@ -336,21 +396,27 @@ extern "C" void psx_hook_menu_add(R3000* c) {
     g_opt = Host{};
     g_opt.menu = menu;
     for (int i = 0; i < kPages; i++) {
+        if (g_pages[i].pause_only) continue;
         g_opt.pages[i] = build_page(c, menu, g_pages[i]);
         if (g_opt.pages[i]) game_call(c, kMenuAdd, menu, page_label(g_opt.pages[i], g_pages[i]));
     }
 }
 
 // 800152C4 menu destructor: our blocks go with the Options, pause, main and Load Game menus.
+void host_toast(const std::string& text);
+void autoload_end(R3000* c);  // (below)
+
 extern "C" void psx_hook_menu_free(R3000* c) {
     if (core_in_ghost()) return;
     const uint32_t menu = c->r[4];
     if (g_load && menu == g_load) {
+        autoload_end(c);
         if (g_proxy) game_call(c, kFree, g_proxy);
         g_load = g_proxy = 0;
         return;
     }
     if (g_main && menu == g_main) {
+        if (g_song_started) game_call(c, kSongStop);  // (else it plays on over the intro movie)
         if (g_main_text) game_call(c, kFree, g_main_text);
         g_main = g_main_text = 0;
         return;
@@ -413,6 +479,15 @@ extern "C" int psx_hook_menu_draw(R3000* c) {
     }
     if (g_main && menu == g_main) {
         if (!ghost) g_main_drawn = true;
+        if (!ghost && !g_song_started) {
+            g_song_started = true;
+            static const char* e = std::getenv("APOC_MENU_SONG");
+            const int song = e ? std::atoi(e) : 0;
+            if (song >= 0 && song <= 10) {
+                game_call(c, kSongLoad, MEM_R32(c, kSongs + 24 * (uint32_t)song + 8));
+                game_call(c, kSongPlay);
+            }
+        }
         if (g_main_text) append_item(c, menu, g_main_text);
     }
     if (g_pause.menu && menu == g_pause.menu && g_pause_block) append_item(c, menu, pause_text(kPauseExit));
@@ -458,7 +533,7 @@ void host_keys(R3000* c, Host& h, uint32_t p_select, uint32_t p_back, uint16_t p
         int dir = select ? 1 : 0;
         if (pressed & kPadLeft) dir = -1;
         if (pressed & kPadRight) dir = 1;
-        if (dir) enh_change(p.settings[sel], dir);
+        if (dir) opt_change(c, p.settings[sel], dir);
         return;
     }
     if (h.in_list) {
@@ -489,6 +564,42 @@ void host_keys(R3000* c, Host& h, uint32_t p_select, uint32_t p_back, uint16_t p
 
 }  // namespace
 
+// Load Game -> Auto Save: the game loads it as it loads a card save. The game's menu has card
+// save 1 selected, and for this one load the game's copy of the card file (0x800A493C: 512 bytes
+// of header, then one 136-byte record per save) holds the auto-save's record there, and that item
+// reads as not empty. Both are put back once the game has copied the record (autoload_end: when
+// the menu goes, else at the next frame); the memory card itself is never written.
+constexpr uint32_t kCardCopy = 0x800A493C + 512;
+struct Autoload {
+    bool active = false;
+    uint32_t menu = 0, text = 0;
+    uint8_t record[kSaveRecordSize];
+} g_autoload;
+
+void autoload_end(R3000* c) {
+    if (!g_autoload.active) return;
+    g_autoload.active = false;
+    for (uint32_t i = 0; i < kSaveRecordSize; i++) MEM_W8(c, kCardCopy + i, g_autoload.record[i]);
+    if (g_load && g_load == g_autoload.menu) MEM_W32(c, item(g_load, 0), g_autoload.text);
+}
+
+bool autoload_start(R3000* c) {
+    uint8_t r[kSaveRecordSize];
+    if (!g_load || MEM_R8(c, g_load + 10) == 0 || !state_read_autosave(r)) return false;
+    autoload_end(c);
+    g_autoload.active = true;
+    g_autoload.menu = g_load;
+    g_autoload.text = MEM_R32(c, item(g_load, 0));
+    for (uint32_t i = 0; i < kSaveRecordSize; i++) {
+        g_autoload.record[i] = (uint8_t)MEM_R8(c, kCardCopy + i);
+        MEM_W8(c, kCardCopy + i, r[i]);
+    }
+    MEM_W8(c, g_load + 6, 0);
+    MEM_W32(c, item(g_load, 0), g_proxy + 444);  // "auto save  Sewers"
+    host_toast("Auto-save loaded");
+    return true;
+}
+
 // 80017364 menu_keys(&select, &back, &any, &x): the game's menus read their keys; ours are
 // handled here after them.
 extern "C" int psx_hook_menu_keys(R3000* c) {
@@ -506,10 +617,8 @@ extern "C" int psx_hook_menu_keys(R3000* c) {
     // Load Game: Auto Save is ours to load; a card save is already selected in the game's menu
     const bool load_shown = g_load_drawn;
     g_load_drawn = false;
-    if (load_shown && g_proxy && MEM_R32(c, p_select) && MEM_R8(c, g_proxy + 6) == 0) {
+    if (load_shown && g_proxy && MEM_R32(c, p_select) && MEM_R8(c, g_proxy + 6) == 0 && !autoload_start(c))
         MEM_W32(c, p_select, 0);
-        if (state_slot_exists(kAutoSlot)) state_request_load(kAutoSlot);
-    }
     const bool main_shown = g_main_drawn;
     g_main_drawn = false;
     if (main_shown && g_main && g_main_text && MEM_R32(c, p_select) && selected_is(c, g_main, g_main_text))
@@ -557,41 +666,108 @@ void game_message(R3000* c, const char* text) {
 }
 
 // Subtitles (subtitles.cpp): a message of our own on a random side of the screen, tilted, for the
-// clip's length. Only the previous subtitle is replaced; pickups and "Auto Saved" stay.
-uint32_t g_subtitle = 0;  // its text and keyframes in the game's heap (made again after level starts)
+// clip's length. Only the previous subtitle is replaced; pickups and "Auto Saved" stay. A long
+// line is split in two (two messages, one under the other along the tilt) so it stays readable.
+uint32_t g_subtitle[2] = {};  // their text and keyframes in the game's heap (made again after level starts)
 float g_subtitle_tilt = 0;  // radians, clockwise (gpu.cpp turns the text's packets)
+// The subtitle on screen: where its lines are and when its clip ends (host frames), to show it
+// again when the game clears the messages (a pickup clears them all before showing its own).
+struct {
+    int n = 0, scale = 0, x[2] = {}, y[2] = {};
+    uint64_t end = 0;
+} g_sub;
+constexpr uint32_t kMsgList = 0x800FEEBC + 752, kMsgShow = 0x8001B788, kSubText = 96;
+// Messages move on once per world update, 30 times a second at either simulation rate.
+constexpr int kMsgRate = 30, kSubIn = 6, kSubOut = 8;
+
+bool subtitle_listed(R3000* c) {
+    for (uint32_t n = MEM_R32(c, kMsgList), i = 0; n && i < 64; n = MEM_R32(c, n + 12), i++)
+        if (g_subtitle[0] && MEM_R32(c, n) == g_subtitle[0]) return true;
+    return false;
+}
+
+// Shows the subtitle's lines for `frames` message frames in all: popping in (unless it is shown
+// again), staying, and shrinking away as the clip ends.
+void subtitle_show(R3000* c, int frames, bool pop_in) {
+    for (int i = 0; i < g_sub.n; i++) {
+        const uint32_t k = g_subtitle[i] + kSubText;
+        const int in = pop_in ? kSubIn : 0;
+        const int hold = std::max(1, frames - in - kSubOut);
+        if (in) write_keyframe(c, k, in, 0, g_sub.scale, g_sub.x[i], g_sub.y[i], 1);
+        write_keyframe(c, k + 28, hold, g_sub.scale, g_sub.scale, g_sub.x[i], g_sub.y[i], 1);
+        write_keyframe(c, k + 56, kSubOut, g_sub.scale, 0, g_sub.x[i], g_sub.y[i], 0);
+        game_call(c, kMsgShow, g_subtitle[i], in ? k : k + 28);
+    }
+}
 
 void game_subtitle(R3000* c, const char* text, float seconds) {
-    constexpr uint32_t kList = 0x800FEEBC + 752, kRemove = 0x8001B694, kShow = 0x8001B788;
+    constexpr uint32_t kList = 0x800FEEBC + 752, kRemove = 0x8001B694;
     constexpr uint32_t kSetScale = 0x8001A7BC, kWidth = 0x8001A97C, kText = 96;
     constexpr float kTiltDegrees = 30.0f;
-    if (!g_subtitle) g_subtitle = game_call(c, kAlloc, kText + 4 * 28);
-    if (!g_subtitle) return;
-    for (uint32_t n = MEM_R32(c, kList); n; n = MEM_R32(c, n + 12))  // the last subtitle goes
-        if (MEM_R32(c, n) == g_subtitle) {
-            game_call(c, kRemove, n);
-            break;
-        }
+    constexpr int kMaxWidth = 190, kBig = 224, kOneLine = 200;  // one line only if it fits at 200
+    constexpr float kLineHeight = 16.0f;  // lines apart at scale 256
+    for (uint32_t& m : g_subtitle) {
+        if (!m) m = game_call(c, kAlloc, kText + 4 * 28);
+        if (!m) return;
+    }
+    for (uint32_t n = MEM_R32(c, kList); n;) {  // the last subtitle goes
+        const uint32_t next = MEM_R32(c, n + 12);
+        if (MEM_R32(c, n) == g_subtitle[0] || MEM_R32(c, n) == g_subtitle[1]) game_call(c, kRemove, n);
+        n = next;
+    }
     std::string s;  // in characters the game's font has
     for (const char* p = text; *p; p++)
         if (std::isalnum((unsigned char)*p) || std::strchr(" !%+-.'", *p)) s += *p;
-    write_text(c, g_subtitle, s, kText);
-    // as big as a pickup, smaller when the line is long: at most 190 wide
     game_call(c, kSetScale, 256);
-    const int width = std::max(1, (int)game_call(c, kWidth, g_subtitle));
-    const int scale = std::min(224, 256 * 190 / width);
+    auto width_of = [&](const std::string& t) {
+        write_text(c, g_subtitle[0], t, kText);
+        return std::max(1, (int)game_call(c, kWidth, g_subtitle[0]));
+    };
+    // as big as a pickup, smaller when the line is long: at most 190 wide
+    std::string lines[2] = {s, ""};
+    int width = width_of(s);
+    if (256 * kMaxWidth / width < kOneLine) {  // too long: split at the space nearest the middle
+        size_t best = std::string::npos;
+        for (size_t i = s.find(' '); i != std::string::npos; i = s.find(' ', i + 1))
+            if (best == std::string::npos || std::abs((int)i * 2 - (int)s.size()) < std::abs((int)best * 2 - (int)s.size()))
+                best = i;
+        if (best != std::string::npos) {
+            lines[0] = s.substr(0, best);
+            lines[1] = s.substr(best + 1);
+            width = std::max(width_of(lines[0]), width_of(lines[1]));
+        }
+    }
+    const int scale = std::min(kBig, 256 * kMaxWidth / width);
     static const bool seeded = (std::srand((unsigned)std::time(nullptr)), true);
     (void)seeded;
     const bool left = std::rand() & 1;
     const int x = left ? 124 : 388, y = 150;
     // leaning up towards the middle of the screen
     g_subtitle_tilt = (left ? -kTiltDegrees : kTiltDegrees) * 3.14159265f / 180.0f;
-    const int fps = psx_opt_sim60 ? 60 : 30;  // the messages move on with the game's loop
-    const uint32_t k = g_subtitle + kText;
-    write_keyframe(c, k, 6, 0, scale, x, y, 1);
-    write_keyframe(c, k + 28, std::max(1, (int)(seconds * (float)fps)), scale, scale, x, y, 1);
-    write_keyframe(c, k + 56, 8, scale, 0, x, y, 0);
-    game_call(c, kShow, g_subtitle, k);
+    const int n = lines[1].empty() ? 1 : 2;
+    g_sub.n = n;
+    g_sub.scale = scale;
+    for (int i = 0; i < n; i++) {
+        // each line is turned around its own centre: the centres sit on the turned vertical
+        // (a screen pixel is 0.625 lines wide, gpu.cpp)
+        const float d = ((float)i - (float)(n - 1) / 2.0f) * kLineHeight * (float)scale / 256.0f;
+        g_sub.x[i] = x - (int)std::lround(d * std::sin(g_subtitle_tilt) / 0.625f);
+        g_sub.y[i] = y + (int)std::lround(d * std::cos(g_subtitle_tilt));
+        write_text(c, g_subtitle[i], lines[i], kText);
+    }
+    // on screen exactly as long as the clip plays, popping in and shrinking away included
+    const int frames = std::max(kSubIn + kSubOut + 1, (int)std::lround(seconds * (float)kMsgRate));
+    g_sub.end = host_frame_count() + (uint64_t)frames * 60 / kMsgRate;
+    subtitle_show(c, frames, true);
+}
+
+// Once per frame (subtitles.cpp): a subtitle the game cleared while its clip still plays (a
+// pickup clears every message first) is shown again for the rest of the clip.
+void game_subtitle_keep(R3000* c) {
+    const uint64_t now = host_frame_count();
+    if (!g_sub.n || !g_subtitle[0] || now + 60 / kMsgRate * (kSubOut + 2) >= g_sub.end) return;
+    if (subtitle_listed(c)) return;
+    subtitle_show(c, (int)((g_sub.end - now) * kMsgRate / 60), false);
 }
 
 // Pickup voice lines (8002FC64(block, channel, where, 1)): the game's own choice for health and
@@ -623,6 +799,10 @@ extern "C" int psx_hook_voice(R3000* c) {
     if (cheat_quiet()) return 1;  // a weapon the cheat gives says nothing
     bool pickup = g_voice_ours;
     for (uint32_t a : kPickupCalls) pickup |= c->r[31] == a;
+    LOG(Host, "voice %u/%u ra=%08X pickup=%d ready=%u busy=%u ff700=%u ff250=%u tbl=%u f=%llu", c->r[4], c->r[5],
+        c->r[31], pickup, MEM_R32(c, kVoiceReady), MEM_R32(c, kVoiceBusy), MEM_R32(c, 0x800FF700),
+        MEM_R32(c, 0x800FF250), MEM_R8(c, 0x800EAD38 + 16 * MEM_R32(c, 0x800FF79C) + 13),
+        (unsigned long long)host_frame_count());
     if (pickup && !voice_free(c)) {
         g_queued = {{c->r[4], c->r[5], c->r[6], c->r[7]}, host_frame_count(), true};
         return 1;
@@ -632,6 +812,7 @@ extern "C" int psx_hook_voice(R3000* c) {
 
 // Once per frame (savestate.cpp): a queued pickup line starts when the voice is free.
 void game_voice_poll(R3000* c) {
+    autoload_end(c);  // (the game copied the auto-save's record in the frame it was chosen)
     if (!g_queued.pending) return;
     if (host_frame_count() - g_queued.frame > kQueueFrames || !MEM_R32(c, kPlayer)) {
         g_queued.pending = false;
@@ -667,13 +848,71 @@ void game_test_pickup(R3000* c, int what) {
     else game_call(c, 0x8005E260, player, (uint32_t)what);
 }
 
-float subtitle_tilt(uint32_t text) { return g_subtitle && text == g_subtitle ? g_subtitle_tilt : 0.0f; }
+// Debug (APOC_TEST_HEALTH, savestate.cpp): a health pickup's effect, 8005CE70(player, amount).
+void game_test_health(R3000* c, int amount) {
+    const uint32_t player = MEM_R32(c, kPlayer);
+    if (player) game_call(c, 0x8005CE70, player, (uint32_t)amount);
+}
+
+// Debug (APOC_TEST_GRAB): moves the player onto the next health pickup (type 14-16) in the
+// pickup list 0x800FF204, so the game's own touch picks it up.
+void game_test_grab(R3000* c) {
+    const uint32_t player = MEM_R32(c, kPlayer);
+    static uint32_t done[64];  // object address + type (addresses are used again)
+    static int ndone = 0;
+    if (!player) return;
+    for (uint32_t o = MEM_R32(c, 0x800FF204), n = 0; o && n < 500; o = MEM_R32(c, o + 0x1C), n++) {
+        const int type = (int)MEM_R16(c, o + 58);
+        bool seen = false;
+        for (int i = 0; i < ndone; i++) seen |= done[i] == (o ^ (uint32_t)type << 24);
+        LOG(Host, "pickup obj %08X type %d pos %d %d %d%s", o, type, (int)MEM_R32(c, o + 4) >> 12,
+            (int)MEM_R32(c, o + 8) >> 12, (int)MEM_R32(c, o + 12) >> 12, seen ? " (done)" : "");
+        static const int any = std::getenv("APOC_TEST_GRAB_ANY") != nullptr;  // any pickup, not only health
+        if (seen || (!any && (type < 14 || type > 16)) || ndone >= 64) continue;
+        done[ndone++] = o ^ (uint32_t)type << 24;
+        for (int k = 0; k < 3; k++) MEM_W32(c, player + 4 + 4 * k, MEM_R32(c, o + 4 + 4 * k));
+        LOG(Host, "grab health type %d at frame %llu", type, (unsigned long long)host_frame_count());
+        return;
+    }
+}
+
+// Debug (APOC_TEST_SPAWN=FRAME:PERIOD:T1,T2,..., savestate.cpp): drops a pickup of each type in
+// turn at the player's feet with the game's own spawner (80020EF8, as an enemy's drop does), so
+// the game's touch picks it up.
+void game_test_spawn(R3000* c, int type) {
+    const uint32_t player = MEM_R32(c, kPlayer);
+    if (!player) return;
+    const uint32_t o = game_call(c, 0x80020EF8, (uint32_t)type, player + 4, 4, 240, {0x800A71CC});
+    LOG(Host, "spawn pickup type %d obj %08X at frame %llu", type, o, (unsigned long long)host_frame_count());
+}
+// Every frame: logs when a pickup object leaves the pickup list (collected or gone).
+void game_test_spawn_poll(R3000* c) {
+    static std::vector<std::pair<uint32_t, int>> known;
+    std::vector<std::pair<uint32_t, int>> now;
+    for (uint32_t o = MEM_R32(c, 0x800FF204), n = 0; o && n < 500; o = MEM_R32(c, o + 0x1C), n++)
+        now.push_back({o, (int)MEM_R16(c, o + 58)});
+    for (auto& k : known)
+        if (std::find(now.begin(), now.end(), k) == now.end())
+            LOG(Host, "pickup obj %08X type %d gone at frame %llu", k.first, k.second, (unsigned long long)host_frame_count());
+    known = now;
+    // and when a subtitle comes and goes (its time on screen against the clip's length)
+    static bool was_shown = false;
+    const bool shown = subtitle_listed(c);
+    if (shown != was_shown)
+        LOG(Host, "subtitle %s at frame %llu", shown ? "shown" : "gone", (unsigned long long)host_frame_count());
+    was_shown = shown;
+}
+
+float subtitle_tilt(uint32_t text) {
+    return text && (text == g_subtitle[0] || text == g_subtitle[1]) ? g_subtitle_tilt : 0.0f;
+}
 
 // A saved state was loaded or a level starts: our menus close (the game's memory may hold
 // another screen), and the message block is made again when next needed. A loaded state has
 // another heap: the menus and our blocks in it are forgotten (not freed).
 void game_menu_reset(bool state_loaded) {
-    g_message = g_subtitle = 0;  // (the heap they were in is gone)
+    g_message = g_subtitle[0] = g_subtitle[1] = 0;  // (the heap they were in is gone)
+    g_sub.n = 0;
     g_queued.pending = false;
     if (state_loaded) {
         g_opt = g_pause = Host{};

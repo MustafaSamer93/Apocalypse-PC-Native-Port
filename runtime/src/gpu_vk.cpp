@@ -320,12 +320,21 @@ bool vk_hw_init(int scale) {
         return false;
     }
     vkc::register_texture(&g_read);
-    // MSAA: lower the sample count if the GPU offers fewer or it would exceed 512 MB
+    // MSAA: lower the sample count if the GPU offers fewer or the image would take more than a
+    // quarter of its video memory (at least 512 MB: integrated GPUs report little of their own)
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(vkc::gpu, &props);
     const VkSampleCountFlags supported = props.limits.framebufferColorSampleCounts;
+    VkPhysicalDeviceMemoryProperties mem;
+    vkGetPhysicalDeviceMemoryProperties(vkc::gpu, &mem);
+    VkDeviceSize vram = 0;
+    for (uint32_t i = 0; i < mem.memoryHeapCount; i++)
+        if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max(vram, mem.memoryHeaps[i].size);
+    const uint64_t budget = std::max<uint64_t>(512ull << 20, vram / 4);
+    log_msg(LogCat::Gpu, "Vulkan: %llu MB video memory, MSAA image up to %llu MB", (unsigned long long)(vram >> 20),
+            (unsigned long long)(budget >> 20));
     int n = g_samples_wanted;
-    while (n > 1 && (!(supported & (VkSampleCountFlags)n) || (uint64_t)W * H * 4 * (uint64_t)n > (512ull << 20))) n /= 2;
+    while (n > 1 && (!(supported & (VkSampleCountFlags)n) || (uint64_t)W * H * 4 * (uint64_t)n > budget)) n /= 2;
     const VkImageUsageFlags draw_usage =
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     while (!vkc::create_image(g_draw, W, H, VK_FORMAT_R8G8B8A8_UNORM, draw_usage, (VkSampleCountFlagBits)n)) {
@@ -521,30 +530,32 @@ void vk_hw_readback(int x, int y, int w, int h, uint16_t* vram) {
     g_prof.read_px += (uint64_t)w * h;
     sync_read();
     vkc::end_rendering();
+    // The GPU shrinks the area to native size first (one pixel of each S x S block), so only that
+    // is copied out and read: the staging memory is slow for the CPU to read, and reading all of
+    // VRAM at 8x from it took 55 ms (saving a state froze the game for 5 frames).
     vkc::transition(g_read, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    // in bands of rows that fit the staging buffer (all of VRAM at 8x is 128 MB, the buffer 32 MB:
-    // saving a state on Vulkan at high resolutions crashed)
-    const VkDeviceSize row_bytes = (VkDeviceSize)w * S * S * 4;
-    const int band = (int)std::max<VkDeviceSize>(1, vkc::stage_limit() / row_bytes);
-    for (int y0 = 0; y0 < h; y0 += band) {
-        const int bh = std::min(band, h - y0);
-        vkc::Staging st = vkc::stage(row_bytes * bh);
-        VkBufferImageCopy bic{};
-        bic.bufferOffset = st.offset;
-        bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        bic.imageOffset = {x * S, (y + y0) * S, 0};
-        bic.imageExtent = {(uint32_t)(w * S), (uint32_t)(bh * S), 1};
-        vkCmdCopyImageToBuffer(cb(), g_read.image, g_read.layout, st.buffer, 1, &bic);
-        vkc::submit_wait();
-        const uint32_t* px = (const uint32_t*)st.ptr;
-        for (int j = 0; j < bh; j++) {
-            for (int i = 0; i < w; i++) {
-                uint32_t c = px[(size_t)j * S * w * S + (size_t)i * S];
-                auto q = [](uint32_t v) { return (uint16_t)((v * 31 + 127) / 255); };
-                uint16_t p = (uint16_t)(q(c & 0xFF) | q((c >> 8) & 0xFF) << 5 | q((c >> 16) & 0xFF) << 10 |
-                                        ((c >> 24) > 127 ? 0x8000 : 0));
-                vram[(y + y0 + j) * 1024 + x + i] = p;
-            }
+    vkc::transition(g_stage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageSubresourceLayers sub{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    VkImageBlit blit{sub, {{x * S, y * S, 0}, {(x + w) * S, (y + h) * S, 1}}, sub, {{x, y, 0}, {x + w, y + h, 1}}};
+    vkCmdBlitImage(cb(), g_read.image, g_read.layout, g_stage.image, g_stage.layout, 1, &blit, VK_FILTER_NEAREST);
+    vkc::transition(g_stage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    const VkDeviceSize bytes = (VkDeviceSize)w * h * 4;
+    vkc::Staging st = vkc::stage(bytes);
+    VkBufferImageCopy bic{};
+    bic.bufferOffset = st.offset;
+    bic.imageSubresource = sub;
+    bic.imageOffset = {x, y, 0};
+    bic.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+    vkCmdCopyImageToBuffer(cb(), g_stage.image, g_stage.layout, st.buffer, 1, &bic);
+    vkc::submit_wait();
+    std::vector<uint32_t> px((size_t)w * h);
+    std::memcpy(px.data(), st.ptr, (size_t)bytes);  // one sequential read
+    auto q = [](uint32_t v) { return (uint16_t)((v * 31 + 127) / 255); };
+    for (int j = 0; j < h; j++) {
+        for (int i = 0; i < w; i++) {
+            const uint32_t c = px[(size_t)j * w + i];
+            vram[(y + j) * 1024 + x + i] = (uint16_t)(q(c & 0xFF) | q((c >> 8) & 0xFF) << 5 | q((c >> 16) & 0xFF) << 10 |
+                                                      ((c >> 24) > 127 ? 0x8000 : 0));
         }
     }
 }

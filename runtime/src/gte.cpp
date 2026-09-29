@@ -44,6 +44,7 @@ constexpr int64_t kSegNear = 512;  // largest distance (sum of |dx|, |dy|, |dz|)
 std::vector<BlendSeg> g_blend_segs;  // recorded
 bool g_tr_loaded = true;             // the translation was loaded since the current segment began
 const BlendSeg* g_seg_rec = nullptr;  // blend pass: the recorded segment paired with the current one
+bool g_seg_near = false;               // blend pass: paired by a nearby translation, not the same one
 uint32_t g_seg_next = 0;              // blend pass: the first recorded segment not paired yet
 uint32_t g_seg_misses = 0;            // blend pass: segments in a row left unpaired
 uint32_t g_seg_vi = 0, g_seg_ci = 0;  // blend pass: vertices and colours so far in the current segment
@@ -342,8 +343,10 @@ void blend_segment() {
             if (g_blend_segs[j].ra == ra && dist(g_blend_segs[j]) <= near) return &g_blend_segs[j];
         return nullptr;
     };
+    g_seg_near = false;
     if (!zero) g_seg_rec = find(kSegLookAhead, 0);
-    if (!g_seg_rec) g_seg_rec = find(4, zero ? 0 : kSegNear);
+    if (!g_seg_rec && !zero && (g_seg_rec = find(4, kSegNear))) g_seg_near = true;
+    if (!g_seg_rec) g_seg_rec = find(4, 0);
     if (!g_seg_rec && g_seg_misses >= 3) g_seg_rec = find(kSegLookAhead, 0);
     g_seg_misses = g_seg_rec ? 0 : g_seg_misses + 1;
     if (g_seg_rec) g_seg_next = (uint32_t)(g_seg_rec - g_blend_segs.data()) + 1;
@@ -542,7 +545,11 @@ void rtp(int n, const Cmd& c, bool last) {
         const uint32_t i = g_seg_rec ? g_seg_rec->v0 + g_seg_vi++ : 0;
         const GteBlendVtx* r = g_seg_rec && i < g_seg_rec->v1 ? &g_blend_vtx[i] : nullptr;
         int ox = r ? lo16(r->sxy) : 0, oy = r ? hi16(r->sxy) : 0, nx = lo16(D(14)), ny = hi16(D(14));
-        if (r && std::abs(r->vx - x) + std::abs(r->vy - y) + std::abs(r->vz - z) < 512 &&
+        // A part paired only by a nearby translation (level 2's zombies pose their joints while
+        // drawing) may be the neighbouring joint: it must be the very same model vertex, or a
+        // hand averaged with an elbow stretches into a spike.
+        const int dv = r ? std::abs(r->vx - x) + std::abs(r->vy - y) + std::abs(r->vz - z) : 0;
+        if (r && (g_seg_near ? dv == 0 : dv < 512) &&
             std::abs(ox - nx) < 64 && std::abs(oy - ny) < 64) {
             D(14) = (int32_t)((uint32_t)(((ox + nx) / 2) & 0xFFFF) | ((uint32_t)((oy + ny) / 2) << 16));
             D(19) = (r->sz + D(19)) / 2;

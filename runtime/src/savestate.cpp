@@ -53,10 +53,13 @@ std::string g_saved_level, g_saved_restart;  // the point of the last auto-save 
 bool g_demo_loaded = false;          // a .dem file was loaded since the last level start
 uint64_t g_last_load_frame = 0;      // last time the game loaded a file
 
-// The auto-save's progress point ("sewr_t Re_Chute_Sewr"), kept next to it for the menus.
-constexpr const char* kAutoInfo = "saves/autosave.txt";
-std::string g_auto_info;
-bool g_auto_info_read = false;
+// The auto-save is the game's own save record, the one a memory card save holds: the progress
+// point the game recorded (level, restart point, health, lives, weapons, options; word 0 = the
+// XOR of the other 33 words). It is loaded as the game loads a card save (game_menu.cpp) or, in a
+// level, as the game continues from its progress point (state 3 of the level loop, 80031424).
+constexpr uint32_t kSaveRecord = 0x800A53D4;
+constexpr const char* kAutoFile = "saves/autosave.sav";
+bool g_autoload_request = false;
 
 std::string ram_string(uint32_t addr, size_t max) {
     std::string s;
@@ -95,7 +98,7 @@ std::string slot_path(int slot) {
         auto v = chapter_files();
         return (size_t)(slot - kChapterBase) < v.size() ? v[slot - kChapterBase].string() : "saves/chapters/none";
     }
-    return slot == kAutoSlot ? "saves/autosave.state" : "saves/slot" + std::to_string(slot) + ".state";
+    return slot == kAutoSlot ? kAutoFile : "saves/slot" + std::to_string(slot) + ".state";
 }
 
 void serialize(StateIO& s, R3000* c, uint32_t& pc) {
@@ -189,7 +192,63 @@ void save_chapter(const std::string& level, const std::string& restart, R3000* c
     save_to(kChapterNew, c, pc);
 }
 
+bool record_ok(const uint8_t* r) {
+    uint32_t w[kSaveRecordSize / 4], x = 0;
+    std::memcpy(w, r, sizeof w);
+    for (size_t i = 1; i < std::size(w); i++) x ^= w[i];
+    return w[0] == x && r[4] != 0;  // (a level name)
+}
+
+// The auto-save: the save record the game has just made for its progress point.
+bool save_record(R3000* c) {
+    uint8_t r[kSaveRecordSize];
+    for (uint32_t i = 0; i < kSaveRecordSize; i++) r[i] = (uint8_t)MEM_R8(c, kSaveRecord + i);
+    if (!record_ok(r)) return false;
+    std::filesystem::create_directories("saves");
+    const std::string tmp = std::string(kAutoFile) + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(r, 1, sizeof r, f) == sizeof r;
+    std::fclose(f);
+    if (!ok) return false;
+    std::error_code ec;
+    std::filesystem::rename(tmp, kAutoFile, ec);
+    if (ec) {
+        std::filesystem::remove(kAutoFile, ec);
+        std::filesystem::rename(tmp, kAutoFile, ec);
+    }
+    return !ec;
+}
+
+// Loads the auto-save in a level: it becomes the game's progress point and the level loop
+// continues from it (state 3: loads that level and restores the record, as after a Continue).
+void load_record_in_level(R3000* c) {
+    uint8_t r[kSaveRecordSize];
+    if (!state_read_autosave(r)) {
+        host_toast("Could not load the auto-save");
+        return;
+    }
+    for (uint32_t i = 0; i < kSaveRecordSize; i++) MEM_W8(c, kSaveRecord + i, r[i]);
+    MEM_W32(c, 0x800FEEBC + 0x430, 3);
+    g_progress_pending = false;
+    read_progress(&g_saved_level, &g_saved_restart);
+    host_toast("Auto-save loaded");
+}
+
 }  // namespace
+
+bool state_read_autosave(uint8_t* record) {
+    FILE* f = std::fopen(kAutoFile, "rb");
+    if (!f) return false;
+    uint8_t r[kSaveRecordSize + 1];
+    const size_t n = std::fread(r, 1, sizeof r, f);
+    std::fclose(f);
+    if (n != kSaveRecordSize || !record_ok(r)) return false;
+    std::memcpy(record, r, kSaveRecordSize);
+    return true;
+}
+
+uint64_t g_level_render_frame = 0;
 
 // Loading replaces the whole machine and abandons whatever is executing, so unlike saving
 // it needs no safe point: it is also polled once per frame (the game does not call VSync
@@ -227,6 +286,11 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
     uint64_t frame = host_frame_count();
 
     state_poll_load(c);
+    if (g_autoload_request) {  // F1 -> Load auto-save
+        g_autoload_request = false;
+        if (frame < g_level_render_frame + 30) load_record_in_level(c);
+        else host_toast("Load the auto-save from Load Game");
+    }
     subtitle_poll(c);
     game_voice_poll(c);
     cheats_frame(c);
@@ -266,6 +330,15 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             if (uint32_t player = MEM_R32(c, 0x800FF5A0); player && std::strcmp(opt, "respawn") == 0) {
                 MEM_W32(c, 0x800FF874, MEM_R32(c, 0x800FF874) + 1);
                 MEM_W16(c, player + 0x4E, MEM_R16(c, player + 0x4E) | 0x40);
+            } else if (player && std::strcmp(opt, "kill") == 0) {
+                // ":kill": the player dies as in a kill zone (8005E708) and respawns there after
+                // the death animation (levels 5-11: the flag above alone did not respawn)
+                MEM_W32(c, 0x800FF874, MEM_R32(c, 0x800FF874) + 1);
+                const R3000 keep = *c;
+                c->r[4] = player;
+                c->r[31] = 0;
+                call_indirect(c, 0x8005E708);
+                *c = keep;
             }
         }
     }
@@ -282,6 +355,22 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             for (uint32_t i = 0; i < 9; i++) MEM_W8(c, kProgressLevel + i, i < std::strlen(lv) ? (uint8_t)lv[i] : 0);
             for (uint32_t i = 0; i < 24; i++) MEM_W8(c, kProgressRestart + i, i < std::strlen(rs) ? (uint8_t)rs[i] : 0);
             MEM_W32(c, 0x800FEEBC + 0x430, 3);
+        }
+    }
+    {  // Debug: APOC_TEST_SAVE=FRAME saves state slot 5
+        static const char* t = std::getenv("APOC_TEST_SAVE");
+        static bool done = false;
+        if (t && !done && frame >= std::strtoull(t, nullptr, 10)) {
+            done = true;
+            g_save_request = 5;
+        }
+    }
+    {  // Debug: APOC_TEST_AUTOLOAD=FRAME loads the auto-save as F1 -> Load auto-save does
+        static const char* t = std::getenv("APOC_TEST_AUTOLOAD");
+        static bool done = false;
+        if (t && !done && frame >= std::strtoull(t, nullptr, 10)) {
+            done = true;
+            state_request_load(kAutoSlot);
         }
     }
     {  // Debug: APOC_TEST_SUBTITLE=FRAME shows a subtitle for 60 seconds from FRAME (timing tests)
@@ -302,9 +391,49 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             game_test_pickup(c, what);
         }
     }
+    {  // Debug: APOC_TEST_HEALTH=FRAME:PERIOD:COUNT health pickups (+20) every PERIOD frames from FRAME
+        static const char* t = std::getenv("APOC_TEST_HEALTH");
+        static int left = -1;
+        static unsigned long long tf = 0, period = 0;
+        if (t && left < 0 && std::sscanf(t, "%llu:%llu:%d", &tf, &period, &left) != 3) left = 0;
+        if (left > 0 && frame >= tf) {
+            left--;
+            tf += period;
+            LOG(Host, "test health pickup at frame %llu", frame);
+            game_test_health(c, 20);
+        }
+    }
+    {  // Debug: APOC_TEST_GRAB=FRAME:PERIOD:COUNT moves the player onto health pickups
+        static const char* t = std::getenv("APOC_TEST_GRAB");
+        static int left = -1;
+        static unsigned long long tf = 0, period = 0;
+        if (t && left < 0 && std::sscanf(t, "%llu:%llu:%d", &tf, &period, &left) != 3) left = 0;
+        if (left > 0 && frame >= tf) {
+            left--;
+            tf += period;
+            game_test_grab(c);
+        }
+    }
+    {  // Debug: APOC_TEST_SPAWN=FRAME:PERIOD:T1,T2,... drops pickups of those types at the player
+        static const char* t = std::getenv("APOC_TEST_SPAWN");
+        static unsigned long long tf = 0, period = 0;
+        static int n = 0;
+        static const char* list = t && std::sscanf(t, "%llu:%llu:%n", &tf, &period, &n) >= 2 && n ? t + n : nullptr;
+        if (t) game_test_spawn_poll(c);
+        if (list && *list && frame >= tf) {
+            tf += period;
+            game_test_spawn(c, std::atoi(list));
+            list = std::strchr(list, ',');
+            list = list ? list + 1 : nullptr;
+        }
+    }
     // Auto-save a moment after the game records a new progress point (once any level
     // loading has finished), never in attract-mode demos.
-    if (g_progress_pending && frame >= std::max(g_progress_frame, g_last_load_frame) + 90) {
+    // (and not while the player is dead, health +0xDA = 0: a checkpoint recorded before a
+    // respawn is kept once the player is back)
+    const uint32_t player = MEM_R32(c, 0x800FF5A0);
+    const bool dead = player && MEM_R16(c, player + 0xDA) == 0;
+    if (g_progress_pending && !dead && frame >= std::max(g_progress_frame, g_last_load_frame) + 90) {
         g_progress_pending = false;
         std::string level, restart;
         read_progress(&level, &restart);
@@ -317,16 +446,10 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
         }
         if (level == g_saved_level && restart == g_saved_restart) return;  // respawn at the same point
         if (!g_autosave) return;  // switched off (Options -> Enhancements -> Autosave)
-        if (save_to(kAutoSlot, c, pc)) {
+        if (save_record(c)) {
             log_msg(LogCat::Core, "auto-save: %s %s", level.c_str(), restart.c_str());
             g_saved_level = level;
             g_saved_restart = restart;
-            g_auto_info = level + " " + restart;
-            g_auto_info_read = true;
-            if (FILE* f = std::fopen(kAutoInfo, "w")) {
-                std::fprintf(f, "%s\n", g_auto_info.c_str());
-                std::fclose(f);
-            }
             game_message(c, "Auto Saved");  // as the game shows a pickup (game_menu.cpp)
         }
     }
@@ -340,7 +463,10 @@ extern "C" void psx_hook_progress(R3000* c) {
 }
 
 void state_request_save(int slot) { g_save_request = slot; }
-void state_request_load(int slot) { g_load_request = slot; }
+void state_request_load(int slot) {
+    if (slot == kAutoSlot) g_autoload_request = true;  // not a state: the game's save record
+    else g_load_request = slot;
+}
 
 bool state_slot_exists(int slot) { return std::filesystem::exists(slot_path(slot)); }
 
@@ -359,24 +485,19 @@ std::vector<std::string> state_chapter_names() {
 }
 
 std::string state_autosave_level() {
-    if (!g_auto_info_read) {
-        g_auto_info_read = true;
-        if (FILE* f = std::fopen(kAutoInfo, "r")) {
-            char line[128] = "";
-            if (std::fgets(line, sizeof line, f)) g_auto_info = line;
-            std::fclose(f);
-        }
-    }
+    uint8_t r[kSaveRecordSize];
+    if (!state_read_autosave(r)) return "";
+    std::string file;  // "sewr" of "sewr_t"
+    for (uint32_t i = kProgressLevel - kSaveRecord; i < kSaveRecordSize && r[i] && r[i] != '_'; i++) file += (char)r[i];
     // level file name -> the name the game's own saves use
     static const struct { const char* file; const char* name; } kLevels[] = {
         {"prsn", "Prison"}, {"sewr", "Sewers"},   {"city", "City"},   {"death", "Death"},
         {"roof", "Rooftops"}, {"grav", "Graveyard"}, {"pest", "Plague"}, {"tube", "War Factory"},
         {"war", "War"},       {"wh", "White House"}, {"bst", "The Beast"},
     };
-    const std::string file = g_auto_info.substr(0, g_auto_info.find('_'));
     for (const auto& l : kLevels)
         if (file == l.file) return l.name;
-    return "";  // a save from before the level was recorded
+    return "";
 }
 
 std::string state_slot_label(int slot) {

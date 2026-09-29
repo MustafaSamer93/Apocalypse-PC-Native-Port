@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include "gpu_hw.h"
@@ -365,6 +366,47 @@ void precise_corners(const uint32_t* xyw, int nv, GtePrecise* pr, bool* ok) {
     }
 }
 
+// APOC_SEAM_CHECK=1 logs, per frame, the untextured semi-transparent corners (lights) whose vertex
+// word got different positions in different polygons: each one is a visible seam line.
+struct SeamSeen { float x, y; uint32_t cmd; bool ok; };
+std::unordered_map<uint64_t, SeamSeen> g_seam[2];  // [textured]
+uint32_t g_seam_bad[2], g_seam_n[2];
+void seam_check(uint32_t cmd, const uint32_t* xyw, int nv, const GtePrecise* pr, const bool* ok, bool glow, int t) {
+    static const bool on = std::getenv("APOC_SEAM_CHECK") != nullptr;
+    if (!on || !glow) return;
+    for (int i = 0; i < nv; i++) {
+        const uint64_t key = (uint64_t)xyw[i] << 32 | (uint32_t)(S.off_x & 0xFFFF) << 16 | (S.off_y & 0xFFFF);
+        const SeamSeen now{ok[i] ? pr[i].x : (float)((int32_t)(xyw[i] << 21) >> 21),
+                           ok[i] ? pr[i].y : (float)((int32_t)((xyw[i] >> 16) << 21) >> 21), cmd, ok[i]};
+        g_seam_n[t]++;
+        auto [it, fresh] = g_seam[t].emplace(key, now);
+        if (fresh) continue;
+        if (std::fabs(it->second.x - now.x) > 0.01f || std::fabs(it->second.y - now.y) > 0.01f) {
+            if (g_seam_bad[t]++ < 6)
+                log_msg(LogCat::Host, "seam%s: %08x %s (%.2f,%.2f) vs %08x %s (%.2f,%.2f)", t ? " (textured)" : "", it->second.cmd,
+                        it->second.ok ? "found" : "int", it->second.x, it->second.y, cmd, now.ok ? "found" : "int", now.x, now.y);
+        }
+    }
+}
+
+// Neighbouring polygons share corners, but the lookups above can answer differently for each
+// of them (a light's fan: a ring vertex is found for the outer quad but not for the inner triangle,
+// or two candidates a fraction of a pixel apart are picked), and the shared edge then splits into
+// a thin gap or overlap line. Untextured polygons (the lights, flat shading) take the answer the
+// first polygon this frame got for the same vertex word, found or not.
+struct SharedCorner {
+    GtePrecise p;
+    bool ok;
+};
+std::unordered_map<uint64_t, SharedCorner> g_shared_corners;  // cleared by gpu_list_done
+void shared_corners(const uint32_t* xyw, int nv, GtePrecise* pr, bool* ok) {
+    for (int i = 0; i < nv; i++) {
+        const uint64_t key = (uint64_t)xyw[i] << 32 | (uint32_t)(uint16_t)S.off_x << 16 | (uint16_t)S.off_y;
+        auto [it, fresh] = g_shared_corners.emplace(key, SharedCorner{pr[i], ok[i]});
+        if (!fresh) pr[i] = it->second.p, ok[i] = it->second.ok;
+    }
+}
+
 // Scanline-accurate rasterization would need the exact hardware edge walker; the
 // edge-function rasterizer above follows the same fill convention (top/left inclusive).
 void draw_polygon(const uint32_t* w) {
@@ -454,6 +496,9 @@ void draw_polygon(const uint32_t* w) {
             } else {
                 g_precise_stats[7] += nv;
             }
+            if (!textured) shared_corners(xyw, nv, pr, nc);
+            seam_check(w[0], xyw, nv, pr, nc, gouraud && semi && !textured, 0);
+            seam_check(w[0], xyw, nv, pr, nc, semi && textured, 1);
             bool all = true;
             float wmax = 0;
             for (int i = 0; i < nv; i++) {
@@ -934,6 +979,17 @@ GpuDisplay gpu_display() {
     return d;
 }
 
+// The frame just drawn, as the screen will show it once the game flips to it: the display at
+// the drawing area's corner. False when the drawing area is not a whole display-sized buffer.
+bool gpu_drawn_display(GpuDisplay* out) {
+    GpuDisplay d = gpu_display();
+    if (d.rgb24 || !d.enabled || S.area_x2 - S.area_x1 + 1 != d.w || S.area_y2 - S.area_y1 + 1 < d.h) return false;
+    d.x = S.area_x1;
+    d.y = S.area_y1;
+    *out = d;
+    return true;
+}
+
 // ================================================================ save states
 
 // Entry hooks (tools/recomp/emit.py) on the level render's last routines, called from the
@@ -994,6 +1050,11 @@ void gpu_list_done() {
         std::memset(g_corner_stats, 0, sizeof g_corner_stats);
         std::memset(g_precise_stats, 0, sizeof g_precise_stats);
     }
+    if (g_seam_n[0] || g_seam_n[1])
+        log_msg(LogCat::Host, "seam frame: %u glow corners, %u mismatched; textured semi: %u corners, %u mismatched", g_seam_n[0],
+                g_seam_bad[0], g_seam_n[1], g_seam_bad[1]);
+    for (int t = 0; t < 2; t++) g_seam[t].clear(), g_seam_bad[t] = g_seam_n[t] = 0;
+    g_shared_corners.clear();
     gte_precise_clear();
     g_text_packets.clear();
     g_tilts.clear();

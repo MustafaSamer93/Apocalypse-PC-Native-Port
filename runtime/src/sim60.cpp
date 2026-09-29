@@ -53,7 +53,10 @@ std::string g_sim60_level;  // base name of the level's trigger file ("prsn" = l
 bool g_sim60_demo = false;
 
 bool sim60_tested(const std::string& level) {
-    return level == "prsn" || level == "sewr" || level == "city" || level == "death" || level == "roof";
+    // all eleven levels (5-11 added 2026-09-29: grav pest tube war wh bst)
+    for (const char* l : {"prsn", "sewr", "city", "death", "roof", "grav", "pest", "tube", "war", "wh", "bst"})
+        if (level == l) return true;
+    return false;
 }
 
 void sim60_apply() {
@@ -134,6 +137,7 @@ constexpr int kCameraVecs[] = {0x18, 0x48, 0x54, 0x60};
 // takes damage on world-update ticks.
 constexpr int kPlayerHealth = 0xDA;
 constexpr int kJumpRise = 0x238;  // updates left in which holding jump keeps rising (8 at take-off)
+constexpr int32_t kJumpExtraTrim = 66752;  // calibration: 60 Hz held-jump peak = 104% of 30 Hz
 
 bool valid_ptr(uint32_t a) { return a && (a & 0x1FFFFFFF) < 0x200000 && !(a & 3); }
 
@@ -318,6 +322,81 @@ void for_each_effect(R3000* c, F f) {
         if (head == kCameraList) continue;
         uint32_t o = MEM_R32(c, head);
         for (int n = 0; valid_ptr(o) && n < 1024; n++, o = MEM_R32(c, o + 4)) f(head, o);
+    }
+}
+
+// APOC_EFFECT_DUMP=1 (debugging): every render, the small objects by list and class, and each
+// glow-list light's fields (age, colour, radius, angle, fades).
+void effects_dump(R3000* c) {
+    std::vector<std::pair<uint64_t, int>> n;
+    for_each_effect(c, [&](uint32_t list, uint32_t o) {
+        const uint64_t k = (uint64_t)(list - kGp) << 32 | MEM_R32(c, o + kEffectClass);
+        for (auto& e : n) if (e.first == k) { e.second++; return; }
+        n.push_back({k, 1});
+    });
+    std::string line = "EFFECTS f=" + std::to_string(host_frame_count()) + " tick=" + std::to_string(MEM_R32(c, kHalfTicks));
+    for (auto& e : n) { char b[48]; std::snprintf(b, sizeof b, " %X:%08X=%d", (unsigned)(e.first >> 32), (unsigned)e.first, e.second); line += b; }
+    log_msg(LogCat::Host, "%s", line.c_str());
+    for_each_effect(c, [&](uint32_t list, uint32_t o) {
+        if (list != kGlowList) return;
+        log_msg(LogCat::Host, "  glow %08X cls %08X age %08X col %08X n %u r %08X a %08X f %08X %08X %08X", o, MEM_R32(c, o + kEffectClass),
+                MEM_R32(c, o + kEffectAge), MEM_R32(c, o + 0x58), MEM_R32(c, o + 0x50), MEM_R32(c, o + 0x5C), MEM_R32(c, o + 0x60),
+                MEM_R32(c, o + 0x6C), MEM_R32(c, o + 0x70), MEM_R32(c, o + 0x74));
+    });
+}
+
+// Muzzle flashes (class 800A1154 lights in the glow list that a gun makes for one update while
+// it fires). The gun fires from the player's update, so at 60 Hz it made one on the player-only
+// tick as well; each lives until the second world update after it, so two or three stacked into
+// a bright blob (30 Hz: always one). The ones the odd tick makes are left out of the render (unlinked
+// while it draws, put back after); they still age and die in the world update as before.
+// ponytail: hides every light the odd tick makes (only guns make lights there in levels 1-4)
+std::vector<std::pair<uint32_t, uint32_t>> g_odd_lights;  // object, heap serial (see heap_block)
+constexpr uint32_t kLightClass = 0x800A1154;
+
+std::vector<uint32_t> glow_lights(R3000* c) {
+    std::vector<uint32_t> v;
+    uint32_t o = MEM_R32(c, kGlowList);
+    for (int n = 0; valid_ptr(o) && n < 1024; n++, o = MEM_R32(c, o + 4))
+        if (MEM_R32(c, o + kEffectClass) == kLightClass) v.push_back(o);
+    return v;
+}
+void odd_lights_made(R3000* c, const std::vector<uint32_t>& before) {
+    static const bool off = std::getenv("APOC_ODD_LIGHTS") != nullptr;  // for A/B comparisons
+    const std::vector<uint32_t> now = glow_lights(c);
+    std::vector<std::pair<uint32_t, uint32_t>> kept;
+    for (const auto& l : g_odd_lights)  // still alive, same block
+        if (std::find(now.begin(), now.end(), l.first) != now.end() && MEM_R32(c, l.first - 8) == l.second) kept.push_back(l);
+    for (uint32_t o : now)
+        if (!off && std::find(before.begin(), before.end(), o) == before.end()) kept.push_back({o, MEM_R32(c, o - 8)});
+    g_odd_lights = std::move(kept);
+}
+// Unlinks the odd-made lights for a render; the result puts them back (in reverse order).
+struct HiddenLight {
+    uint32_t prev, obj;  // prev + 4 held obj
+};
+std::vector<HiddenLight> hide_odd_lights(R3000* c) {
+    std::vector<HiddenLight> h;
+    if (g_odd_lights.empty()) return h;
+    uint32_t prev = kGlowList - 4, o = MEM_R32(c, kGlowList);
+    for (int n = 0; valid_ptr(o) && n < 1024; n++) {
+        const uint32_t next = MEM_R32(c, o + 4);
+        bool hide = false;
+        for (const auto& l : g_odd_lights) hide |= l.first == o && MEM_R32(c, o - 8) == l.second;
+        if (hide) {
+            MEM_W32(c, prev + 4, next);
+            h.push_back({prev, o});
+        } else {
+            prev = o;
+        }
+        o = next;
+    }
+    return h;
+}
+void unhide_lights(R3000* c, const std::vector<HiddenLight>& h) {
+    for (size_t i = h.size(); i-- > 0;) {
+        if (MEM_R32(c, h[i].prev + 4) != MEM_R32(c, h[i].obj + 4)) continue;  // the list changed meanwhile: leave it
+        MEM_W32(c, h[i].prev + 4, h[i].obj);
     }
 }
 
@@ -901,9 +980,32 @@ void retime(R3000* c, const Before& b, bool odd) {
                 if ((uint16_t)(MEM_R16(c, a) - b.counters[i]) == 1) MEM_W16(c, a, b.counters[i]);
             }
             if ((int16_t)MEM_R16(c, p + kPlayerHealth) < b.health) MEM_W16(c, p + kPlayerHealth, (uint16_t)b.health);
-            // jump rise counter: holding jump keeps rising while it is above 0 (80061584); it
-            // counts down 1 per update, so at 60 Hz a long press rose only half as high
-            if ((uint8_t)MEM_R8(c, p + kJumpRise) == (uint8_t)(b.rise - 1)) MEM_W8(c, p + kJumpRise, b.rise);
+        }
+        // Jump rise counter: holding jump keeps rising while it is above 0 (80061584); it counts
+        // down 1 per update, so every other step is undone. Which one is counted from the take-off
+        // (every 2nd tick after it), not by world-update parity: a take-off on an odd tick lost its
+        // first step and the jump rose ~15% lower (the cavern ledges in level 2 were out of reach).
+        {
+            static int age = -1;  // ticks since the take-off (8 written), -1 = not rising
+            static bool extra = false;  // the jump's extra rising tick was given
+            static int trim = 0;        // calls until the extra tick's height is trimmed
+            const uint8_t rise = (uint8_t)MEM_R8(c, p + kJumpRise);
+            if (rise == 8 && b.rise != 8) {
+                age = 0;
+                extra = false;
+                // the take-off speed is set, not eased in (halved, the first tick rose 40%)
+                if (!placed && g_raw[0][1].addr == p + 0x68) MEM_W32(c, p + 0x68 + 4, (uint32_t)g_raw[0][1].v.v[1]);
+            } else if (age >= 0) {
+                age++;
+            }
+            const bool undo = age < 0 ? odd : (age & 1) != 0;
+            if (rise == (uint8_t)(b.rise - 1) && undo) MEM_W8(c, p + kJumpRise, b.rise);
+            // The user asked for a held jump 104% of the original (102.5% without this): the last
+            // rising step gets one more 60 Hz tick (107%), of which kJumpExtraTrim is taken back
+            // from the height on the tick after it. Measured 30 Hz 2,199,240 -> 60 Hz 2,287,210.
+            else if (rise == 0 && b.rise == 1 && age >= 0 && !extra) { MEM_W8(c, p + kJumpRise, 1); extra = true; trim = 2; }
+            if (trim && --trim == 0) MEM_W32(c, p + 8, MEM_R32(c, p + 8) + kJumpExtraTrim);
+            if (rise == 0 && MEM_R32(c, p + kPlayerState) != 2) age = -1;
         }
         // The hit timer (it also sets the damage flash) counts down 256 per update and the player
         // stays in the hit state until it is exactly 0. It keeps its 30 Hz rate: the odd-tick
@@ -988,6 +1090,8 @@ void trace_player(R3000* c, uint32_t t) {
 
 }  // namespace
 
+void sim60_effects_dump(R3000* c) { effects_dump(c); }
+
 // Runs the render once outside emulated time (everything rolled back afterwards) with every
 // object's animation state from before the world update, recording what the GTE produced.
 bool record_previous_pose(R3000* c) {
@@ -1037,8 +1141,17 @@ bool record_previous_pose(R3000* c) {
 }
 
 // The level's render (called from smooth.cpp's render hook when psx_opt_sim60 is on).
+int sim60_render_lights_hidden(R3000* c);
 int sim60_render(R3000* c) {
     if (g_in_render) return 0;
+    static const bool dump = std::getenv("APOC_EFFECT_DUMP") != nullptr;
+    if (dump) effects_dump(c);
+    const std::vector<HiddenLight> hidden = hide_odd_lights(c);
+    const int r = sim60_render_lights_hidden(c);
+    unhide_lights(c, hidden);
+    return r;
+}
+int sim60_render_lights_hidden(R3000* c) {
     const ViewCam cam = view_before(c);
     if (!g_mid_pending) {
         const uint32_t ra = c->r[31], sp = c->r[29];
@@ -1275,10 +1388,12 @@ extern "C" int psx_hook_tick(R3000* c) {
             c->r[29] = sp;
             return 1;
         }
+        const std::vector<uint32_t> lights_before = glow_lights(c);
         pad_odd_tick(c);
         call(c, kContactsBegin);
         call(c, kUpdateList, kPlayerList);
         call(c, kContactsEnd);
+        odd_lights_made(c, lights_before);
         zones_odd_tick(c);
         call(c, kUpdateCameras, MEM_R32(c, kCameraList));
         check_small(c, "odd tick");
@@ -1290,4 +1405,17 @@ extern "C" int psx_hook_tick(R3000* c) {
     c->r[31] = ra;
     c->r[29] = sp;
     return 1;
+}
+
+// Glows (class 800A1154: hits, muzzle flashes, explosions) are flat screen-facing fans that the
+// game sorts at the depth of their centre, so the floor and walls in front of the centre are drawn
+// over a big one and cut hard straight edges into it (an explosion's light pool). Sort a glow
+// nearer (a fixed depth, at most half way to the camera): what lies around the light no longer
+// covers it, walls clearly in front still do. APOC_GLOW_SORT=N: the bias (0 = the original).
+extern "C" void psx_hook_glow_sort(R3000* c) {
+    static const char* env = std::getenv("APOC_GLOW_SORT");
+    static const int bias = env ? std::atoi(env) : 768;  // depth units (0 = the original order)
+    const int32_t z = (int32_t)c->r[5];
+    if (bias <= 0 || z <= 0) return;
+    c->r[2] = (uint32_t)(z - std::min(bias, z / 2)) & 0x3FFC;
 }

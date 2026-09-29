@@ -71,7 +71,10 @@ uint32_t gpu_run_list(R3000* c, uint32_t addr) {
             break;
         }
     }
-    if (words > 100) gpu_list_done();  // a frame's ordering table (not the small setup lists)
+    if (words > 100) {  // a frame's ordering table (not the small setup lists)
+        gpu_list_done();
+        if (!core_in_ghost()) core_frame_drawn(c);
+    }
     return words;
 }
 

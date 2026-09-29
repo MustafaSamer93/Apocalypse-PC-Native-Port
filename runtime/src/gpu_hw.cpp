@@ -446,13 +446,27 @@ bool gl_hw_init(int scale) {
     g_read_fbo = make_fbo(g_read_tex);
     // Multisampling: polygons are drawn into a multisampled target that is resolved into
     // `read` (which textures and the display come from). Sample counts that would take more
-    // than 512 MB, or more than the GPU offers, are lowered.
+    // than a quarter of the video memory (at least 512 MB), or more than the GPU offers, are lowered.
     g_samples = 1;
     if (g_samples_wanted > 1) {
         GLint max_samples = 1;
         glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
         int n = std::min(g_samples_wanted, (int)max_samples);
-        while (n > 1 && (uint64_t)1024 * S * 512 * S * 4 * (uint64_t)n > (512ull << 20)) n /= 2;
+        // video memory, where the driver says: GL_NVX_gpu_memory_info (total) or GL_ATI_meminfo
+        // (free texture memory), both in KB
+        uint64_t budget = 512ull << 20;
+        GLint kb[4] = {};
+        while (glGetError() != GL_NO_ERROR) {}
+        glGetIntegerv(0x9048, kb);  // GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX
+        if (glGetError() != GL_NO_ERROR || kb[0] <= 0) {
+            kb[0] = 0;
+            glGetIntegerv(0x87FC, kb);  // TEXTURE_FREE_MEMORY_ATI
+            if (glGetError() != GL_NO_ERROR) kb[0] = 0;
+        }
+        if (kb[0] > 0) budget = std::max<uint64_t>(budget, (uint64_t)kb[0] * 1024 / 4);
+        log_msg(LogCat::Gpu, "OpenGL: %d MB video memory reported, MSAA image up to %llu MB", kb[0] / 1024,
+                (unsigned long long)(budget >> 20));
+        while (n > 1 && (uint64_t)1024 * S * 512 * S * 4 * (uint64_t)n > budget) n /= 2;
         while (n > 1) {
             while (glGetError() != GL_NO_ERROR) {}
             glGenRenderbuffers(1, &g_draw_rb);

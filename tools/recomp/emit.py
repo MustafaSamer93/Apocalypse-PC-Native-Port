@@ -71,6 +71,13 @@ ENTRY_HOOKS = {
     0x8001B788: "psx_hook_message(c);",
 }
 
+# Runtime hooks emitted just before specific instructions (not delay slots).
+#   800376F8 the glow renderer (8003736C) turned the glow's depth into its ordering-table slot
+#            (v0): sort glows nearer (sim60.cpp psx_hook_glow_sort)
+INSN_HOOKS = {
+    0x800376F8: "psx_hook_glow_sort(c);",
+}
+
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.
 # 80030BCC: the main loop's second VBlank wait (the game's 30 fps cap).
 # 80030B80 / 80030BBC: the loop's second tick and its extra VBlank wait (sim60.cpp:
@@ -349,6 +356,9 @@ class FunctionEmitter:
                 self.label_positions[a] = len(self.lines)
                 self.lines.append(f"{lbl(a)}:;")
             i = self.img.insn(a)
+            if a in INSN_HOOKS:
+                self.flush_cycles()
+                self.out(INSN_HOOKS[a])
             self.out(f"// {a:08X}: {disasm(i)}")
             if i.has_delay_slot:
                 self.emit_control(i)

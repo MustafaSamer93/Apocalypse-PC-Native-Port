@@ -17,6 +17,7 @@
 // Because the PS1 already shows frame N-1 while N is being drawn, the extra images (from
 // N-1 towards N) add no latency: they show part of state N earlier than the original.
 #include "smooth.h"
+#include "savestate.h"
 
 #include <algorithm>
 #include <chrono>
@@ -268,10 +269,16 @@ struct Stats { int extras; double ms; } g_st{};
 
 int sim60_render(R3000* c);
 void drawdist_apply(R3000* c);
+void sim60_effects_dump(R3000* c);
 
 extern "C" int psx_hook_render(R3000* c) {
     if (core_in_ghost()) return 0;
+    g_level_render_frame = host_frame_count();  // (savestate.cpp: a level is running)
     drawdist_apply(c);
+    if (!psx_opt_sim60) {  // (sim60_render dumps its own)
+        static const bool dump = std::getenv("APOC_EFFECT_DUMP") != nullptr;
+        if (dump) sim60_effects_dump(c);
+    }
     if (psx_opt_sim60) return sim60_render(c);
     const int k = smooth_factor();
     CaptureSet& back = g_sets[g_back];

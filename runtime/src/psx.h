@@ -76,6 +76,8 @@ struct GpuDisplay {
     bool enabled;
 };
 GpuDisplay gpu_display();
+bool gpu_drawn_display(GpuDisplay* out);  // the frame just drawn, where the game will show it
+void core_frame_drawn(R3000* c);          // a frame's ordering table was drawn (gpu_run_list)
 uint32_t gpu_run_list(R3000* c, uint32_t addr);  // walks a GPU packet list (ordering table) into GP0
 void gpu_vram_save(int x, int y, int w, int h, std::vector<uint16_t>& out);
 void gpu_vram_restore(int x, int y, int w, int h, const std::vector<uint16_t>& in);
@@ -130,11 +132,16 @@ void game_menu_reset(bool state_loaded);  // a saved state was loaded / a level 
 void game_message(R3000* c, const char* text);
 // A subtitle for `seconds` on a random side, tilted (game_menu.cpp); subtitles.cpp decides when.
 void game_subtitle(R3000* c, const char* text, float seconds);
+void game_subtitle_keep(R3000* c);  // once per frame: shows a cleared subtitle again
 void subtitle_note_xa(uint32_t lba, int chan);  // cdrom.cpp: an XA sector is being played
 void subtitle_poll(R3000* c);                    // once per frame (savestate.cpp)
 void game_voice_poll(R3000* c);                  // once per frame: queued pickup lines (game_menu.cpp)
 float subtitle_tilt(uint32_t text);
 void game_test_pickup(R3000* c, int what);
+void game_test_health(R3000* c, int amount);
+void game_test_grab(R3000* c);
+void game_test_spawn(R3000* c, int type);
+void game_test_spawn_poll(R3000* c);
 // Cheats (cheats.cpp): 0 health, 1 lives, 2 weapons, 3 ammo, 4 smart bombs. Off at start, not saved.
 bool cheat_on(int which);
 void cheat_set(int which, bool on);
@@ -215,6 +222,7 @@ void host_rumble(int port, uint8_t small_motor, uint8_t large_motor);
 void host_poll();                    // pump OS events
 uint64_t host_frame_count();
 bool host_quit_requested();
+bool host_multi_present();  // several images per emulated frame (smooth frame rate)
 void host_request_quit();            // close the game (as closing the window does)
 void host_present(const GpuDisplay& d);
 void host_throttle_frame();          // sleep to hold 60 Hz

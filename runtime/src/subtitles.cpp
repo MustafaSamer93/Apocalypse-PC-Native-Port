@@ -95,6 +95,7 @@ void subtitle_note_xa(uint32_t lba, int chan) {
 
 // savestate.cpp psx_safepoint (once per frame, in the game's main loop): shows a pending line.
 void subtitle_poll(R3000* c) {
+    if (g_subtitles) game_subtitle_keep(c);
     if (g_pending_block < 0) return;
     const int b = g_pending_block, ch = g_pending_chan;
     g_pending_block = g_pending_chan = -1;
@@ -105,8 +106,12 @@ void subtitle_poll(R3000* c) {
     std::snprintf(key, sizeof key, "b%02d_c%02d", b, ch);
     auto it = g_lines.find(key);
     if (it == g_lines.end()) it = g_lines.find(same_recording(key));
-    if (it == g_lines.end()) return;
+    if (it == g_lines.end()) {
+        LOG(Host, "subtitle: none for %s", key);
+        return;
+    }
     // the clip's length: sectors of 4032 samples at 37800 Hz (mono)
     const int sectors = (int)ram32(kLenTable + 4 * (b * kChannels + ch));
+    LOG(Host, "subtitle: \"%s\"", it->second.c_str());
     game_subtitle(c, it->second.c_str(), (float)sectors * 4032.0f / 37800.0f);
 }

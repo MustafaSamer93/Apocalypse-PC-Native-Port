@@ -25,7 +25,7 @@
 #include <io.h>
 #endif
 
-constexpr const char* kVersion = "v0.1.2 beta";
+constexpr const char* kVersion = "v0.3.0 beta";
 int g_force_smooth = 0;  // --smooth K: images per game step regardless of the display
 void host_toast(const std::string& text);
 int g_renderer_override = -1;  // --renderer opengl|vulkan: 0 / 1, -1 = the saved setting
@@ -85,6 +85,9 @@ struct ScriptedPress {
 };
 std::vector<ScriptedPress> g_script;
 uint64_t g_frame = 0;
+// APOC_BOT=DIR (bot_step): buttons the AI tester holds until frame g_bot_until.
+uint16_t g_bot_buttons = 0;
+uint64_t g_bot_until = 0;
 
 // PS1 pad bits (active low in the wire format; here 1 = pressed)
 enum : uint16_t {
@@ -173,7 +176,7 @@ std::string msaa_label() {
 
 // Settings screen text for the simulation rate choice.
 std::string sim60_label() {
-    const char* names[] = {"30 Hz original", "60 Hz levels 1-4", "60 Hz all (beta)"};
+    const char* names[] = {"30 Hz original", "60 Hz all levels", "60 Hz all (beta)"};
     std::string s = names[std::clamp(g_sim60_setting, 0, 2)];
     if (psx_opt_sim60) s += " ON";  // active in the current level
     return s;
@@ -190,13 +193,17 @@ std::string drawdist_label() {
     return s + "x";
 }
 
+// Most images per game step the display can show (a frame rate above its refresh rate was
+// presented on a timer without vsync: no more images reached the screen, only uneven ones).
+int max_factor_for_display() { return std::max(1, (int)((g_refresh_hz + 2.0f) / 30.0f)); }
+
 // Settings screen text for the frame rate choice.
 std::string fps_label() {
     if (g_gfx.fps == 30) return "30 (original)";
     if (g_active_scale <= 0) return "30 (others need 1x+)";
     int rate = g_gfx.fps ? g_gfx.fps : 30 * smooth_factor_for_refresh(g_refresh_hz);
     std::string s = g_gfx.fps ? std::to_string(rate) : "Auto: " + std::to_string(rate);
-    if ((float)rate > g_refresh_hz + 2.0f) s += " (no vsync)";
+    if (g_gfx.fps && rate > 30 * max_factor_for_display()) s += " (screen: " + std::to_string(30 * max_factor_for_display()) + ")";
     return s;
 }
 
@@ -207,7 +214,7 @@ int smooth_target() {
     if (g_force_smooth) return g_force_smooth;
     if (g_active_scale <= 0) return 1;  // extra images need the OpenGL renderer
     if (g_gfx.fps == 0) return smooth_factor_for_refresh(g_refresh_hz);
-    return std::clamp(g_gfx.fps / 30, 1, 5);
+    return std::clamp(g_gfx.fps / 30, 1, std::min(5, max_factor_for_display()));
 }
 
 // Internal resolution actually rendered: the Resolution setting, raised by supersampling to
@@ -554,10 +561,16 @@ bool host_init(const char* title, int scale) {
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
             SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
         }
+        if (std::getenv("APOC_BACKGROUND")) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
         g_window = create_window(title, win_w, win_h,
                                  SDL_WINDOW_RESIZABLE | (b == Backend::Vulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL) |
                                      (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
         if (!g_window) return false;
+#ifdef _WIN32
+        if (std::getenv("APOC_BACKGROUND"))  // test runs: open behind the other windows, without focus
+            SetWindowPos((HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr),
+                         HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#endif
         if (present_init(g_window)) return true;
         present_shutdown();
         SDL_DestroyWindow(g_window);
@@ -675,15 +688,23 @@ void host_poll() {
 void host_set_turbo(bool on) { g_force_turbo = on; }
 
 bool host_quit_requested() { return g_quit; }
+bool host_multi_present() { return g_multi_present && !g_turbo; }
 void host_request_quit() { g_quit = true; }
 
-// "--press START@1200+10,CROSS@1500" : button@frame[+duration frames, default 6]
-bool host_parse_press_script(const char* spec) {
+// Button name as in --press ("SQUARE") -> pad bit, 0 if unknown.
+static uint16_t button_bit(const std::string& name) {
     static const struct { const char* name; uint16_t bit; } names[] = {
         {"SELECT", B_SELECT}, {"START", B_START}, {"UP", B_UP}, {"RIGHT", B_RIGHT}, {"DOWN", B_DOWN},
         {"LEFT", B_LEFT}, {"L2", B_L2}, {"R2", B_R2}, {"L1", B_L1}, {"R1", B_R1},
         {"TRIANGLE", B_TRIANGLE}, {"CIRCLE", B_CIRCLE}, {"CROSS", B_CROSS}, {"SQUARE", B_SQUARE},
     };
+    for (auto& n : names)
+        if (name == n.name) return n.bit;
+    return 0;
+}
+
+// "--press START@1200+10,CROSS@1500" : button@frame[+duration frames, default 6]
+bool host_parse_press_script(const char* spec) {
     std::string s(spec);
     size_t pos = 0;
     while (pos < s.size()) {
@@ -696,9 +717,7 @@ bool host_parse_press_script(const char* spec) {
         std::string name = item.substr(0, at);
         uint64_t from = std::strtoull(item.c_str() + at + 1, nullptr, 10), len = 6;
         if (size_t plus = item.find('+'); plus != std::string::npos) len = std::strtoull(item.c_str() + plus + 1, nullptr, 10);
-        uint16_t bit = 0;
-        for (auto& n : names)
-            if (name == n.name) bit = n.bit;
+        const uint16_t bit = button_bit(name);
         if (!bit) return false;
         g_script.push_back({bit, from, from + len});
     }
@@ -854,6 +873,7 @@ PadState host_pad(int port, bool analog) {
     if (port == 0)
         for (auto& sp : g_script)
             if (g_frame >= sp.from && g_frame < sp.to) pressed |= sp.bit;
+    if (port == 0 && g_frame < g_bot_until) pressed |= g_bot_buttons;
     s.buttons = (uint16_t)~pressed;
     s.connected = port == 0;
     return s;
@@ -1036,7 +1056,56 @@ static void draw_game(const GpuDisplay& d, double frac) {
     present_swap();
 }
 
+// Test (APOC_BOT=DIR, tools/bot.py): an AI tester plays in steps. At the end of each step the
+// game stops, DIR/state.txt says where the player is (the step's picture is DIR/shot_FRAME.bmp)
+// and it waits for DIR/cmd.txt: "UP+SQUARE 30" = hold those buttons for 30 frames ("- 30" = none).
+static void bot_step() {
+    static const char* dir = std::getenv("APOC_BOT");
+    if (!dir || g_frame < g_bot_until || g_frame < 60) return;
+    const std::string d = dir;
+    if (g_bot_until) {  // report the step that just ended
+        auto ram_str = [](uint32_t a, size_t max) {  // progress record, see savestate.cpp
+            std::string s;
+            for (size_t i = 0; i < max && psx_ram[(a + i) & (PSX_RAM_SIZE - 1)]; i++) s += (char)psx_ram[(a + i) & (PSX_RAM_SIZE - 1)];
+            return s;
+        };
+        const std::string level = ram_str(0x800A53D8, 9), restart = ram_str(0x800A53E1, 24);
+        const uint32_t p = MEM_R32(g_cpu, 0x800FF5A0);  // the player object
+        if (FILE* f = std::fopen((d + "/state.tmp").c_str(), "w")) {
+            std::fprintf(f, "frame %llu\nshot %s/shot_%llu.bmp\nlevel %s\ncheckpoint %s\nlives %d\n",
+                         (unsigned long long)g_frame, dir, (unsigned long long)g_frame, level.c_str(), restart.c_str(),
+                         (int)MEM_R32(g_cpu, 0x800FF874));
+            if ((p & 0xFF000000u) == 0x80000000u)
+                std::fprintf(f, "health %d\npos %d %d %d\n", (int16_t)MEM_R16(g_cpu, p + 0xDA), (int32_t)MEM_R32(g_cpu, p + 4),
+                             (int32_t)MEM_R32(g_cpu, p + 8), (int32_t)MEM_R32(g_cpu, p + 12));
+            std::fclose(f);
+            MoveFileExA((d + "/state.tmp").c_str(), (d + "/state.txt").c_str(), MOVEFILE_REPLACE_EXISTING);
+        }
+    }
+    const std::string cmd = d + "/cmd.txt";
+    for (;;) {
+        SDL_PumpEvents();  // stay responsive while the tester thinks
+        if (FILE* f = std::fopen(cmd.c_str(), "r")) {
+            char buttons[128] = "";
+            int frames = 0;
+            const int n = std::fscanf(f, "%127s %d", buttons, &frames);
+            std::fclose(f);
+            std::remove(cmd.c_str());
+            if (n >= 1 && !std::strcmp(buttons, "quit")) std::exit(0);
+            if (n < 2 || frames < 1) continue;
+            g_bot_buttons = 0;
+            for (char* t = std::strtok(buttons, "+"); t; t = std::strtok(nullptr, "+")) g_bot_buttons |= button_bit(t);
+            g_bot_until = g_frame + (uint64_t)frames;
+            g_shot_frames.push_back(g_bot_until);
+            g_shot_prefix = d + "/shot";
+            return;
+        }
+        SDL_Delay(10);
+    }
+}
+
 void host_present(const GpuDisplay& d) {
+    bot_step();
     g_frame++;
     run_state_script();
     state_poll_load(g_cpu);
@@ -1068,7 +1137,13 @@ void host_present(const GpuDisplay& d) {
         char title[96];
         std::snprintf(title, sizeof title, "Apocalypse %s - %.0f fps%s", kVersion, images,
                       g_turbo ? " (fast-forward)" : "");
-        SDL_SetWindowTitle(g_window, title);
+        // only when it changes: renaming the window goes through Windows' window manager and
+        // could hold the frame up by several ms (a hiccup every second)
+        static std::string shown_title;
+        if (shown_title != title) {
+            shown_title = title;
+            SDL_SetWindowTitle(g_window, title);
+        }
         LOG(Host, "frame %llu: %.1f Hz emulated, %.1f images/s", (unsigned long long)g_frame, fps, images);
         fps_t0 = now;
         fps_frames = 0;
@@ -1730,12 +1805,20 @@ static void run_settings_menu() {
 }
 
 void host_throttle_frame() {
-    if (static const bool on = std::getenv("APOC_FRAME_TIMES") != nullptr; on) {  // debug: slow frames
-        static uint64_t last = 0;
+    if (static const bool on = std::getenv("APOC_FRAME_TIMES") != nullptr; on) {  // debug: frames over N ms (default 20)
+        // with where the time went: waiting for the display (acquire/present), waiting for the
+        // GPU (fences), GPU work (Vulkan timestamps); the rest is the game's code and ours
+        extern uint64_t g_prof_fence_ns, g_prof_present_ns, g_prof_gpu_ns;
+        static uint64_t last = 0, p0 = 0, f0 = 0, g0 = 0;
         const uint64_t now = SDL_GetTicksNS();
-        if (last && now - last > 25000000ull)
-            std::fprintf(stderr, "SLOW frame %llu: %.1f ms\n", (unsigned long long)g_frame, (double)(now - last) / 1e6);
-        last = now;
+        auto d = [](uint64_t v, uint64_t v0) { return v >= v0 ? (double)(v - v0) / 1e6 : 0.0; };  // (reset by APOC_PROFILE)
+        static const uint64_t limit = (uint64_t)(std::max(0.0, std::atof(std::getenv("APOC_FRAME_TIMES"))) * 1e6) ?: 20000000ull;
+        if (last && now - last > limit) {
+            const double total = (double)(now - last) / 1e6, pr = d(g_prof_present_ns, p0), fe = d(g_prof_fence_ns, f0);
+            std::fprintf(stderr, "SLOW frame %llu: %.1f ms (display %.1f, GPU wait %.1f, GPU work %.1f, CPU %.1f)\n",
+                         (unsigned long long)g_frame, total, pr, fe, d(g_prof_gpu_ns, g0), total - pr - fe);
+        }
+        last = now, p0 = g_prof_present_ns, f0 = g_prof_fence_ns, g0 = g_prof_gpu_ns;
     }
     bool multi = g_multi_present && !g_turbo && g_gl_ok;
     bool want_vsync = (multi ? g_present_vsync : g_vsync_pacing) && !g_turbo;
