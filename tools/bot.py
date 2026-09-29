@@ -84,8 +84,7 @@ def step(args):
     png = shot.with_suffix(".png")
     Image.open(shot).convert("RGB").save(png)
     shot.unlink()
-    print("
-".join(f"shot {png}" if l.startswith("shot ") else l for l in text.splitlines()))
+    print("\n".join(f"shot {png}" if l.startswith("shot ") else l for l in text.splitlines()))
     errors = [l for l in log_tail(200).splitlines() if "FATAL" in l or "NATIVE CRASH" in l or "broke" in l]
     if errors:
         print("LOG ERRORS:\n" + "\n".join(errors))
