@@ -75,7 +75,12 @@ def step(args):
         if time.time() - t0 > 60:
             sys.exit(f"NO RESPONSE in 60 s (hang?). Log tail:\n{log_tail()}")
         time.sleep(0.05)
-    text = state.read_text()
+    for _ in range(50):  # the game may still be swapping the file in (MoveFileEx)
+        try:
+            text = state.read_text()
+            break
+        except PermissionError:
+            time.sleep(0.02)
     shot = Path(dict(l.split(" ", 1) for l in text.splitlines())["shot"])
     for _ in range(100):  # the picture is written a moment after the state file
         if shot.exists():
