@@ -82,7 +82,9 @@ def step(args):
             break
         time.sleep(0.05)
     png = shot.with_suffix(".png")
-    Image.open(shot).convert("RGB").save(png)
+    im = Image.open(shot).convert("RGB")
+    im.thumbnail((960, 540))  # full-size shots were refused ("media removed") by the image reader
+    im.save(png)
     shot.unlink()
     print("\n".join(f"shot {png}" if l.startswith("shot ") else l for l in text.splitlines()))
     errors = [l for l in log_tail(200).splitlines() if "FATAL" in l or "NATIVE CRASH" in l or "broke" in l]
