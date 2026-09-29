@@ -54,7 +54,7 @@ def start(args):
     ini.write_text(f"gfx scale=1 aspect=1 crt=0 filter=0 fps=0\nsim {a.sim}\ndrawdist 400\nprecise 1\nfont 1\n"
                    f"fullscreen 0\naa 0\nmsaa 0\nrenderer {a.renderer}\nautosave 0\n")
     env = dict(os.environ, APOC_BOT=str(LIVE), APOC_BACKGROUND="1", APOC_SETTINGS=str(ini),
-               SDL_AUDIO_DRIVER="dummy", APOC_SIM60_CHECK="1")
+               SDL_AUDIO_DRIVER="dummy", APOC_SIM60_CHECK="1", APOC_NO_DIALOGS="1")
     with open(BOT / "game.log", "wb") as log:
         subprocess.Popen([str(ROOT / "apocalypse.exe"), "--turbo", "--log", "host", "--chapter", str(a.chapter)],
                          cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)

@@ -33,6 +33,10 @@ ivec2 window(ivec2 t) {
 
 // Texel colour (rgb + alpha = semi-transparency bit) and whether it is transparent (0000h).
 vec4 texel(ivec2 t, vec2 sub, out bool transparent) {
+    // only the primitive's own texels (v_box: its vertices' range): at a polygon's edges the
+    // interpolated coordinate can land one texel outside it, on another texture or a palette
+    // (bright dots along the seams)
+    t = clamp(t, ivec2(int(v_box & 255u), int((v_box >> 8) & 255u)), ivec2(int((v_box >> 16) & 255u), int(v_box >> 24)));
     t = window(t);
     ivec2 page = ivec2(int(v_info.x & 1023u), int((v_info.x >> 10) & 511u));
     int depth = int((v_info.x >> 20) & 3u);

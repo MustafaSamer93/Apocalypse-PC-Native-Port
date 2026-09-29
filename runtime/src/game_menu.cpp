@@ -705,7 +705,9 @@ void game_subtitle(R3000* c, const char* text, float seconds) {
     constexpr uint32_t kSetScale = 0x8001A7BC, kWidth = 0x8001A97C, kText = 96;
     constexpr float kTiltDegrees = 30.0f;
     constexpr int kMaxWidth = 190, kBig = 224, kOneLine = 200;  // one line only if it fits at 200
-    constexpr float kLineHeight = 16.0f;  // lines apart at scale 256
+    // lines apart at scale 256, in message units (16 left the two lines overlapping: a letter is
+    // about as tall as 24 units)
+    constexpr float kLineHeight = 36.0f;
     for (uint32_t& m : g_subtitle) {
         if (!m) m = game_call(c, kAlloc, kText + 4 * 28);
         if (!m) return;

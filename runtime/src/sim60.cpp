@@ -140,6 +140,18 @@ constexpr int kJumpRise = 0x238;  // updates left in which holding jump keeps ri
 constexpr int32_t kJumpExtraTrim = 66752;  // calibration: 60 Hz held-jump peak = 104% of 30 Hz
 
 bool valid_ptr(uint32_t a) { return a && (a & 0x1FFFFFFF) < 0x200000 && !(a & 3); }
+// A function in the game's executable (80010000-800FFFFF).
+bool code_ptr(uint32_t a) { return a >= 0x80010000u && a < 0x80100000u && !(a & 3); }
+// An effect's class (+0x44) as the game uses it: the world update calls +0x14 (unless the object's
+// +0x3F is set) and the render calls +0x1C for every ring (8003736C, list gp+0x59C; in other
+// classes +0x1C can be part of a name). A class word that was hit by something else sent those
+// calls to 80000000 (levels 1 and 4).
+bool class_ok(R3000* c, uint32_t head, uint32_t o) {
+    const uint32_t cls = MEM_R32(c, o + 0x44);
+    if (!valid_ptr(cls)) return false;
+    if (head == kGp + 0x59C && !code_ptr(MEM_R32(c, cls + 0x1C))) return false;
+    return MEM_R8(c, o + 0x3F) || code_ptr(MEM_R32(c, cls + 0x14));
+}
 
 // The world update skips the objects while either of these is set (8003001C: level start,
 // cutscenes) and runs only the view camera's list: the player-only tick must do nothing then.
@@ -301,11 +313,11 @@ void check_small(R3000* c, const char* where, bool force = false) {
                 reports++;
                 break;
             }
-            if (MEM_R8(c, o + 0x3F)) continue;
+            if (class_ok(c, head, o)) continue;
             const uint32_t cls = MEM_R32(c, o + 0x44);
-            if (valid_ptr(cls) && MEM_R32(c, cls + 0x14)) continue;
-            log_msg(LogCat::Host, "CHECK %s f=%llu list %08X obj %08X cls %08X fn %08X", where,
-                    (unsigned long long)host_frame_count(), head, o, cls, valid_ptr(cls) ? MEM_R32(c, cls + 0x14) : 0);
+            log_msg(LogCat::Host, "CHECK %s f=%llu list %08X obj %08X cls %08X fn %08X draw %08X", where,
+                    (unsigned long long)host_frame_count(), head, o, cls, valid_ptr(cls) ? MEM_R32(c, cls + 0x14) : 0,
+                    valid_ptr(cls) ? MEM_R32(c, cls + 0x1C) : 0);
             log_msg(LogCat::Host, "    reached from %08X (cls %08X)", prev, MEM_R32(c, prev + 0x44));
             for (const MidWord& m : g_mid_words)
                 if (m.addr >= prev && m.addr < prev + 0x100)
@@ -338,6 +350,11 @@ void effects_dump(R3000* c) {
     for (auto& e : n) { char b[48]; std::snprintf(b, sizeof b, " %X:%08X=%d", (unsigned)(e.first >> 32), (unsigned)e.first, e.second); line += b; }
     log_msg(LogCat::Host, "%s", line.c_str());
     for_each_effect(c, [&](uint32_t list, uint32_t o) {
+        if (list == kRingList) {
+            const uint32_t p = MEM_R32(c, o + 0x50);
+            log_msg(LogCat::Host, "  ring %08X cls %08X size %X count %u table %08X (block %X)", o, MEM_R32(c, o + kEffectClass),
+                    MEM_R32(c, o - 4) >> 4, MEM_R32(c, o + 0x4C), p, valid_ptr(p) ? MEM_R32(c, p - 4) >> 4 : 0);
+        }
         if (list != kGlowList) return;
         log_msg(LogCat::Host, "  glow %08X cls %08X age %08X col %08X n %u r %08X a %08X f %08X %08X %08X", o, MEM_R32(c, o + kEffectClass),
                 MEM_R32(c, o + kEffectAge), MEM_R32(c, o + 0x58), MEM_R32(c, o + 0x50), MEM_R32(c, o + 0x5C), MEM_R32(c, o + 0x60),
@@ -492,6 +509,36 @@ bool span_free(const std::vector<uint32_t>& starts, uint32_t o, uint32_t a, uint
     return it == starts.end() || *it >= a + len;
 }
 
+// Safety net (before each world update and render at 60 Hz): a small object whose class the game
+// would call through is not a class (a freed effect left in its list, its memory used again) is
+// taken out of its list, and a link out of RAM ends the list, instead of a call to 80000000
+// (level 4's rings, 8003736C; level 1's world update, 80037258).
+void repair_small_lists(R3000* c) {
+    for (uint32_t head = kGp + 0x578; head <= kGp + 0x5A8; head += 4) {
+        uint32_t prev = head - 4, o = MEM_R32(c, head);  // the head is "prev + 4" of the first
+        for (int n = 0; o && n < 2048; n++) {
+            static int told = 0;
+            if (!valid_ptr(o)) {
+                if (told++ < 5)
+                    log_msg(LogCat::Host, "sim60: list %08X had a bad link %08X after %08X; cut (frame %llu)", head, o,
+                            prev, (unsigned long long)host_frame_count());
+                MEM_W32(c, prev + 4, 0);
+                break;
+            }
+            const uint32_t next = MEM_R32(c, o + 4);
+            if (!class_ok(c, head, o)) {
+                if (told++ < 5)
+                    log_msg(LogCat::Host, "sim60: list %08X object %08X had no class (%08X); taken out (frame %llu)", head,
+                            o, MEM_R32(c, o + 0x44), (unsigned long long)host_frame_count());
+                MEM_W32(c, prev + 4, next);
+            } else {
+                prev = o;
+            }
+            o = next;
+        }
+    }
+}
+
 // Every small object list intact: links point into RAM, and every object the world update will
 // run (800372B8: +0x3F clear) has a class (+0x44) with an update function (+0x14).
 bool small_lists_ok(R3000* c) {
@@ -499,9 +546,7 @@ bool small_lists_ok(R3000* c) {
         uint32_t o = MEM_R32(c, head);
         for (int n = 0; o; n++, o = MEM_R32(c, o + 4)) {
             if (!valid_ptr(o) || n >= 2048) return false;
-            if (MEM_R8(c, o + 0x3F)) continue;
-            const uint32_t cls = MEM_R32(c, o + 0x44);
-            if (!valid_ptr(cls) || !MEM_R32(c, cls + 0x14)) return false;
+            if (!class_ok(c, head, o)) return false;
         }
     }
     return true;
@@ -1146,6 +1191,8 @@ int sim60_render(R3000* c) {
     if (g_in_render) return 0;
     static const bool dump = std::getenv("APOC_EFFECT_DUMP") != nullptr;
     if (dump) effects_dump(c);
+    static const bool no_repair = std::getenv("APOC_NO_LIST_REPAIR") != nullptr;
+    if (!no_repair) repair_small_lists(c);
     const std::vector<HiddenLight> hidden = hide_odd_lights(c);
     const int r = sim60_render_lights_hidden(c);
     unhide_lights(c, hidden);
@@ -1325,6 +1372,21 @@ extern "C" int psx_hook_tick(R3000* c) {
     trace_player(c, t);
     if (!psx_opt_sim60) return 0;
     check_small(c, t & 1 ? "before odd tick" : "before world tick");
+    {  // Test: APOC_TEST_BREAK_EFFECT=FRAME:OFF gives the first object of list gp+OFF (hex) a class
+       // at 80000000, as in the level 4 crash (APOC_NO_LIST_REPAIR=1 lets it crash)
+        static const char* s = std::getenv("APOC_TEST_BREAK_EFFECT");
+        static bool done = false;
+        unsigned long long f = 0;
+        unsigned off = 0;
+        if (s && !done && std::sscanf(s, "%llu:%x", &f, &off) == 2 && host_frame_count() >= f)
+            if (const uint32_t o = MEM_R32(c, kGp + off); valid_ptr(o)) {
+                done = true;
+                MEM_W32(c, o + 0x44, 0x80000000u);
+                log_msg(LogCat::Host, "test: object %08X of list %08X broken", o, kGp + off);
+            }
+    }
+    static const bool no_repair = std::getenv("APOC_NO_LIST_REPAIR") != nullptr;
+    if (!no_repair) repair_small_lists(c);
 
     const uint32_t ra = c->r[31], sp = c->r[29];
     const Before before = capture(c);

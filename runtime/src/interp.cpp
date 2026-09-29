@@ -123,9 +123,19 @@ static bool optional_call_skipped(uint32_t pc) {
 
 void interp_run(R3000* c, uint32_t pc) {
     // The kernel's low memory holds no game code: this is a call through a null (or corrupt)
-    // function pointer. Running it would only execute junk and hang; stop with the evidence.
-    if ((pc & 0x1FFFFFFF) < 0x1000)
-        fatal("call to %08X (a null function pointer) from ra=%08X a0=%08X", pc, c->r[31], c->r[4]);
+    // function pointer. Running it would only execute junk and hang. Skip the call instead (as if
+    // it returned at once) and log it: an effect whose memory was used again made the ring render
+    // (8003736C) and its owner (80029ED4) call through 80000000 in level 4 (APOC_STRICT_CALLS=1:
+    // stop with the evidence as before).
+    if ((pc & 0x1FFFFFFF) < 0x1000) {
+        static const bool strict = std::getenv("APOC_STRICT_CALLS") != nullptr;
+        if (strict) fatal("call to %08X (a null function pointer) from ra=%08X a0=%08X", pc, c->r[31], c->r[4]);
+        static int told = 0;
+        if (told++ < 10)
+            log_msg(LogCat::Core, "skipped a call to %08X (a null function pointer) from ra=%08X a0=%08X", pc, c->r[31],
+                    c->r[4]);
+        return;
+    }
     report_once(pc, true);
     interp_loop(c, pc, c->r[31]);
 }

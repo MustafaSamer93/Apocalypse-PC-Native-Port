@@ -451,11 +451,13 @@ void draw_polygon(const uint32_t* w) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi; p.gouraud = gouraud;
         p.smooth = textured && g_smooth_font && g_gpu_packet_addr && text_packet(g_gpu_packet_addr);
-        if (p.smooth) {  // smoothing stays inside the glyph (its neighbours in the font are close)
+        if (textured) {  // the texels it may use (the shader clamps to them)
             int u0 = v[0].u, u1 = v[0].u, v0 = v[0].v, v1 = v[0].v;
             for (int i = 1; i < nv; i++)
                 u0 = std::min(u0, v[i].u), u1 = std::max(u1, v[i].u), v0 = std::min(v0, v[i].v), v1 = std::max(v1, v[i].v);
-            p.box = smooth_box(u0, v0, u1, v1);
+            // a glyph ends before its last coordinate (its neighbours in the font are close);
+            // a polygon may use the texel at its largest coordinate
+            p.box = p.smooth ? smooth_box(u0, v0, u1, v1) : smooth_box(u0, v0, u1 + 1, v1 + 1);
         }
         p.semi_mode = S.semi_mode;
         p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;
@@ -590,9 +592,12 @@ void draw_rect(const uint32_t* w) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi;
         p.smooth = textured && g_smooth_font && g_gpu_packet_addr && text_packet(g_gpu_packet_addr);
-        if (p.smooth) {
-            const int ue = S.rect_flip_x ? u0 - wdt : u0 + wdt, ve = S.rect_flip_y ? v0 - hgt : v0 + hgt;
-            p.box = smooth_box(std::min(u0, ue), std::min(v0, ve), std::max(u0, ue), std::max(v0, ve));
+        if (textured) {  // the texels it may use: [lo, hi) each way (a flipped sprite runs back from
+                         // u0); one that wraps past 255 keeps the whole page
+            const int ulo = S.rect_flip_x ? u0 - wdt + 1 : u0, vlo = S.rect_flip_y ? v0 - hgt + 1 : v0;
+            const int uhi = ulo + wdt, vhi = vlo + hgt;
+            const bool wraps = ulo < 0 || vlo < 0 || uhi > 256 || vhi > 256;
+            p.box = wraps ? smooth_box(0, 0, 256, 256) : smooth_box(ulo, vlo, uhi, vhi);
         }
         p.semi_mode = S.semi_mode;
         p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;

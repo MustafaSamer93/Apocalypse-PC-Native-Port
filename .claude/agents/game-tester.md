@@ -26,6 +26,24 @@ Default plan unless told otherwise: ~8 runs spread over different levels (random
 Re-run anything suspicious with the same seed to see whether it reproduces, and once with `--sim 0`
 (original 30 Hz) to tell recomp/60 Hz bugs from bugs the original game has too.
 
+## Playing for real (see and decide)
+
+To play through a level like a person, drive the game step by step with `tools/bot.py`. The game waits
+after every step, so take your time deciding:
+
+    python tools/bot.py start --chapter N          # once
+    python tools/bot.py step UP+SQUARE 30          # hold buttons for 30 frames (60 = 1 s); "- 20" = nothing
+    python tools/bot.py stop                       # ALWAYS, also after errors: restores the user's saves
+
+`step` prints frame, level, checkpoint (the last restart point reached = progress), lives, health,
+pos (x y z) and the path of the step's picture. Read the picture after every step and decide the next
+move from what you see. Controls: UP/DOWN walk forward/back (camera-relative), LEFT/RIGHT turn/strafe,
+SQUARE fire, R1 jump, CROSS/CIRCLE/TRIANGLE/L1/L2/R2 other actions (find out what they do and note it),
+START pause. Short steps (10-30 frames) near edges, enemies and jumps; longer (45-90) in open corridors.
+Progress = a new checkpoint name. If pos barely changes for several steps you are stuck: turn and try
+another way. If a level can't be progressed after a fair try, `stop`, then `start` the next chapter.
+A step that prints GAME EXITED or NO RESPONSE is a crash/hang: record it (log tail included), then stop.
+
 ## Triage each run
 
 1. `problems` in the report: crash, stopped_early, timed_out, log_errors, black_screen, frozen_picture.

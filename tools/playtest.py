@@ -115,7 +115,7 @@ def main():
     ini.write_text(f"gfx scale={a.scale} aspect=1 crt=0 filter=0 fps=0\nsim {a.sim}\ndrawdist 400\nprecise 1\n"
                    f"font 1\nfullscreen 0\naa 0\nmsaa 0\nrenderer {a.renderer}\nautosave 0\n")
     env = dict(os.environ, APOC_BACKGROUND="1", APOC_SETTINGS=str(ini), SDL_AUDIO_DRIVER="dummy",
-               APOC_SIM60_CHECK="1")
+               APOC_SIM60_CHECK="1", APOC_NO_DIALOGS="1")  # a FATAL logs registers + RAM instead of a dialog
     cmd = [str(EXE), "--scale", str(a.scale), "--log", "host", "--chapter", str(chapter), "--press", press,
            "--screenshot", ",".join(map(str, shots)), str(out / "shot")] + (["--turbo"] if a.turbo else [])
     (out / "press.txt").write_text(press)

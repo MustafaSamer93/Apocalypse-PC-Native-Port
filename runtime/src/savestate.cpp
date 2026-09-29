@@ -357,6 +357,20 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             MEM_W32(c, 0x800FEEBC + 0x430, 3);
         }
     }
+    {  // Debug: APOC_TEST_TELEPORT=FRAME:X:Y:Z puts the player at X Y Z (e.g. on a trigger)
+        static const char* t = std::getenv("APOC_TEST_TELEPORT");
+        static bool done = false;
+        unsigned long long tf = 0;
+        int x = 0, y = 0, z = 0;
+        if (t && !done && std::sscanf(t, "%llu:%d:%d:%d", &tf, &x, &y, &z) == 4 && frame >= tf) {
+            done = true;
+            if (uint32_t player = MEM_R32(c, 0x800FF5A0)) {
+                MEM_W32(c, player + 4, (uint32_t)x);
+                MEM_W32(c, player + 8, (uint32_t)y);
+                MEM_W32(c, player + 12, (uint32_t)z);
+            }
+        }
+    }
     {  // Debug: APOC_TEST_SAVE=FRAME saves state slot 5
         static const char* t = std::getenv("APOC_TEST_SAVE");
         static bool done = false;
