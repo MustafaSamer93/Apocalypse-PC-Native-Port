@@ -119,6 +119,7 @@ add_executable(apocalypse
     runtime/src/subtitles.cpp
     runtime/src/cheats.cpp
     runtime/src/movie.cpp
+    runtime/src/bootfont.cpp
     ${volk_SOURCE_DIR}/volk.c)
 target_include_directories(apocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
 target_compile_definitions(apocalypse PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)

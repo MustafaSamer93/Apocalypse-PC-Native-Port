@@ -35,7 +35,7 @@ SDL_Renderer* present_overlay_begin();
 void present_overlay_end();
 // A small w x h image (ARGB, row 0 = top) in the window's lower-left corner, `margin` pixels in
 // (the FPS counter). The pixels are uploaded only when `changed`; otherwise the last are shown.
-void present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed);  // slot 0 FPS, 1 version
+void present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed);  // slot 0 FPS, 1 version, 2 boot text
 
 void present_swap();
 void present_save_bmp(const char* path);  // back buffer -> BMP (debug screenshots)

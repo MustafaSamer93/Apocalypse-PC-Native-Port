@@ -129,6 +129,11 @@ extern int g_menu_zoom;     // setting: the game's menus at this percent of thei
 enum EnhSetting { E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_RES, E_ASPECT, E_DISPLAY, E_AUTOSAVE, E_SUBTITLES, E_AA,
                    E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT,
                    E_FPS_COUNTER, E_BOOT };
+// the boot sequence's text in TrueType fonts (bootfont.cpp)
+void bootfont_upload(int x, int y, int w, int h, const uint16_t* vram);
+void bootfont_fill(int x, int y, int w, int h);
+bool bootfont_draw(int nv, const float* sx, const float* sy, const int* u, const int* v, int page_x, int page_y,
+                   int depth, int clut_x, int clut_y, bool raw, int r, int g, int b);
 extern bool g_boot_sequence;  // setting: the BIOS boot sequence at start (bios.cpp; assets/bios)
 const char* enh_name(int id);
 std::string enh_value(int id);

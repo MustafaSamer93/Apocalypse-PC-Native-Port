@@ -361,15 +361,16 @@ void gl_present_overlay_end() {
     glDisable(GL_BLEND);
 }
 
-GLuint g_badge_tex[2] = {};
-int g_badge_w[2] = {}, g_badge_h[2] = {};
+GLuint g_badge_tex[3] = {};
+int g_badge_w[3] = {}, g_badge_h[3] = {};
 
 void gl_present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed) {
-    GLuint& tex = g_badge_tex[slot & 1];
-    if (!tex || w != g_badge_w[slot & 1] || h != g_badge_h[slot & 1]) {
+    slot = std::clamp(slot, 0, 2);
+    GLuint& tex = g_badge_tex[slot];
+    if (!tex || w != g_badge_w[slot] || h != g_badge_h[slot]) {
         if (tex) glDeleteTextures(1, &tex);
         tex = make_texture(w, h, GL_LINEAR);
-        g_badge_w[slot & 1] = w, g_badge_h[slot & 1] = h;
+        g_badge_w[slot] = w, g_badge_h[slot] = h;
         changed = true;
     }
     glBindTexture(GL_TEXTURE_2D, tex);

@@ -556,6 +556,14 @@ void draw_polygon(const uint32_t* w) {
     int bx0 = v[0].x, bx1 = v[0].x;
     for (int i = 1; i < nv; i++) bx0 = std::min(bx0, v[i].x), bx1 = std::max(bx1, v[i].x);
     float cx = 0, k = squeeze_2d((float)bx0, (float)bx1, &cx);
+    if (g_bios_rom && textured && hw_active()) {  // the boot sequence's words: TrueType (bootfont.cpp)
+        float sx[4], sy[4];
+        int su[4], sv[4];
+        for (int i = 0; i < nv; i++) sx[i] = cx + ((float)v[i].x - cx) * k, sy[i] = (float)v[i].y, su[i] = v[i].u, sv[i] = v[i].v;
+        if (bootfont_draw(nv, sx, sy, su, sv, tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, raw, v[0].r,
+                          v[0].g, v[0].b))
+            return;
+    }
     if (hw_active()) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi; p.gouraud = gouraud;
@@ -952,6 +960,7 @@ void execute(const std::vector<uint32_t>& w) {
             for (int j = 0; j < hh; j++)
                 for (int i = 0; i < ww; i++) vram(x + i, y + j) = c;
             if (hw_active()) hw_fill(x, y, ww, hh, c);
+            if (g_bios_rom) bootfont_fill(x, y, ww, hh);
             return;
         }
         case 0x1F: DS.irq = true; return;
@@ -999,6 +1008,7 @@ void upload_word(uint32_t v) {
                 g_upload.active = false;
                 LOG(Gpu, "upload %d,%d %dx%d", g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (hw_active()) hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
+                if (g_bios_rom) bootfont_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
                 texdump_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (g_upload.x + g_upload.w > 512 && g_upload.h > 1) texreplace_vram_changed();
                 if (static const char* dir = std::getenv("APOC_UPLOAD_DUMP"); dir) {  // raw uploads (tools/extract_textures.py)

@@ -1121,6 +1121,10 @@ static void draw_game(const GpuDisplay& d, double frac) {
         }
         if (image != g_last_image) g_images++;
         g_last_image = image;
+        if (g_bios_rom) {
+            void bootfont_present(const GpuDisplay& d, SDL_Window* window);
+            bootfont_present(d, g_window);  // the boot sequence's text (bootfont.cpp)
+        }
         maybe_screenshot();  // before the toasts: the picture is the game alone
         draw_toast();
         draw_version();
