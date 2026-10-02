@@ -57,7 +57,6 @@ bool g_multi_present = false;  // not one image per emulated vblank: host_thrott
 bool g_present_vsync = true;   // ...paced by the display (else by a timer, for rates above its refresh)
 bool g_present_timed = false;  // ...on our own clock with vsync on (a display not a multiple of 60 Hz: 75)
 uint64_t g_next_present_ns = 0;
-constexpr int kFpsChoices[] = {0, 30, 60, 90, 120, 150};
 int g_active_scale = -1;    // renderer actually in use
 
 // Every connected controller drives player 1 (Apocalypse is single-player). Devices SDL
@@ -550,6 +549,35 @@ static SDL_Window* create_window(const char* title, int w, int h, SDL_WindowFlag
 }
 #endif
 
+// The top of the log (debug/apocalypse.log): what a tester's report needs to know about the
+// game and the PC. The GPU, display and renderer follow when the window opens.
+void report_header() {
+    char when[64];
+    const std::time_t now = std::time(nullptr);
+    std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    log_msg(LogCat::Host, "===== Apocalypse %s report log, started %s =====", kVersion, when);
+#ifdef _WIN32
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    OSVERSIONINFOW os{sizeof os};
+    if (auto fn = (RtlGetVersionFn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")) fn(&os);
+    log_msg(LogCat::Host, "system: Windows %lu.%lu build %lu", os.dwMajorVersion, os.dwMinorVersion, os.dwBuildNumber);
+    MEMORYSTATUSEX mem{sizeof mem};
+    GlobalMemoryStatusEx(&mem);
+    log_msg(LogCat::Host, "memory: %llu MB, %llu MB free", (unsigned long long)(mem.ullTotalPhys >> 20),
+            (unsigned long long)(mem.ullAvailPhys >> 20));
+#endif
+    log_msg(LogCat::Host, "processor: %d logical cores, %d MB RAM (SDL)", SDL_GetNumLogicalCPUCores(), SDL_GetSystemRAM());
+    if (FILE* f = std::fopen(settings_file(), "r")) {  // the settings, as saved
+        char line[512];
+        while (std::fgets(line, sizeof line, f)) {
+            line[std::strcspn(line, "\r\n")] = 0;
+            if (line[0] && line[0] != '#' && std::strncmp(line, "keys", 4) && std::strncmp(line, "pad ", 4))
+                log_msg(LogCat::Host, "setting: %s", line);
+        }
+        std::fclose(f);
+    }
+}
+
 bool host_init(const char* title, int scale) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
         log_msg(LogCat::Host, "SDL_Init failed: %s", SDL_GetError());
@@ -559,6 +587,7 @@ bool host_init(const char* title, int scale) {
     if (SDL_AddGamepadMappingsFromFile("gamecontrollerdb.txt") > 0)
         log_msg(LogCat::Host, "loaded extra controller mappings from gamecontrollerdb.txt");
     load_settings();
+    report_header();
     // Fullscreen (on the desktop's own mode) unless the player chose a window with F11. The
     // window, for then: shaped like the picture; `scale` N asks for 240*N lines; 0 (the
     // default) asks for 1080: a 1080p window if the desktop has room, else the largest that fits.
@@ -678,6 +707,10 @@ void host_poll() {
             case SDL_EVENT_QUIT: g_quit = true; break;
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) g_quit = true;
+                // F keys (settings, chapters, states, issue marker, screenshot, fullscreen) are off
+                // in the game; APOC_DEV_KEYS=1 turns them on for development
+                static const bool dev_keys = std::getenv("APOC_DEV_KEYS") != nullptr;
+                if (!dev_keys) break;
                 if (e.key.scancode == SDL_SCANCODE_F1 && !e.key.repeat) open_menu = true;
                 if (e.key.scancode == SDL_SCANCODE_F2 && !e.key.repeat) open_chapters = true;
                 if (e.key.scancode == SDL_SCANCODE_F5 && !e.key.repeat) state_request_save(1);
@@ -828,14 +861,6 @@ uint16_t mouse_buttons() {
 // Free aim: the exact direction of the right stick, or of the cursor while the left mouse
 // button is held (x right, y down). False when neither is aiming.
 bool free_aim(float& x, float& y) {
-    // Debug: APOC_AIM_TEST=DEG aims at a fixed screen angle (0 = right, 90 = down)
-    if (static const char* t = std::getenv("APOC_AIM_TEST"); t) {
-        double deg = std::atof(t);
-        if (const char* j = std::strchr(t, ':')) deg += std::atof(j + 1) * ((std::rand() % 2001) / 1000.0 - 1.0);  // DEG:JITTER
-        const double a = deg * 3.14159265358979 / 180.0;
-        x = (float)std::cos(a); y = (float)std::sin(a);
-        return true;
-    }
     for (auto& dev : g_devices) {
         if (!dev.pad) continue;
         int rx = SDL_GetGamepadAxis(dev.pad, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(dev.pad, SDL_GAMEPAD_AXIS_RIGHTY);
@@ -861,13 +886,12 @@ constexpr int kStanceHysteresis = 96;   // 8.4 degrees past a stance border befo
 // button) and aims at its atan2 (+476), so the buttons give only 8 directions. When the
 // game registered a fire direction, replace it by the exact stick / cursor direction; the
 // game's own code then does the rest (upper-body pose within each 45-degree sector, auto
-// aim, fire rate). APOC_NO_FREE_AIM=1 turns this off.
+// aim, fire rate).
 extern "C" void psx_hook_aim(R3000* c) {
-    static const bool off = std::getenv("APOC_NO_FREE_AIM") != nullptr;
     static int last = -1;  // game angle last written (-1: not firing)
     const uint32_t p = c->r[16];
     float x, y;
-    if (off || !(MEM_R8(c, p + 471) | MEM_R8(c, p + 472)) || !free_aim(x, y)) {
+    if (!(MEM_R8(c, p + 471) | MEM_R8(c, p + 472)) || !free_aim(x, y)) {
         last = -1;
         return;
     }
@@ -886,9 +910,6 @@ extern "C" void psx_hook_aim(R3000* c) {
     const double t = (1024 - a) * kUnit;
     MEM_W8(c, p + 471, (uint8_t)(int8_t)std::lround(-std::sin(t) * 127));
     MEM_W8(c, p + 472, (uint8_t)(int8_t)std::lround(std::cos(t) * 127));
-    if (std::getenv("APOC_AIM_TEST"))
-        log_msg(LogCat::Host, "aim %d,%d angle %u want %d frame %llu", (int8_t)MEM_R8(c, p + 472), (int8_t)MEM_R8(c, p + 471),
-                MEM_R16(c, p + 476), a, (unsigned long long)g_frame);
 }
 
 PadState host_pad(int port, bool analog) {
@@ -1027,14 +1048,6 @@ bool host_parse_state_script(const char* spec) {
     return true;
 }
 
-// Debug: APOC_SHOT_OVERLAYS=FRAME:PATH saves the picture with the toasts and FPS counter on it.
-static void maybe_screenshot_overlays() {
-    static const char* t = std::getenv("APOC_SHOT_OVERLAYS");
-    unsigned long long f = 0;
-    char path[260] = "";
-    if (t && std::sscanf(t, "%llu:%259s", &f, path) == 2 && g_frame == f) present_save_bmp(path);
-}
-
 static void maybe_screenshot() {
     for (uint64_t f : g_shot_frames)
         if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
@@ -1109,7 +1122,6 @@ static void draw_game(const GpuDisplay& d, double frac) {
             maybe_screenshot();
             draw_toast();
             draw_fps_counter();
-            maybe_screenshot_overlays();
             present_swap();
             return;
         }
@@ -1141,7 +1153,6 @@ static void draw_game(const GpuDisplay& d, double frac) {
         draw_toast();
         draw_version();
         draw_fps_counter();
-        maybe_screenshot_overlays();
         present_swap();
         return;
     }
@@ -1175,7 +1186,6 @@ static void draw_game(const GpuDisplay& d, double frac) {
     draw_toast();
     draw_version();  // (the title screen's moving background is a 24-bit movie too)
     draw_fps_counter();
-    maybe_screenshot_overlays();
     present_swap();
 }
 
@@ -1242,9 +1252,13 @@ void host_present(const GpuDisplay& d) {
     static uint64_t fps_t0 = SDL_GetTicksNS(), fps_frames = 0, fps_images0 = 0, last_present = 0, dt_min = ~0ull,
                     dt_max = 0;
     uint64_t t_now = SDL_GetTicksNS();
+    static uint64_t dt_max_seen = 0;
+    static int slow_seen = 0;
     if (last_present) {
         dt_min = std::min(dt_min, t_now - last_present);
         dt_max = std::max(dt_max, t_now - last_present);
+        dt_max_seen = std::max(dt_max_seen, t_now - last_present);
+        if (t_now - last_present > 50'000'000ull) slow_seen++;
     }
     last_present = t_now;
     if (++fps_frames == 60) {
@@ -1269,6 +1283,22 @@ void host_present(const GpuDisplay& d) {
             SDL_SetWindowTitle(g_window, title);
         }
         LOG(Host, "frame %llu: %.1f Hz emulated, %.1f images/s", (unsigned long long)g_frame, fps, images);
+        // once a minute in every log: the frame rate and slow moments of that minute
+        static uint64_t minute_t0 = now, minute_images = g_images, minute_worst = 0;
+        static int minute_slow = 0;
+        minute_worst = std::max(minute_worst, dt_max_seen);
+        minute_slow += slow_seen;
+        dt_max_seen = 0;
+        slow_seen = 0;
+        if (now - minute_t0 >= 60'000'000'000ull) {
+            const double m = (double)(now - minute_t0) / 1e9;
+            log_msg(LogCat::Host, "performance: %.1f fps, slowest frame %.0f ms, %d frames over 50 ms (frame %llu)",
+                    (double)(g_images - minute_images) / m, minute_worst / 1e6, minute_slow, (unsigned long long)g_frame);
+            minute_t0 = now;
+            minute_images = g_images;
+            minute_worst = 0;
+            minute_slow = 0;
+        }
         fps_t0 = now;
         fps_frames = 0;
         fps_images0 = g_images;
@@ -1422,6 +1452,7 @@ void enh_change(int id, int dir) {
         }
         default: return;
     }
+    log_msg(LogCat::Host, "setting changed: %s = %s", enh_name(id), enh_value(id).c_str());
     apply_graphics();
     save_settings();
 }
@@ -2076,7 +2107,6 @@ void host_audio_push(const int16_t* stereo, int frames) {
     SDL_PutAudioStreamData(g_audio, stereo, frames * 4);
 }
 
-int host_audio_queued_frames() { return g_audio ? SDL_GetAudioStreamQueued(g_audio) / 4 : 0; }
 
 void host_toast(const std::string& text) {
     g_toast = text;

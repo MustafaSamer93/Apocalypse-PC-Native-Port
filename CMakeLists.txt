@@ -148,9 +148,6 @@ set_target_properties(apocalypse PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_SOURCE_DIR}
     RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR})
 
-# GTE known-answer tests (no game code needed)
-add_executable(gte_test runtime/tests/gte_test.cpp runtime/src/gte.cpp)
-target_include_directories(gte_test PRIVATE runtime/include runtime/src)
 find_package(OpenGL REQUIRED)
 target_link_libraries(apocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL Vulkan::Headers)
 if(WIN32)

@@ -310,16 +310,11 @@ int sim60_render(R3000* c);
 bool sim60_in_render();
 extern GteBlendMode g_gte_blend;
 void drawdist_apply(R3000* c);
-void sim60_effects_dump(R3000* c);
 
 extern "C" int psx_hook_render(R3000* c) {
     if (core_in_ghost()) return 0;
     g_level_render_frame = host_frame_count();  // (savestate.cpp: a level is running)
     drawdist_apply(c);
-    if (!psx_opt_sim60) {  // (sim60_render dumps its own)
-        static const bool dump = std::getenv("APOC_EFFECT_DUMP") != nullptr;
-        if (dump) sim60_effects_dump(c);
-    }
     // The 60 Hz simulation draws through its own render (sim60_render), which calls this one again
     // with the frame's values in place: above 60 images/s the extra images are made there.
     if (psx_opt_sim60 && !sim60_in_render()) return sim60_render(c);

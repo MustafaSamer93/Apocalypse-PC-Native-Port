@@ -1,6 +1,6 @@
 @echo off
 rem Builds the native Windows version of Apocalypse from your own disc image.
-rem   1. put "Apocalypse (USA).cue" and its .bin files in "assets\game disks"
+rem   1. put your disc image (.cue and .bin files, any names, or just the .bin files) in "assets\image"
 rem   2. run build.bat
 rem   3. run apocalypse.exe (it is made in this folder)
 setlocal
@@ -13,7 +13,7 @@ if not exist "%VCVARS%" (
 call "%VCVARS%" >nul || (echo Visual Studio C++ tools not found & exit /b 1)
 set PATH=C:\Program Files\Git\cmd;%PATH%
 
-if not exist "assets\game disks\Apocalypse (USA).cue" (echo Put your disc image in "assets\game disks" first & exit /b 1)
+if not exist "assets\image\*.cue" if not exist "assets\image\*.bin" (echo Put your disc image ^(.cue/.bin^) in "assets\image" first & exit /b 1)
 
 echo [1/4] Extracting the executable from the disc...
 python tools\discfs.py extract >nul || exit /b 1

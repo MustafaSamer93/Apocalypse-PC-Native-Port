@@ -78,7 +78,6 @@ ENTRY_HOOKS = {
     # pickup voice lines: more of them, and one for Extra Life (game_menu.cpp)
     0x8002FC64: "if (psx_hook_voice(c)) return;",
     0x8005E260: "psx_hook_weapon_pickup(c);",  # cheats.cpp
-    0x8002FF34: "psx_hook_free(c);",  # debug: APOC_WEAPON_TRACE (cheats.cpp)
     0x8001B788: "psx_hook_message(c);",
 }
 
@@ -87,11 +86,10 @@ ENTRY_HOOKS = {
 #            (v0): sort glows nearer (sim60.cpp psx_hook_glow_sort)
 INSN_HOOKS = {
     0x800376F8: "psx_hook_glow_sort(c);",
-    0x80037FC8: "psx_hook_glow_end(c);",  # the glow list is done (soft glows: packet ranges)
-    0x80080D38: "psx_hook_strip_corner(c);",
-    0x800312A0: "psx_hook_game_over(c);",  # lives left (v1) after a death: 0 restarts the level (savestate.cpp)  # a strip corner (lamps): exact position (gte.cpp)
-    0x800776B4: "psx_hook_camera(c);",
-    0x8005CDA0: "psx_hook_aim(c);",  # player fire vector +471/+472 set: exact stick/mouse angle (host_sdl.cpp)  # render camera = (view pos + shake) >> 12: keep the fraction (gte.cpp)
+    0x80080D38: "psx_hook_strip_corner(c);",  # a strip corner (lamps): exact position (gte.cpp)
+    0x800312A0: "psx_hook_game_over(c);",  # lives left (v1) after a death: 0 restarts the level (savestate.cpp)
+    0x800776B4: "psx_hook_camera(c);",  # the render camera: smoothed view (gte.cpp)
+    0x8005CDA0: "psx_hook_aim(c);",  # player fire vector +471/+472 set: exact stick/mouse angle (host_sdl.cpp)
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.
@@ -209,7 +207,7 @@ class FunctionEmitter:
             fn = {"sb": "MEM_W8", "sh": "MEM_W16", "sw": "MEM_W32",
                   "swl": "MEM_SWL", "swr": "MEM_SWR"}[n]
             if n == "sw":
-                return [f"{{ const uint32_t a_ = {addr}; MEM_W32(c, a_, {R(rt)}); PGXP_SW({rt}, a_, 0x{i.addr:08X}u); }}"]
+                return [f"{{ const uint32_t a_ = {addr}; MEM_W32(c, a_, {R(rt)}); PGXP_SW({rt}, a_); }}"]
             return [f"{fn}(c, {addr}, {R(rt)});"]
         if k == K_COP0:
             if n == "mfc0": return set_(rt, f"cop0_read(c, {rd})")

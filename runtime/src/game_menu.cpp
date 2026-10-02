@@ -397,16 +397,6 @@ extern "C" void psx_hook_menu_init(R3000* c) {
 // 800119C4: the front end's background camera, once per loop: its angle (+24) goes on by 4 and
 // 800119F0 places the camera. With the menus at 60 Hz it goes on by 2.
 extern "C" int psx_hook_menu_camera(R3000* c) {
-    if (static const char* dump = std::getenv("APOC_LOOP_DUMP"); dump) {  // debug: START:COUNT:PREFIX
-        static unsigned loop = 0;
-        unsigned start = 0, count = 0;
-        char prefix[260] = "";
-        if (std::sscanf(dump, "%u:%u:%259s", &start, &count, prefix) == 3 && loop >= start && loop < start + count)
-            if (FILE* f = std::fopen((std::string(prefix) + std::to_string(loop - start) + ".bin").c_str(), "wb"))
-                std::fwrite(psx_ram, 1, PSX_RAM_SIZE, f), std::fclose(f);
-        if (loop % 60 == 0) std::fprintf(stderr, "front end loop %u at frame %llu\n", loop, (unsigned long long)host_frame_count());
-        loop++;
-    }
     // the next loop is an in-between one; this one's step of the update counter is undone
     // (the game's animations (button prompts, ...) count it)
     static uint32_t counted = 0;
@@ -553,12 +543,9 @@ extern "C" int psx_hook_menu_draw(R3000* c) {
         if (!ghost) g_main_drawn = true;
         if (!ghost && !g_song_started) {
             g_song_started = true;
-            static const char* e = std::getenv("APOC_MENU_SONG");
-            const int song = e ? std::atoi(e) : 2;  // plague (level 3; entry 6 is the same song)
-            if (song >= 0 && song <= 10) {
-                game_call(c, kSongLoad, MEM_R32(c, kSongs + 24 * (uint32_t)song + 8));
-                game_call(c, kSongPlay);
-            }
+            constexpr uint32_t song = 2;  // plague (level 3; entry 6 is the same song)
+            game_call(c, kSongLoad, MEM_R32(c, kSongs + 24 * song + 8));
+            game_call(c, kSongPlay);
         }
         if (g_main_text) append_item(c, menu, g_main_text);
         move_after(c, menu, text_of(c, kStrSelectLevel), text_of(c, kStrLoadGame));
@@ -911,71 +898,6 @@ extern "C" void psx_hook_message(R3000* c) {
     g_voice_ours = true;
     game_call(c, kPlayVoice, 1, game_call(c, kRandom, 2), player + 4, 1);
     g_voice_ours = false;
-}
-
-// Debug (APOC_TEST_PICKUP, savestate.cpp): a weapon pickup of type 1-7 (8005E260), 0 = the Extra
-// Life pickup's message, 8 = the Smart Bomb pickup's (their voice lines come from psx_hook_message).
-void game_test_pickup(R3000* c, int what) {
-    const uint32_t player = MEM_R32(c, kPlayer);
-    if (!player) return;
-    if (what == 0) game_call(c, 0x8001B788, text_of(c, kStrExtraLife), 0x800A59DC);
-    else if (what == 8) game_call(c, 0x8001B788, text_of(c, kStrSmartBomb), 0x800A57A8);
-    else game_call(c, 0x8005E260, player, (uint32_t)what);
-}
-
-// Debug (APOC_TEST_HEALTH, savestate.cpp): a health pickup's effect, 8005CE70(player, amount).
-void game_test_health(R3000* c, int amount) {
-    const uint32_t player = MEM_R32(c, kPlayer);
-    if (player) game_call(c, 0x8005CE70, player, (uint32_t)amount);
-}
-
-// Debug (APOC_TEST_GRAB): moves the player onto the next health pickup (type 14-16) in the
-// pickup list 0x800FF204, so the game's own touch picks it up.
-void game_test_grab(R3000* c) {
-    const uint32_t player = MEM_R32(c, kPlayer);
-    static uint32_t done[64];  // object address + type (addresses are used again)
-    static int ndone = 0;
-    if (!player) return;
-    for (uint32_t o = MEM_R32(c, 0x800FF204), n = 0; o && n < 500; o = MEM_R32(c, o + 0x1C), n++) {
-        const int type = (int)MEM_R16(c, o + 58);
-        bool seen = false;
-        for (int i = 0; i < ndone; i++) seen |= done[i] == (o ^ (uint32_t)type << 24);
-        LOG(Host, "pickup obj %08X type %d pos %d %d %d%s", o, type, (int)MEM_R32(c, o + 4) >> 12,
-            (int)MEM_R32(c, o + 8) >> 12, (int)MEM_R32(c, o + 12) >> 12, seen ? " (done)" : "");
-        static const int any = std::getenv("APOC_TEST_GRAB_ANY") != nullptr;  // any pickup, not only health
-        if (seen || (!any && (type < 14 || type > 16)) || ndone >= 64) continue;
-        done[ndone++] = o ^ (uint32_t)type << 24;
-        for (int k = 0; k < 3; k++) MEM_W32(c, player + 4 + 4 * k, MEM_R32(c, o + 4 + 4 * k));
-        LOG(Host, "grab health type %d at frame %llu", type, (unsigned long long)host_frame_count());
-        return;
-    }
-}
-
-// Debug (APOC_TEST_SPAWN=FRAME:PERIOD:T1,T2,..., savestate.cpp): drops a pickup of each type in
-// turn at the player's feet with the game's own spawner (80020EF8, as an enemy's drop does), so
-// the game's touch picks it up.
-void game_test_spawn(R3000* c, int type) {
-    const uint32_t player = MEM_R32(c, kPlayer);
-    if (!player) return;
-    const uint32_t o = game_call(c, 0x80020EF8, (uint32_t)type, player + 4, 4, 240, {0x800A71CC});
-    LOG(Host, "spawn pickup type %d obj %08X at frame %llu", type, o, (unsigned long long)host_frame_count());
-}
-// Every frame: logs when a pickup object leaves the pickup list (collected or gone).
-void game_test_spawn_poll(R3000* c) {
-    static std::vector<std::pair<uint32_t, int>> known;
-    std::vector<std::pair<uint32_t, int>> now;
-    for (uint32_t o = MEM_R32(c, 0x800FF204), n = 0; o && n < 500; o = MEM_R32(c, o + 0x1C), n++)
-        now.push_back({o, (int)MEM_R16(c, o + 58)});
-    for (auto& k : known)
-        if (std::find(now.begin(), now.end(), k) == now.end())
-            LOG(Host, "pickup obj %08X type %d gone at frame %llu", k.first, k.second, (unsigned long long)host_frame_count());
-    known = now;
-    // and when a subtitle comes and goes (its time on screen against the clip's length)
-    static bool was_shown = false;
-    const bool shown = subtitle_listed(c);
-    if (shown != was_shown)
-        LOG(Host, "subtitle %s at frame %llu", shown ? "shown" : "gone", (unsigned long long)host_frame_count());
-    was_shown = shown;
 }
 
 float subtitle_tilt(uint32_t text) {

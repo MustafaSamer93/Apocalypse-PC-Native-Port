@@ -451,7 +451,6 @@ Staging stage(VkDeviceSize size) {
     return s;
 }
 
-VkDescriptorSetLayout sampler_layout() { return g_sampler_layout; }
 
 VkDescriptorSet sampler_set(const VkImg& img, bool linear) {
     auto key = std::make_pair(img.view, linear);
@@ -496,8 +495,8 @@ VkPipelineLayout make_layout(uint32_t push_bytes, uint32_t sets) {
     return l;
 }
 
-// Vertex layout shared with gpu_vk.cpp (VkVtx): pos, colour, uv, info, w, box, z, fade.
-static constexpr uint32_t kVtxStride = 44;
+// Vertex layout shared with gpu_vk.cpp (VkVtx): pos, colour, uv, info, w, box, z.
+static constexpr uint32_t kVtxStride = 40;
 
 VkPipeline make_pipeline(const PipelineDesc& d) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
@@ -510,7 +509,7 @@ VkPipeline make_pipeline(const PipelineDesc& d) {
     st[1].pName = "main";
 
     VkVertexInputBindingDescription bind{0, kVtxStride, VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attrs[8] = {
+    VkVertexInputAttributeDescription attrs[7] = {
         {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
         {1, 0, VK_FORMAT_R8G8B8A8_UNORM, 8},
         {2, 0, VK_FORMAT_R32G32_SFLOAT, 12},
@@ -518,13 +517,12 @@ VkPipeline make_pipeline(const PipelineDesc& d) {
         {4, 0, VK_FORMAT_R32_SFLOAT, 28},
         {5, 0, VK_FORMAT_R32_UINT, 32},
         {6, 0, VK_FORMAT_R32_SFLOAT, 36},
-        {7, 0, VK_FORMAT_R32_SFLOAT, 40},
     };
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     if (d.vertices != Vertices::None) {
         vi.vertexBindingDescriptionCount = 1;
         vi.pVertexBindingDescriptions = &bind;
-        vi.vertexAttributeDescriptionCount = d.vertices == Vertices::Vram ? 8 : 1;
+        vi.vertexAttributeDescriptionCount = d.vertices == Vertices::Vram ? 7 : 1;
         vi.pVertexAttributeDescriptions = attrs;
     }
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};

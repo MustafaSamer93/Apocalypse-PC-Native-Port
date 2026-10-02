@@ -14,7 +14,6 @@ layout(location = 1) in vec2 v_uv;
 layout(location = 2) flat in uvec2 v_info;
 layout(location = 3) flat in uint v_box;
 layout(location = 4) in float v_z;
-layout(location = 5) flat in float v_fade;
 layout(location = 0) out vec4 o_color;
 
 uint fetch16(ivec2 p) {
@@ -194,14 +193,9 @@ void main() {
             tc = texel(ivec2(fl), uv - fl, transparent);
         }
         if (transparent) discard;
-        if (((v_info.x >> 26) & 1u) != 0u) tc.rgb = vec3(min(max(tc.r, max(tc.g, tc.b)) * 1.5, 1.0));  // selected item: white
         semi_px = tc.a > 0.5;
         col = raw ? tc.rgb : min(tc.rgb * v_color.rgb * (255.0 / 128.0), vec3(1.0));
         mbit = semi_px ? 1.0 : 0.0;
-    }
-    if (((v_info.x >> 25) & 1u) != 0u) {  // glow: u_vram is the depth image (native size)
-        float zs = texelFetch(u_vram, ivec2(gl_FragCoord.xy) / pc.scale, 0).r;
-        col *= clamp((zs - v_z + v_fade) / v_fade, 0.0, 1.0);
     }
     if (pc.pass_ == 1 && semi_px) discard;
     if (pc.pass_ == 2 && !semi_px) discard;

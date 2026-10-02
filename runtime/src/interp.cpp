@@ -125,11 +125,8 @@ void interp_run(R3000* c, uint32_t pc) {
     // The kernel's low memory holds no game code: this is a call through a null (or corrupt)
     // function pointer. Running it would only execute junk and hang. Skip the call instead (as if
     // it returned at once) and log it: an effect whose memory was used again made the ring render
-    // (8003736C) and its owner (80029ED4) call through 80000000 in level 4 (APOC_STRICT_CALLS=1:
-    // stop with the evidence as before).
+    // (8003736C) and its owner (80029ED4) call through 80000000 in level 4.
     if ((pc & 0x1FFFFFFF) < 0x1000) {
-        static const bool strict = std::getenv("APOC_STRICT_CALLS") != nullptr;
-        if (strict) fatal("call to %08X (a null function pointer) from ra=%08X a0=%08X", pc, c->r[31], c->r[4]);
         static int told = 0;
         if (told++ < 10)
             log_msg(LogCat::Core, "skipped a call to %08X (a null function pointer) from ra=%08X a0=%08X", pc, c->r[31],
@@ -237,10 +234,6 @@ bool interp_run_machine(R3000* c, uint32_t pc, uint32_t stop_pc, uint64_t cycle_
         if (c->cycles >= c->next_event) {
             psx_run_events(c);
             if (c->cycles >= end || (++frames % 64 == 0 && skip && skip())) return false;
-            static const bool trace = std::getenv("APOC_BIOS_TRACE") != nullptr;
-            if (trace && frames % 263 == 0)
-                log_msg(LogCat::Bios, "pc=%08X ra=%08X sr=%08X istat/mask via cause=%08X", pc, c->r[31], c->cop0[12],
-                        cop0_read(c, 13));
         }
         uint32_t w = fetch(c, pc);
         if (irq_should_take(c)) {

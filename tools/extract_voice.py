@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from discfs import Disc, RAW_SECTOR, bin_from_cue  # noqa: E402
+from discfs import Disc, RAW_SECTOR, find_data_bin  # noqa: E402
 
 EXE_BASE = 0x80010000 - 0x800
 POS_TABLE, LEN_TABLE, BLOCKS, CHANNELS = 0x800A5F80, 0x800A5FD8, 22, 16
@@ -55,7 +55,7 @@ def main():
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "assets" / "extracted" / "voice"
     out_dir.mkdir(parents=True, exist_ok=True)
     exe = (ROOT / "extracted" / "SLUS_003.73").read_bytes()
-    disc = Disc(bin_from_cue(ROOT / "assets" / "game disks" / "Apocalypse (USA).cue"))
+    disc = Disc(find_data_bin())
     xa = disc.find("APOC.XA")
     f = disc.f
     clips = clip_table(exe)

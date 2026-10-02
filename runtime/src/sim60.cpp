@@ -166,11 +166,6 @@ bool class_ok(R3000* c, uint32_t head, uint32_t o) {
 constexpr uint32_t kFreeze1 = 0x800FF008, kFreeze2 = kGp + 0x444;
 bool world_frozen(R3000* c) {
     const bool f = MEM_R32(c, kFreeze1) || MEM_R32(c, kFreeze2);
-    static bool was = false;
-    if (f != was && std::getenv("APOC_SIM60_TRACE"))
-        log_msg(LogCat::Host, "sim60 world %s f=%llu (%08X %08X)", f ? "frozen" : "running",
-                (unsigned long long)host_frame_count(), MEM_R32(c, kFreeze1), MEM_R32(c, kFreeze2));
-    was = f;
     return f;
 }
 
@@ -343,31 +338,6 @@ void for_each_effect(R3000* c, F f) {
     }
 }
 
-// APOC_EFFECT_DUMP=1 (debugging): every render, the small objects by list and class, and each
-// glow-list light's fields (age, colour, radius, angle, fades).
-void effects_dump(R3000* c) {
-    std::vector<std::pair<uint64_t, int>> n;
-    for_each_effect(c, [&](uint32_t list, uint32_t o) {
-        const uint64_t k = (uint64_t)(list - kGp) << 32 | MEM_R32(c, o + kEffectClass);
-        for (auto& e : n) if (e.first == k) { e.second++; return; }
-        n.push_back({k, 1});
-    });
-    std::string line = "EFFECTS f=" + std::to_string(host_frame_count()) + " tick=" + std::to_string(MEM_R32(c, kHalfTicks));
-    for (auto& e : n) { char b[48]; std::snprintf(b, sizeof b, " %X:%08X=%d", (unsigned)(e.first >> 32), (unsigned)e.first, e.second); line += b; }
-    log_msg(LogCat::Host, "%s", line.c_str());
-    for_each_effect(c, [&](uint32_t list, uint32_t o) {
-        if (list == kRingList) {
-            const uint32_t p = MEM_R32(c, o + 0x50);
-            log_msg(LogCat::Host, "  ring %08X cls %08X size %X count %u table %08X (block %X)", o, MEM_R32(c, o + kEffectClass),
-                    MEM_R32(c, o - 4) >> 4, MEM_R32(c, o + 0x4C), p, valid_ptr(p) ? MEM_R32(c, p - 4) >> 4 : 0);
-        }
-        if (list != kGlowList) return;
-        log_msg(LogCat::Host, "  glow %08X cls %08X age %08X col %08X n %u r %08X a %08X f %08X %08X %08X", o, MEM_R32(c, o + kEffectClass),
-                MEM_R32(c, o + kEffectAge), MEM_R32(c, o + 0x58), MEM_R32(c, o + 0x50), MEM_R32(c, o + 0x5C), MEM_R32(c, o + 0x60),
-                MEM_R32(c, o + 0x6C), MEM_R32(c, o + 0x70), MEM_R32(c, o + 0x74));
-    });
-}
-
 // Muzzle flashes (class 800A1154 lights in the glow list that a gun makes for one update while
 // it fires). The gun fires from the player's update, so at 60 Hz it made one on the player-only
 // tick as well; each lives until the second world update after it, so two or three stacked into
@@ -385,13 +355,12 @@ std::vector<uint32_t> glow_lights(R3000* c) {
     return v;
 }
 void odd_lights_made(R3000* c, const std::vector<uint32_t>& before) {
-    static const bool off = std::getenv("APOC_ODD_LIGHTS") != nullptr;  // for A/B comparisons
     const std::vector<uint32_t> now = glow_lights(c);
     std::vector<std::pair<uint32_t, uint32_t>> kept;
     for (const auto& l : g_odd_lights)  // still alive, same block
         if (std::find(now.begin(), now.end(), l.first) != now.end() && MEM_R32(c, l.first - 8) == l.second) kept.push_back(l);
     for (uint32_t o : now)
-        if (!off && std::find(before.begin(), before.end(), o) == before.end()) kept.push_back({o, MEM_R32(c, o - 8)});
+        if (std::find(before.begin(), before.end(), o) == before.end()) kept.push_back({o, MEM_R32(c, o - 8)});
     g_odd_lights = std::move(kept);
 }
 // Unlinks the odd-made lights for a render; the result puts them back (in reverse order).
@@ -641,36 +610,6 @@ uint32_t mid_word(const MidWord& m) {
     }
 }
 
-// Flickering lights (class 800A1154: a fan of coloured vertices on the walls and floor, e.g. the
-// flash of a gun being fired, a grenade's blast): 8001D114 gives every vertex a random distance
-// and the fan a random angle. The game does that when a light is made (a gun's flash lives for one
-// update and is made again every update) and, for lights flagged at +0x78, every update: they
-// flicker at 30 Hz. (This flickered them once more on the player-only ticks, at 60 Hz: with the
-// half-way frame between, a new random pattern every frame made glows pulse and rays jump. Off;
-// APOC_FLICKER60=1 brings it back for comparisons.)
-constexpr uint32_t kFlickerClass = 0x800A1154, kFlicker = 0x8001D114, kRandState = kGp + 0xD58;
-void flicker_lights(R3000* c) {
-    static const bool on = std::getenv("APOC_FLICKER60") != nullptr && std::getenv("APOC_NO_EFFECT_BLEND") == nullptr;
-    if (!on) return;
-    uint32_t lights[64];
-    int n = 0;
-    for_each_effect(c, [&](uint32_t list, uint32_t o) {
-        if (n < 64 && list == kGlowList && MEM_R32(c, o + kEffectClass) == kFlickerClass && !MEM_R8(c, o + 0x3F) &&
-            (MEM_R8(c, o + 0x78) || MEM_R16(c, o + 0x0A) == 1) && MEM_R32(c, o + 0x50) <= kMaxTable)
-            lights[n++] = o;
-    });
-    if (!n) return;
-    uint32_t rnd[3];
-    for (int i = 0; i < 3; i++) rnd[i] = MEM_R32(c, kRandState + 4 * i);
-    for (int g = 0; g < n; g++) {
-        uint16_t fade[4];
-        for (int i = 0; i < 4; i++) fade[i] = (uint16_t)MEM_R16(c, lights[g] + 0x6E + 2 * i);
-        call(c, kFlicker, lights[g]);
-        for (int i = 0; i < 4; i++) MEM_W16(c, lights[g] + 0x6E + 2 * i, fade[i]);
-    }
-    for (int i = 0; i < 3; i++) MEM_W32(c, kRandState + 4 * i, rnd[i]);
-}
-
 // An object's animation state (everything that picks its pose) and damage flash, from
 // before the last world update: the frame after it is drawn half way between the pose
 // before and the pose after (sim60_render).
@@ -685,7 +624,6 @@ struct AnimState {
     uint16_t flash;
 };
 std::vector<AnimState> g_prev_anim;
-uint64_t g_blend_frames = 0;
 
 // Jointed models (the player, and enemies such as level 3's soldiers and level 4's walkers:
 // flag 0x0004 in +0x00) are drawn from joint matrices their update computes (8007D148: a block
@@ -823,10 +761,6 @@ void joints_mid(R3000* c) {
             }
     }
 }
-bool pose_blend_off() {
-    static const bool off = std::getenv("APOC_NO_POSE_BLEND") != nullptr;  // for A/B comparisons
-    return off;
-}
 // A joint's offset (the last 3 of its 12 values) is in whole units and often steps by 1 per
 // update (the player's idle sway), so half way cannot be stored: the mid pose kept one end and
 // the model still moved at 30 Hz, in uneven steps (seen as flicker). For those, the render
@@ -834,7 +768,6 @@ bool pose_blend_off() {
 // the rotations are the same in both, so the GTE's averaged vertices are exactly half way.
 // Returns whether any joint needs the ghost render.
 bool joints_split(R3000* c) {
-    if (pose_blend_off()) return false;
     bool any = false;
     for (Joints& j : g_joints) {
         if (!j.written) continue;
@@ -988,8 +921,6 @@ constexpr uint32_t kPadRead = 0x80070748, kButtons = 0x800EC0F8;
 constexpr uint32_t kPadCounts[] = {kGp + 0x974, 0x800FF814};
 
 void pad_odd_tick(R3000* c) {
-    static const bool off = std::getenv("APOC_NO_PAD60") != nullptr;  // for A/B comparisons
-    if (off) return;
     uint32_t before[16][3], counts[std::size(kPadCounts)];
     for (int b = 0; b < 16; b++)
         for (int k = 0; k < 3; k++) before[b][k] = MEM_R32(c, kButtons + 16 * b + 4 + 4 * k);
@@ -1042,8 +973,7 @@ void retime(R3000* c, const Before& b, bool odd) {
     uint32_t p = MEM_R32(c, kPlayerList);
     if (valid_ptr(p) && p == b.player) {
         const bool placed = ledge_state(b.state) || ledge_state(MEM_R32(c, p + kPlayerState));
-        static const bool no_split = std::getenv("APOC_NO_SPLIT") != nullptr;  // for A/B comparisons
-        const bool split = g_own.player == p && g_own.done && !no_split;
+        const bool split = g_own.player == p && g_own.done;
         for (size_t i = 0; i < std::size(kPlayerVecs); i++) {
             if (placed) continue;
             Vec3 own;
@@ -1092,9 +1022,7 @@ void retime(R3000* c, const Before& b, bool odd) {
             else if (rise == 0 && b.rise == 1 && age >= 0 && !extra) { extra = true; trim = kTrimTicks; }
             if (trim) {
                 trim--;
-                static const char* e = std::getenv("APOC_JUMP_TRIM");  // calibration
-                static const int32_t total = e ? std::atoi(e) : kJumpTrim;
-                MEM_W32(c, p + 8, MEM_R32(c, p + 8) + total / kTrimTicks);
+                MEM_W32(c, p + 8, MEM_R32(c, p + 8) + kJumpTrim / kTrimTicks);
             }
             if (rise == 0 && MEM_R32(c, p + kPlayerState) != 2) age = -1;
         }
@@ -1147,8 +1075,6 @@ ViewCam view_before(R3000* c) {
 void view_retime(R3000* c, const ViewCam& b) {
     const uint32_t v = MEM_R32(c, kViewCamList);
     if (!valid_ptr(v) || v != b.obj) return;
-    static const bool off = std::getenv("APOC_NO_VIEW_RETIME") != nullptr;  // for A/B comparisons
-    if (off) return;
     const int32_t offset = (int32_t)MEM_R32(c, kCamJumpOffset);
     if (offset != 0 && offset != b.jump_offset) {  // (0: the routine reset it, kept)
         const int32_t d = offset - b.jump_offset, half = b.jump_offset + (d + (d > 0) - (d < 0)) / 2;
@@ -1170,50 +1096,13 @@ void view_retime(R3000* c, const ViewCam& b) {
     }
 }
 
-// APOC_SIM60_TRACE=1: log the player's position at every tick (for measuring speeds).
-void trace_player(R3000* c, uint32_t t) {
-    static const bool on = std::getenv("APOC_SIM60_TRACE") != nullptr;
-    uint32_t p = on ? MEM_R32(c, kPlayerList) : 0;
-    if (p)
-        log_msg(LogCat::Host, "sim60 f=%llu tick=%u player %d %d %d health %d flash %d anim %d at %08X", (unsigned long long)host_frame_count(), t,
-                (int32_t)MEM_R32(c, p + 4), (int32_t)MEM_R32(c, p + 8), (int32_t)MEM_R32(c, p + 12),
-                (int16_t)MEM_R16(c, p + kPlayerHealth), (int16_t)MEM_R16(c, p + kFlash), (int16_t)MEM_R16(c, p + 0x18), p);
-    // APOC_SIM60_DUMP=FROM,TO: the player object's first 0x300 bytes as words, each tick
-    static const char* dump = std::getenv("APOC_SIM60_DUMP");
-    if (p && dump) {
-        unsigned long long f0 = 0, f1 = 0;
-        std::sscanf(dump, "%llu,%llu", &f0, &f1);
-        uint64_t f = host_frame_count();
-        if (f >= f0 && f <= f1) {
-            std::string line;
-            char b[16];
-            for (int i = 0; i < 0x300; i += 4) {
-                std::snprintf(b, sizeof b, " %d", (int32_t)MEM_R32(c, p + i));
-                line += b;
-            }
-            log_msg(LogCat::Host, "sim60dump f=%llu tick=%u%s", (unsigned long long)f, t, line.c_str());
-            uint32_t cam = MEM_R32(c, kCameraList);
-            if (valid_ptr(cam)) {
-                line.clear();
-                for (int i = 0; i < 0xA0; i += 4) {
-                    std::snprintf(b, sizeof b, " %d", (int32_t)MEM_R32(c, cam + i));
-                    line += b;
-                }
-                log_msg(LogCat::Host, "sim60cam f=%llu tick=%u%s", (unsigned long long)f, t, line.c_str());
-            }
-        }
-    }
-}
-
 }  // namespace
 
-void sim60_effects_dump(R3000* c) { effects_dump(c); }
 
 // Runs the render once outside emulated time (everything rolled back afterwards) with every
 // object's animation state from before the world update (anim) and the joint offsets from
 // before the tick (joints, see joints_split), recording what the GTE produced.
 bool record_previous_pose(R3000* c, bool anim, bool joints) {
-    if (pose_blend_off()) return false;
     bool changed = joints;
     for (const AnimState& a : g_prev_anim) {
         if (!anim || changed) break;
@@ -1254,9 +1143,6 @@ bool record_previous_pose(R3000* c, bool anim, bool joints) {
     bios_ghost_state(back);
     hw_state(back);
     gpu_regs_state(back);
-    if (done && (++g_blend_frames % 600) == 0)
-        log_msg(LogCat::Host, "sim60 pose blend: %u vertices blended, %u kept, %u colours", g_blend_stats[0],
-                g_blend_stats[1], g_blend_stats[2]);
     return done;
 }
 
@@ -1264,10 +1150,7 @@ bool record_previous_pose(R3000* c, bool anim, bool joints) {
 int sim60_render_lights_hidden(R3000* c);
 int sim60_render(R3000* c) {
     if (g_in_render) return 0;
-    static const bool dump = std::getenv("APOC_EFFECT_DUMP") != nullptr;
-    if (dump) effects_dump(c);
-    static const bool no_repair = std::getenv("APOC_NO_LIST_REPAIR") != nullptr;
-    if (!no_repair) repair_small_lists(c);
+    repair_small_lists(c);
     const std::vector<HiddenLight> hidden = hide_odd_lights(c);
     const int r = sim60_render_lights_hidden(c);
     unhide_lights(c, hidden);
@@ -1316,10 +1199,9 @@ int sim60_render_lights_hidden(R3000* c) {
         set.push_back(&op);
     }
     std::vector<const MidWord*> words;
-    static const bool no_effects = std::getenv("APOC_NO_EFFECT_BLEND") != nullptr;  // for A/B comparisons
     const bool lists_were_ok = small_lists_ok(c);
     for (const MidWord& m : g_mid_words) {
-        if (no_effects || MEM_R32(c, m.addr) != m.after) continue;  // changed since (freed, reused)
+        if (MEM_R32(c, m.addr) != m.after) continue;  // changed since (freed, reused)
         if (!std::binary_search(live_small.begin(), live_small.end(), std::make_pair(m.owner, m.list)) ||
             MEM_R32(c, m.owner + kEffectClass) != m.cls || MEM_R32(c, m.owner - 8) != m.serial ||
             MEM_R32(c, m.owner - 4) != m.size_word)
@@ -1454,24 +1336,9 @@ extern "C" void psx_hook_zone(R3000* c) {
 extern "C" int psx_hook_tick(R3000* c) {
     if (g_in_tick) return 0;  // the game's own tick, run from below
     uint32_t t = MEM_R32(c, kHalfTicks);
-    trace_player(c, t);
     if (!psx_opt_sim60) return 0;
     check_small(c, t & 1 ? "before odd tick" : "before world tick");
-    {  // Test: APOC_TEST_BREAK_EFFECT=FRAME:OFF gives the first object of list gp+OFF (hex) a class
-       // at 80000000, as in the level 4 crash (APOC_NO_LIST_REPAIR=1 lets it crash)
-        static const char* s = std::getenv("APOC_TEST_BREAK_EFFECT");
-        static bool done = false;
-        unsigned long long f = 0;
-        unsigned off = 0;
-        if (s && !done && std::sscanf(s, "%llu:%x", &f, &off) == 2 && host_frame_count() >= f)
-            if (const uint32_t o = MEM_R32(c, kGp + off); valid_ptr(o)) {
-                done = true;
-                MEM_W32(c, o + 0x44, 0x80000000u);
-                log_msg(LogCat::Host, "test: object %08X of list %08X broken", o, kGp + off);
-            }
-    }
-    static const bool no_repair = std::getenv("APOC_NO_LIST_REPAIR") != nullptr;
-    if (!no_repair) repair_small_lists(c);
+    repair_small_lists(c);
 
     const uint32_t ra = c->r[31], sp = c->r[29];
     const Before before = capture(c);
@@ -1546,8 +1413,6 @@ extern "C" int psx_hook_tick(R3000* c) {
         zones_odd_tick(c);
         call(c, kUpdateCameras, MEM_R32(c, kCameraList));
         check_small(c, "odd tick");
-        flicker_lights(c);
-        check_small(c, "flicker");
     }
     g_in_tick_any = false;
     retime(c, before, t & 1);
@@ -1559,37 +1424,15 @@ extern "C" int psx_hook_tick(R3000* c) {
 // Glows (the glow list: lights, pickups, lamps) are flat screen-facing fans that the game sorts
 // at the depth of their centre, so the floor and walls in front of the centre are drawn over a
 // big one and cut hard straight edges into it (an explosion's light pool).
-// Soft glows (gpu.cpp, hardware renderer with precise 3D): every glow is drawn after the scene
-// and fades per pixel where the scene is nearer than its centre, fully gone at twice its radius
-// in front (APOC_GLOW_FADE=K: K radii). The radius is the fan's outer ring (rings add up, each
-// ring's largest spoke; 8003736C) in view units: the fan projects to 625 * r / z pixels.
-// Otherwise lights only (hits, muzzle flashes, explosions) are sorted nearer by a fixed depth,
-// at most half way to the camera (APOC_GLOW_SORT=N: the bias, 0 = the original); pickup and lamp
-// glows are small and sit near walls, and sorted nearer they showed through them.
+// Lights only (hits, muzzle flashes, explosions) are sorted nearer by a fixed depth, at most half
+// way to the camera; pickup and lamp glows are small and sit near walls, and sorted nearer they
+// showed through them.
 extern "C" void psx_hook_glow_sort(R3000* c) {
     const int32_t z = (int32_t)c->r[5];
     if (z <= 0) return;
     const uint32_t g = c->r[20];  // s4 = the glow
-    if (gpu_soft_glows()) {
-        const uint32_t t = MEM_R32(c, g + 0x48), n = MEM_R32(c, g + 0x50), rings = MEM_R32(c, g + 0x54);
-        int32_t outer = 0;
-        if (valid_ptr(t) && n <= 64 && rings <= 8)
-            for (uint32_t r = 0; r < rings; r++) {
-                int32_t most = 0;
-                for (uint32_t i = 0; i < n; i++) most = std::max(most, (int32_t)MEM_R32(c, t + 8 * (r * n + i)));
-                outer += most;
-            }
-        const uint32_t h = (uint16_t)c->gte_ctrl[26];
-        static const char* env = std::getenv("APOC_GLOW_FADE");
-        static const float k = env ? (float)std::atof(env) : 2.0f;
-        const float radius = 625.0f * (float)outer / (float)(h ? h : 256);
-        gpu_glow_begin(MEM_R32(c, 0x800FF668) & 0x1FFFFC, (float)z, std::max(radius * k, 32.0f));
-        c->r[2] = 4;  // ordering-table slot 1: after the scene
-        return;
-    }
-    static const char* env = std::getenv("APOC_GLOW_SORT");
-    static const int bias = env ? std::atoi(env) : 768;  // depth units (0 = the original order)
-    if (bias <= 0 || MEM_R32(c, g + kEffectClass) != kLightClass) return;
+    constexpr int bias = 768;  // depth units
+    if (MEM_R32(c, g + kEffectClass) != kLightClass) return;
     // Lights on the player itself (the gun's muzzle flash, the hit glow) keep the original order:
     // brought forward they were drawn over the player's body when it faces away from the camera.
     // ponytail: a fixed radius around the player's origin (muzzle ~530k away); an explosion right
@@ -1602,7 +1445,6 @@ extern "C" void psx_hook_glow_sort(R3000* c) {
     }
     c->r[2] = (uint32_t)(z - std::min(bias, z / 2)) & 0x3FFC;
 }
-extern "C" void psx_hook_glow_end(R3000* c) { gpu_glow_end(MEM_R32(c, 0x800FF668) & 0x1FFFFC); }
 
 // smooth.cpp: the 60 Hz simulation's own render is under way (its values are in place)
 bool sim60_in_render() { return g_in_render; }

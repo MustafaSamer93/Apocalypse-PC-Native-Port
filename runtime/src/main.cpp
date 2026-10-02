@@ -53,7 +53,7 @@ uint32_t fnv1a(const uint8_t* p, size_t n) {
 void usage() {
     std::printf(
         "usage: apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--log cats]\n"
-        "  --cue PATH         disc image cue sheet (default: the .cue in assets/game disks)\n"
+        "  --cue PATH         disc image .cue or .bin (default: the image in assets/image)\n"
         "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
         "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
@@ -71,22 +71,25 @@ void usage() {
 // player sees where things go.
 void make_asset_folders() {
     std::error_code ec;
-    for (const char* d : {"assets/game disks", "assets/bios", "assets/replacements/textures",
+    for (const char* d : {"assets/image", "assets/bios", "assets/replacements/textures",
                           "assets/replacements/fmvs"})
         std::filesystem::create_directories(d, ec);
 }
 
-// The disc image: "Apocalypse (USA).cue" in assets/game disks, else any .cue there.
+// The disc image in assets/image, whatever its files are called: the first .cue (by name), else
+// the first .bin (cdrom.cpp then takes the folder's .bin files as the tracks).
 std::string find_disc() {
-    const std::filesystem::path dir = "assets/game disks";
-    if (std::filesystem::exists(dir / "Apocalypse (USA).cue")) return (dir / "Apocalypse (USA).cue").string();
     std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+    std::vector<std::filesystem::path> cues, bins;
+    for (const auto& e : std::filesystem::directory_iterator("assets/image", ec)) {
         std::string ext = e.path().extension().string();
         for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
-        if (ext == ".cue") return e.path().string();
+        if (ext == ".cue") cues.push_back(e.path());
+        if (ext == ".bin") bins.push_back(e.path());
     }
-    return {};
+    std::sort(cues.begin(), cues.end());
+    std::sort(bins.begin(), bins.end());
+    return !cues.empty() ? cues[0].string() : !bins.empty() ? bins[0].string() : std::string();
 }
 
 // Returns the EXE's entry point.
@@ -159,8 +162,9 @@ int main(int argc, char** argv) {
     }
 #ifdef _WIN32
     // Started with no console and nothing redirected (a double-click): log to
-    // debug/apocalypse.log (with F12 screenshots and crash dumps), keeping the previous run's
-    // log as debug/apocalypse.old.log.
+    // debug/apocalypse.log (the report log testers send), with the previous runs' logs kept in
+    // debug/logs (the newest 10, named by when they were written) and crashed runs' as
+    // debug/crash_DATE_TIME.log.
     if (HANDLE err = GetStdHandle(STD_ERROR_HANDLE); !GetConsoleWindow() && (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN)) {
         std::error_code ec;
         std::filesystem::create_directories("debug", ec);
@@ -177,7 +181,19 @@ int main(int argc, char** argv) {
             std::strftime(name, sizeof name, "debug/crash_%Y%m%d_%H%M%S.log", std::localtime(&t));
             std::filesystem::rename(old, name, ec);
         }
-        std::filesystem::rename("debug/apocalypse.log", "debug/apocalypse.old.log", ec);
+        if (std::filesystem::exists("debug/apocalypse.log", ec)) {
+            std::filesystem::create_directories("debug/logs", ec);
+            struct _stat64 st{};
+            const std::time_t t = _stat64("debug/apocalypse.log", &st) == 0 ? (std::time_t)st.st_mtime : std::time(nullptr);
+            char name[64];
+            std::strftime(name, sizeof name, "debug/logs/apocalypse_%Y%m%d_%H%M%S.log", std::localtime(&t));
+            std::filesystem::rename("debug/apocalypse.log", name, ec);
+            std::vector<std::filesystem::path> logs;  // names sort by date: drop all but the newest 10
+            for (const auto& e : std::filesystem::directory_iterator("debug/logs", ec))
+                if (e.path().extension() == ".log") logs.push_back(e.path());
+            std::sort(logs.begin(), logs.end());
+            for (size_t i = 0; i + 10 < logs.size(); i++) std::filesystem::remove(logs[i], ec);
+        }
         FILE* f;
         if (freopen_s(&f, "debug/apocalypse.log", "a", stderr) == 0) std::setvbuf(stderr, nullptr, _IONBF, 0);
     }
@@ -279,9 +295,9 @@ int main(int argc, char** argv) {
     if (cue.empty()) cue = find_disc();
     if (cue.empty()) {
         const char* msg =
-            "The game disc was not found.\n\nPut your own copy of Apocalypse (USA) in the \"assets\\game disks\" "
-            "folder next to apocalypse.exe:\n  Apocalypse (USA).cue\n  Apocalypse (USA) (Track 1).bin\n"
-            "  Apocalypse (USA) (Track 2).bin\n\nEverything else in assets (BIOS, replacements) is optional.";
+            "The game disc was not found.\n\nPut your own copy of Apocalypse (USA) in the \"assets\\image\" "
+            "folder next to apocalypse.exe: its .cue and .bin files (any names), or just the .bin files.\n\n"
+            "Everything else in assets (BIOS, replacements) is optional.";
         std::fprintf(stderr, "%s\n", msg);
         if (!std::getenv("APOC_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Apocalypse", msg, nullptr);
         return 1;

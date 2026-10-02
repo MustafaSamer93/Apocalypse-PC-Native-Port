@@ -65,7 +65,6 @@ uint32_t gpu_run_list(R3000* c, uint32_t addr) {
         std::memcpy(&header, psx_ram + addr, 4);
         uint32_t n = header >> 24;
         if (n == 0) g_gpu_ot_z = ot_depth(addr);
-        gpu_packet_start(addr);
         g_gpu_packet_addr = addr;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t w;
@@ -83,7 +82,6 @@ uint32_t gpu_run_list(R3000* c, uint32_t addr) {
         }
     }
     g_gpu_ot_z = 0;
-    gpu_packet_start(0);
     if (words > 100) {  // a frame's ordering table (not the small setup lists)
         gpu_list_done();
         if (!core_in_ghost()) core_frame_drawn(c);

@@ -1,7 +1,5 @@
-assets\game disks             REQUIRED - your own dump of Apocalypse (USA):
-                                Apocalypse (USA).cue
-                                Apocalypse (USA) (Track 1).bin
-                                Apocalypse (USA) (Track 2).bin
+assets\image                  REQUIRED - your own dump of Apocalypse (USA): its .cue and .bin
+                                files (any names), or only the .bin files
 assets\bios                   optional - a US PlayStation BIOS (e.g. SCPH1001.BIN, 512 KB):
                                 plays the PlayStation boot sequence at start
 assets\replacements\textures  optional - HD textures: <file>\<index>.png for every texture of the

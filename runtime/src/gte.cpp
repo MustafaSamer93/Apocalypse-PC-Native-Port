@@ -33,7 +33,6 @@ float g_gte_widescreen = 1.0f;
 GteBlendMode g_gte_blend = GteBlendMode::Off;
 static std::vector<GteBlendVtx> g_blend_vtx;
 static std::vector<uint32_t> g_blend_rgb;
-uint32_t g_blend_stats[3];  // vertices blended, vertices skipped, colours blended
 
 namespace {
 struct BlendSeg {
@@ -50,20 +49,9 @@ bool g_seg_near = false;               // blend pass: paired by a nearby transla
 uint32_t g_seg_next = 0;              // blend pass: the first recorded segment not paired yet
 uint32_t g_seg_misses = 0;            // blend pass: segments in a row left unpaired
 uint32_t g_seg_vi = 0, g_seg_ci = 0;  // blend pass: vertices and colours so far in the current segment
-uint32_t g_seg_stats[3];  // APOC_BLEND_DEBUG: segments paired, paired with a different count, unpaired
-bool g_seg_open = false;
-void seg_close();
 }  // namespace
 
 void gte_blend_begin(GteBlendMode m) {
-    static const bool dbg = std::getenv("APOC_BLEND_DEBUG") != nullptr;
-    if (dbg && g_gte_blend == GteBlendMode::Blend) {
-        seg_close();
-        static int n = 0;
-        if (++n % 60 == 0)
-            std::fprintf(stderr, "BLENDDBG segments paired %u, count differs %u, unpaired %u\n", g_seg_stats[0],
-                         g_seg_stats[1], g_seg_stats[2]);
-    }
     g_gte_blend = m;
     if (m == GteBlendMode::Record) {
         g_blend_vtx.clear();
@@ -71,7 +59,6 @@ void gte_blend_begin(GteBlendMode m) {
         g_blend_segs.clear();
     }
     g_tr_loaded = true;
-    g_seg_open = false;
     g_seg_rec = nullptr;
     g_seg_next = 0;
     g_seg_misses = 0;
@@ -94,7 +81,6 @@ struct PreciseSlot {
 };
 PreciseSlot g_precise[kPreciseSlots];
 }  // namespace
-uint32_t g_precise_stats[8];  // polygons with every / some / no vertex precise, depth clashes; projections, too near, off; corners by shadow
 namespace {
 uint32_t g_precise_gen = 1, g_precise_seq = 0;
 int g_precise_used = 0;
@@ -106,13 +92,11 @@ void precise_put(uint32_t sxy, float x, float y, float w) {
     if (g_precise_used >= kPreciseSlots * 3 / 4) return;
     uint32_t k = precise_key(sxy);
     const uint32_t seq = ++g_precise_seq;
-    bool clash = false;
     for (uint32_t i = precise_hash(k);; i = (i + 1) & (kPreciseSlots - 1)) {
         PreciseSlot& s = g_precise[i];
         if (s.gen != g_precise_gen) {
             s = {k, g_precise_gen, {x, y, w, seq}};
             g_precise_used++;
-            if (clash) g_precise_stats[3]++;
             return;
         }
         if (s.key != k) continue;
@@ -121,7 +105,7 @@ void precise_put(uint32_t sxy, float x, float y, float w) {
             s.p = {x, y, w, seq};
             return;
         }
-        clash = true;  // a different vertex on the same pixel: kept as well
+        // a different vertex on the same pixel: kept as well
     }
 }
 
@@ -145,7 +129,6 @@ extern "C" {
 PgxpVal pgxp_gpr[32];
 PgxpVal pgxp_ram[PSX_RAM_SIZE / 4];
 PgxpVal pgxp_scratch[PSX_SCRATCH_SIZE / 4];
-uint32_t* pgxp_writer = std::getenv("APOC_PRECISE_WHY") ? new uint32_t[PSX_RAM_SIZE / 4]() : nullptr;
 }
 namespace {
 PgxpVal g_pgxp_sxy[3];  // SXY0..2
@@ -169,14 +152,11 @@ extern "C" void pgxp_gte_to_mem(int reg, uint32_t a) {
 }
 
 // The exact u, v behind a packet's UV word (its low half; the high half is the palette or page).
-uint32_t g_uv_stats[2];  // textured corners, with exact UVs
 bool pgxp_uv_find(uint32_t a, uint32_t word, float* u, float* v) {
-    g_uv_stats[0]++;
     if (!a) return false;
     const PgxpVal& s = pgxp_ram[(a & (PSX_RAM_SIZE - 1)) >> 2];
     if (s.w != -1.0f || ((s.v ^ word) & 0xFFFF)) return false;
     *u = s.x, *v = s.y;
-    g_uv_stats[1]++;
     return true;
 }
 extern "C" void pgxp_mem_to_gte(int reg, uint32_t a) {
@@ -207,59 +187,10 @@ extern "C" void psx_hook_strip_corner(R3000* c) {
     out = {corner, pa->x + width.x, pa->y + width.y, pa->w};
 }
 
-// Camera fraction. The render camera (80077680) is (view position + shake) >> 12: whole units.
-// The level pass then offsets model coordinates by that whole-unit camera and projects with
-// TR = 0, so as the camera moves the whole level steps in whole units. APOC_CAM_FRAC=1 puts the
-// fraction back into the exact projection (rtp); APOC_CAM_LOG=1 logs the fraction and the mean
-// screen acceleration of level vertices (frame to frame, native px) to measure the effect.
-double g_cam_frac[3];   // exact - whole, units (0..1)
-int32_t g_cam_int[3];
+// The render camera (80077680) is (view position + shake) >> 12; the view is smoothed first.
 void smooth_view(R3000* c, uint32_t view, int32_t shake_x);  // smooth.cpp
 
-extern "C" void psx_hook_camera(R3000* c) {
-    const uint32_t view = c->r[5], shake = 0x800ED510;
-    smooth_view(c, view, (int32_t)MEM_R32(c, shake));
-    for (int i = 0; i < 3; i++) {
-        const int32_t fixed = (int32_t)MEM_R32(c, view + 4 + 4 * i) + (int32_t)MEM_R32(c, shake + 4 * i);
-        g_cam_int[i] = fixed >> 12;
-        g_cam_frac[i] = (double)(fixed - (g_cam_int[i] << 12)) / 4096.0;
-    }
-}
-const bool g_cam_frac_on = std::getenv("APOC_CAM_FRAC") != nullptr;
-const bool g_cam_log = std::getenv("APOC_CAM_LOG") != nullptr;
-struct CamPath { float x[3], y[3]; uint32_t frame; };
-std::unordered_map<uint64_t, CamPath> g_cam_paths;
-double g_cam_accel_sum = 0;
-uint32_t g_cam_accel_n = 0, g_cam_frame = 0;
-void cam_path(int32_t vx, int32_t vy, int32_t vz, float sx, float sy) {
-    const uint64_t key = (uint64_t)(uint32_t)(vx + g_cam_int[0]) << 42 ^ (uint64_t)(uint32_t)(vy + g_cam_int[1]) << 21 ^
-                         (uint32_t)(vz + g_cam_int[2]);
-    CamPath& p = g_cam_paths[key];
-    if (p.frame == g_cam_frame) return;
-    const bool consecutive = p.frame + 1 == g_cam_frame && p.frame != 0;
-    p.x[2] = p.x[1], p.x[1] = p.x[0], p.x[0] = sx;
-    p.y[2] = p.y[1], p.y[1] = p.y[0], p.y[0] = sy;
-    if (consecutive && p.frame >= 2) {
-        const float ax = p.x[0] - 2 * p.x[1] + p.x[2], ay = p.y[0] - 2 * p.y[1] + p.y[2];
-        if (std::abs(ax) < 8 && std::abs(ay) < 8) g_cam_accel_sum += std::sqrt(ax * ax + ay * ay), g_cam_accel_n++;
-    } else if (!consecutive) {
-        p.x[1] = p.x[2] = sx, p.y[1] = p.y[2] = sy;
-        p.frame = g_cam_frame - 1;  // history restarts
-        if (p.frame >= 2) {}       // (keeps the counter honest below)
-    }
-    p.frame = g_cam_frame;
-}
-void cam_log_frame() {
-    if (!g_cam_log) return;
-    g_cam_frame++;
-    if (g_cam_frame % 60 == 0) {
-        log_msg(LogCat::Host, "cam: frac (%.3f %.3f %.3f) int (%d %d %d); level vertices mean |accel| %.3f px over %u",
-                g_cam_frac[0], g_cam_frac[1], g_cam_frac[2], g_cam_int[0], g_cam_int[1], g_cam_int[2],
-                g_cam_accel_n ? g_cam_accel_sum / g_cam_accel_n : 0.0, g_cam_accel_n);
-        g_cam_accel_sum = 0, g_cam_accel_n = 0;
-        if (g_cam_paths.size() > 200000) g_cam_paths.clear();
-    }
-}
+extern "C" void psx_hook_camera(R3000* c) { smooth_view(c, c->r[5], (int32_t)MEM_R32(c, 0x800ED510)); }
 
 // Exact view-space corners (PGXP "CPU mode" for this game's level renderer). The level pass
 // (80080A20...) projects each floor/wall corner, then keeps its view position as the GTE's
@@ -305,7 +236,6 @@ const CornerSlot* corner_find(uint64_t k) {
     }
 }
 }  // namespace
-uint32_t g_corner_stats[2];  // grid vertices rebuilt, corner sets rejected
 
 // The exact vertex for a GPU vertex word read from RAM address `a` (0: not from RAM). The
 // shadow counts when its 11-bit x and y are those of the word or one pixel off (code that
@@ -322,9 +252,7 @@ bool pgxp_find(uint32_t a, uint32_t word, GtePrecise* out) {
     return true;
 }
 
-void cam_log_frame();
 void gte_precise_clear() {
-    cam_log_frame();
     if (g_corner_used) {
         g_corner_used = 0;
         if (++g_corner_gen == 0) {
@@ -408,19 +336,10 @@ void set_mac_ir(int i, int64_t v, int shift, bool lm) {
     IR(i) = lim_ir(i, MAC(i), lm);
 }
 
-// APOC_BLEND_DEBUG: how the segment just finished was paired.
-void seg_close() {
-    if (g_gte_blend != GteBlendMode::Blend || !g_seg_open) return;
-    if (!g_seg_rec) g_seg_stats[2]++;
-    else if (g_seg_vi != g_seg_rec->v1 - g_seg_rec->v0 || g_seg_ci != g_seg_rec->c1 - g_seg_rec->c0) g_seg_stats[1]++;
-    else g_seg_stats[0]++;
-}
 // The segment the next vertex or colour belongs to (see pose blending, above).
 void blend_segment() {
     if (!g_tr_loaded) return;
-    seg_close();
     g_tr_loaded = false;
-    g_seg_open = true;
     const int32_t tr[3] = {K(5), K(6), K(7)};
     if (g_gte_blend == GteBlendMode::Record) {
         g_blend_segs.push_back({{tr[0], tr[1], tr[2]}, C->r[31], (uint32_t)g_blend_vtx.size(), (uint32_t)g_blend_vtx.size(),
@@ -487,7 +406,6 @@ void push_color() {
             if (near) {
                 for (int s = 0; s < 24; s += 8) m |= ((((o >> s) & 0xFF) + ((n >> s) & 0xFF) + 1) / 2) << s;
                 D(22) = (int32_t)m;
-                g_blend_stats[2]++;
             }
         }
     }
@@ -608,17 +526,9 @@ void rtp(int n, const Cmd& c, bool last) {
             if (ok) {
                 for (int i = 0; i < 3; i++) ev[i] = r[i];
                 rebuilt = true;
-                g_corner_stats[0]++;
-            } else {
-                g_corner_stats[1]++;
             }
         }
     }
-    // the level pass (TR = 0, the screen offset set; not the grid): the camera's fraction back
-    const bool level_pass = g_gte_precise && c.shift == 12 && !rebuilt && K(5) == 0 && K(6) == 0 && K(7) == 0 && K(24) != 0;
-    if (level_pass && g_cam_frac_on)
-        for (int i = 0; i < 3; i++)
-            ev[i] -= (double)M(0, i, 0) * g_cam_frac[0] + (double)M(0, i, 1) * g_cam_frac[1] + (double)M(0, i, 2) * g_cam_frac[2];
     if (g_gte_precise && c.shift == 12) {
         const double u[3] = {ev[0] / 4096.0, ev[1] / 4096.0, ev[2] / 4096.0};
         corner_put(corner_key(IR(1), IR(2), IR(3)), u);
@@ -642,13 +552,7 @@ void rtp(int n, const Cmd& c, bool last) {
         const bool near_x = std::abs(fx - sx) < err_x || clamp_x, near_y = std::abs(fy - sy) < err_y || clamp_y;
         if ((near_x && near_y) || overflow || rebuilt)
             px = (float)fx, py = (float)fy, pw = (float)(ev[2] / 4096.0);
-        else
-            g_precise_stats[6]++;
-        if (overflow) g_precise_stats[5]++;
-    } else {
-        g_precise_stats[5]++;
     }
-    g_precise_stats[4]++;
     if (g_gte_blend == GteBlendMode::Record) {
         blend_segment();
         g_blend_vtx.push_back({(int16_t)x, (int16_t)y, (int16_t)z, D(14), D(19), px, py, pw});
@@ -670,12 +574,8 @@ void rtp(int n, const Cmd& c, bool last) {
             D(19) = (r->sz + D(19)) / 2;
             if (pw > 0 && r->pw > 0) px = (px + r->px) / 2, py = (py + r->py) / 2, pw = (pw + r->pw) / 2;
             else pw = 0;
-            g_blend_stats[0]++;
-        } else {
-            g_blend_stats[1]++;
         }
     }
-    if (g_cam_log && level_pass && pw > 0) cam_path(x, y, z, px, py);
     g_pgxp_sxy[2] = {(uint32_t)D(14), px, py, pw};
     if (pw > 0 && g_gte_blend != GteBlendMode::Record) precise_put((uint32_t)D(14), px, py, pw);
     if (last) {

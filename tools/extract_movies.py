@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from discfs import Disc, RAW_SECTOR, bin_from_cue  # noqa: E402
+from discfs import Disc, RAW_SECTOR, find_data_bin  # noqa: E402
 
 KDENLIVE_FFMPEG = r"C:\Program Files\Kdenlive\bin\ffmpeg.exe"
 
@@ -25,7 +25,7 @@ def main():
     ffmpeg = os.environ.get("FFMPEG") or shutil.which("ffmpeg") or KDENLIVE_FFMPEG
     if not Path(ffmpeg).exists() and not shutil.which(ffmpeg):
         sys.exit("ffmpeg not found (put it on PATH or set FFMPEG)")
-    disc = Disc(bin_from_cue(ROOT / "assets" / "game disks" / "Apocalypse (USA).cue"))
+    disc = Disc(find_data_bin())
     movies = [e for e in disc.list_files() if e.path.upper().endswith(".STR")]
     for e in movies:
         disc.f.seek(e.lba * RAW_SECTOR)

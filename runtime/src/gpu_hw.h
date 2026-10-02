@@ -13,7 +13,7 @@ struct HwVtx {
     int r, g, b;
     float u, v;        // texels; fractional with exact texture coordinates (gte.cpp pgxp_uv_find)
     float w = 1.0f;    // view depth for perspective-correct texturing (precise 3D); 1 = affine
-    float z = 0.0f;    // view depth (depth image vertices; a glow's centre, HwPrim::glow)
+    float z = 0.0f;    // view depth (Z-buffer, HwPrim::ztest)
 };
 
 // Per-primitive drawing state (texture page, palette, blending) as the GPU had it.
@@ -25,10 +25,7 @@ struct HwPrim {
     int page_x = 0, page_y = 0;    // texture page base (VRAM pixels)
     int depth = 0;                 // 0 = 4bpp, 1 = 8bpp, 2 = 15bpp
     int clut_x = 0, clut_y = 0;
-    bool glow = false;             // a light's glow: faded by the scene depth (hw_depth_draw)
-    bool whiten = false;           // texels drawn white by their brightness (the selected menu item)
     bool hd = false;               // a replacement texture (texreplace.cpp): u, v are atlas pixels
-    float zfade = 0.0f;            // glow: fully faded where the scene is this much nearer than z
     int ztest = 0;                 // Z-buffer: 0 off (2D, glows), 1 test and write (opaque 3D), 2 test only
                                    // (semi-transparent 3D); depth = HwVtx::z (view units, hw_depth_reset clears)
 };
@@ -79,12 +76,7 @@ unsigned hw_capture_texture(int slot, int* tex_w, int* tex_h);  // 0 if the slot
 void hw_stash(int x, int y, int w, int h);
 void hw_unstash();
 
-// Soft glows (gpu.cpp): a native-resolution depth image of the frame's 3D polygons. hw_depth_draw
-// draws triangles (x, y, w, z of each vertex) into it, clearing it first after hw_depth_reset;
-// glow primitives (HwPrim::glow) read it and fade where the scene is nearer than their centre.
-void hw_depth_draw(const HwVtx* tris, int n);
-void hw_depth_reset();
-bool hw_depth_ready();  // the backend can (Vulkan: its shaders were compiled with soft glows)
+void hw_depth_reset();  // a new frame: the Z-buffer is cleared
 bool hw_zbuffer_ready();  // the VRAM render target has a depth buffer (HwPrim::ztest works)
 
 // Texture smoothing on/off (bilinear filtering of game textures).

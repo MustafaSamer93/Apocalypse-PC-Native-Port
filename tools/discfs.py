@@ -2,7 +2,8 @@
 plus the game's CD.HED/CD.WAD archive.
 
 Usage:
-    python tools/discfs.py extract [--cue "assets/game disks/Apocalypse (USA).cue"] [--out extracted]
+    python tools/discfs.py extract [--cue PATH] [--out extracted]
+    (default: the image in assets/image: its .cue, else its first .bin, whatever they are called)
 """
 from __future__ import annotations
 
@@ -116,10 +117,22 @@ def bin_from_cue(cue: Path) -> Path:
     raise ValueError(f"no FILE line in {cue}")
 
 
+def find_data_bin(folder: Path = Path(__file__).resolve().parent.parent / "assets" / "image") -> Path:
+    """The disc image's data track in `folder`: the .bin the first .cue names, else the first .bin."""
+    files = sorted(folder.iterdir()) if folder.is_dir() else []
+    for f in files:
+        if f.suffix.lower() == ".cue":
+            return bin_from_cue(f)
+    for f in files:
+        if f.suffix.lower() == ".bin":
+            return f
+    raise SystemExit(f"no .cue or .bin disc image in {folder}")
+
+
 def cmd_extract(args):
-    cue = Path(args.cue)
     out = Path(args.out)
-    disc = Disc(bin_from_cue(cue))
+    path = Path(args.cue) if args.cue else None
+    disc = Disc(find_data_bin() if path is None else bin_from_cue(path) if path.suffix.lower() == ".cue" else path)
     out.mkdir(parents=True, exist_ok=True)
 
     files = disc.list_files()
@@ -149,7 +162,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     ex = sub.add_parser("extract")
-    ex.add_argument("--cue", default="assets/game disks/Apocalypse (USA).cue")
+    ex.add_argument("--cue", default=None)
     ex.add_argument("--out", default="extracted")
     ex.set_defaults(func=cmd_extract)
     args = ap.parse_args()

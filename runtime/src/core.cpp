@@ -43,7 +43,10 @@ void log_enable(const char* list) {
 }
 
 void log_msg(LogCat cat, const char* fmt, ...) {
-    std::fprintf(stderr, "[%s] ", kCatNames[(int)cat]);
+    // time since the start (minutes:seconds), so a tester's report lines up with what they saw
+    const uint64_t ms = SDL_GetTicks();
+    std::fprintf(stderr, "%3llu:%02llu.%01llu [%s] ", (unsigned long long)(ms / 60000), (unsigned long long)(ms / 1000 % 60),
+                 (unsigned long long)(ms / 100 % 10), kCatNames[(int)cat]);
     va_list ap;
     va_start(ap, fmt);
     std::vfprintf(stderr, fmt, ap);
@@ -196,7 +199,6 @@ void sched_cancel(R3000* c, Ev ev) {
     sched_update(c);
 }
 
-bool sched_pending(Ev ev) { return g_ev_active[(int)ev]; }
 
 void sched_request_check(R3000* c) {
     if (g_ghost) return;
@@ -264,8 +266,6 @@ static bool g_pending = false, g_flip_seen = false, g_early_valid = false;
 static uint32_t g_lines = 0;
 static uint8_t g_flips = 0;  // one bit a frame: the game showed a new frame
 static GpuDisplay g_early{};
-static const bool g_at_vblank = std::getenv("APOC_PRESENT_AT_VBLANK") != nullptr;  // for A/B
-static const bool g_no_early = std::getenv("APOC_PRESENT_AT_FLIP") != nullptr;      // for A/B
 
 static void present_frame(R3000* c, const GpuDisplay& d) {
     static uint64_t last_read = 0;
@@ -298,7 +298,7 @@ static GpuDisplay shown_display() {
 // images: early there too (it was off at the automatic frame rate, a frame more input lag).
 void core_frame_drawn(R3000* c) {
     GpuDisplay d;
-    if (g_no_early || g_at_vblank || !g_pending || host_multi_present() || (smooth_factor() >= 2 && !psx_opt_sim60) ||
+    if (!g_pending || host_multi_present() || (smooth_factor() >= 2 && !psx_opt_sim60) ||
         !gpu_drawn_display(&d))
         return;
     const GpuDisplay now = gpu_display();
@@ -339,16 +339,7 @@ static void scanline_event(R3000* c) {
         spu_end_frame(c);
         if (g_pending) present_frame(c, shown_display());  // no new frame all frame long
         g_flips = (uint8_t)(g_flips << 1 | (g_display_flipped ? 1 : 0));
-        if (static const bool log = std::getenv("APOC_FLIP_LOG") != nullptr; log) {  // debug: game frames held
-            static int held = 0;
-            if (!g_display_flipped) held++;
-            else if (held) {
-                if (host_frame_count() > 100) log_msg(LogCat::Host, "no new game frame for %d refreshes (to frame %llu)", held, (unsigned long long)host_frame_count());
-                held = 0;
-            }
-        }
         g_pending = true, g_lines = 0, g_display_flipped = false, g_flip_seen = false;
-        if (g_at_vblank) present_frame(c, gpu_display());
     } else if (g_pending) {
         if (g_display_flipped && !g_flip_seen) {
             g_flip_seen = true;
@@ -557,8 +548,6 @@ void mem_write_slow(R3000* c, uint32_t addr, uint32_t v, int size) {
     LOG(Mem, "unhandled write%d %08X = %08X", size * 8, addr, v);
 }
 
-uint32_t ram_r32(uint32_t addr) { return MEM_R32(g_cpu, addr); }
-void ram_w32(uint32_t addr, uint32_t v) { MEM_W32(g_cpu, addr, v); }
 
 std::string ram_cstr(uint32_t addr, size_t max) {
     std::string s;
@@ -576,13 +565,6 @@ static std::unordered_map<uint32_t, RecompFuncPtr> g_funcs;
 
 void dispatch_register(const RecompFunc* table, uint32_t count) {
     for (uint32_t i = 0; i < count; i++) g_funcs[table[i].addr] = table[i].fn;
-}
-
-void dispatch_unregister_range(uint32_t start, uint32_t end) {
-    for (auto it = g_funcs.begin(); it != g_funcs.end();) {
-        if (it->first >= start && it->first < end) it = g_funcs.erase(it);
-        else ++it;
-    }
 }
 
 static uint32_t canonical_code_addr(uint32_t addr) {

@@ -417,9 +417,8 @@ void gl_present_swap() {
     const uint64_t t0 = SDL_GetTicksNS();
     SDL_GL_SwapWindow(g_win);
     // Waits until the swap is done: the driver otherwise queues 1-2 more frames ahead of the
-    // display, each one refresh of input lag. APOC_NO_GPU_SYNC=1 for A/B.
-    static const bool no_sync = std::getenv("APOC_NO_GPU_SYNC") != nullptr;
-    if (!no_sync) glFinish();
+    // display, each one refresh of input lag.
+    glFinish();
     const uint64_t t1 = SDL_GetTicksNS();
     g_prof_present_ns += t1 - t0;
     // APOC_PROFILE: controller read -> its frame swapped (average over 120 frames)

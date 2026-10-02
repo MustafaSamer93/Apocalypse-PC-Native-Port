@@ -166,11 +166,9 @@ RECOMP_INLINE void PGXP_LH(int rt, uint32_t a) {
     if (m) pgxp_gpr[rt] = *m;
     else pgxp_gpr[rt].w = 0;
 }
-extern uint32_t* pgxp_writer;  // debug (APOC_PRECISE_WHY): the sw that last wrote each RAM word
-RECOMP_INLINE void PGXP_SW(int rt, uint32_t a, uint32_t pc) {
+RECOMP_INLINE void PGXP_SW(int rt, uint32_t a) {
     PgxpVal* m = PGXP_MEM(a);
     if (m) *m = pgxp_gpr[rt];
-    if (pgxp_writer && PSX_IS_RAM(a)) pgxp_writer[(a & (PSX_RAM_SIZE - 1)) >> 2] = pc;
 }
 #define PGXP_MOVE(rd, rs) (pgxp_gpr[rd] = pgxp_gpr[rs])
 // SXY registers (12..15) to and from CPU registers and memory (gte.cpp)
@@ -248,9 +246,8 @@ void psx_hook_enemy_damage(R3000* c);  // one hit kill cheat (cheats.cpp)
 int psx_hook_player_use(R3000* c);   // a switch the player used fires: skip on the odd tick (sim60.cpp)
 void psx_hook_zone(R3000* c);  // a force zone pushes a list, a0 = zone, a1 = list head (sim60.cpp)
 void psx_hook_glow_sort(R3000* c);  // glow renderer: v0 = ordering-table slot, a1 = depth, s4 = glow (sim60.cpp)
-void psx_hook_glow_end(R3000* c);   // glow renderer: all glows made (sim60.cpp)
 void psx_hook_strip_corner(R3000* c);  // level transform: a strip corner is stored (gte.cpp)
-void psx_hook_camera(R3000* c);        // render camera position rounded to whole units (gte.cpp)
+void psx_hook_camera(R3000* c);        // render camera: smoothed view (gte.cpp)
 void psx_hook_aim(R3000* c);           // player aim: s0 = player, fire vector +471/+472 just set (host_sdl.cpp)
 // the game's menus (game_menu.cpp): add item, destroy, move selection, draw, read select/back
 void psx_hook_menu_init(R3000* c);
@@ -262,7 +259,6 @@ int psx_hook_menu_draw(R3000* c);  // nonzero: drawn by the hook
 int psx_hook_menu_keys(R3000* c);  // nonzero: read by the hook
 int psx_hook_voice(R3000* c);     // 8002FC64 play a voice clip (a0 block, a1 channel); nonzero: silent
 void psx_hook_weapon_pickup(R3000* c);  // 8005E260 give a weapon (a0 player, a1 type)
-void psx_hook_free(R3000* c);           // 8002FF34 free (debug trace, cheats.cpp)
 void psx_hook_message(R3000* c);  // 8001B788 show a message (a0 text)
 
 // Runtime switches for patched call sites (see OPTIONAL_CALLS in tools/recomp/emit.py).

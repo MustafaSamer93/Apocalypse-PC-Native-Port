@@ -56,7 +56,45 @@ const Track* track_at(uint32_t lba) {
     return best;
 }
 
+// No .cue: the .bin files in the image's folder by name, the first the data track and the others
+// audio (as "Track 1", "Track 2" ... dumps are named).
+void load_bins(const std::filesystem::path& dir) {
+    std::error_code ec;
+    std::vector<std::filesystem::path> bins;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        std::string ext = e.path().extension().string();
+        for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+        if (ext == ".bin") bins.push_back(e.path());
+    }
+    std::sort(bins.begin(), bins.end());
+    uint32_t base = 0;
+    for (const auto& b : bins) {
+        Track t{};
+        t.number = (int)g_tracks.size() + 1;
+        t.audio = !g_tracks.empty();
+        t.file = b.string();
+        t.fp = std::fopen(t.file.c_str(), "rb");
+        if (!t.fp) fatal("The disc image could not be opened: %s", t.file.c_str());
+        std::fseek(t.fp, 0, SEEK_END);
+        t.sectors = (uint32_t)(std::ftell(t.fp) / RAW);
+        t.file_lba = base;
+        t.start_lba = base + (t.audio ? 150 : 0);  // an audio track's 2 s pregap is in its file
+        base += t.sectors;
+        g_tracks.push_back(t);
+    }
+}
+
 void load_cue(const std::string& cue_path) {
+    std::string ext = std::filesystem::path(cue_path).extension().string();
+    for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+    if (ext == ".bin") {
+        load_bins(std::filesystem::path(cue_path).parent_path());
+        if (g_tracks.empty()) fatal("no disc image in %s", cue_path.c_str());
+        g_disc_end = g_tracks.back().file_lba + g_tracks.back().sectors;
+        for (auto& t : g_tracks)
+            log_msg(LogCat::Cd, "track %d %s start=%u sectors=%u", t.number, t.audio ? "audio" : "data", t.start_lba, t.sectors);
+        return;
+    }
     std::ifstream in(cue_path);
     if (!in)
         fatal("The game's disc image could not be opened: %s", cue_path.c_str());
@@ -78,7 +116,7 @@ void load_cue(const std::string& cue_path) {
             t.file = cur_file;
             t.file_lba = file_base;
             t.fp = std::fopen(cur_file.c_str(), "rb");
-            if (!t.fp) fatal("The disc image is incomplete: %s is missing (assets\\game disks).", cur_file.c_str());
+            if (!t.fp) fatal("The disc image is incomplete: %s is missing (assets\\image).", cur_file.c_str());
             std::fseek(t.fp, 0, SEEK_END);
             t.sectors = (uint32_t)(std::ftell(t.fp) / RAW);
             t.start_lba = file_base;
@@ -153,8 +191,7 @@ int32_t g_carry_old[2] = {}, g_carry_older[2] = {};
 // froze the picture for 1-2 s. XA (voices, movie sound) keeps the real rate.
 constexpr uint64_t kFastData = 8;
 bool fast_data() {
-    static const bool real = std::getenv("APOC_CD_REAL") != nullptr;  // for A/B: the drive's own rate
-    return !real && !(g_mode & 0x40);
+    return !(g_mode & 0x40);
 }
 uint64_t sector_period() {
     uint64_t p = (g_mode & 0x80) ? PSX_CPU_HZ / 150 : PSX_CPU_HZ / 75;

@@ -29,7 +29,6 @@
 bool replace_load_image(const std::string& path, std::vector<uint32_t>& rgba, int& w, int& h);  // replace.cpp
 
 bool g_tex_replace = true;  // setting (settings.ini "texreplace"; on: whatever is in the folder is used)
-bool g_texreplace_trace = false;  // gpu.cpp: log the next texreplace_find's regions (APOC_TEXREPLACE_AT)
 
 namespace {
 
@@ -420,10 +419,5 @@ bool texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, 
         }
     for (int id : ids)
         if (!place(id)) return false;
-    if (g_texreplace_trace)
-        for (int id : ids)
-            log_msg(LogCat::Host, "texreplace at: page %d,%d d%d clut %d,%d uv %.1f,%.1f-%.1f,%.1f tw %d,%d,%d,%d -> %s at %d,%d",
-                    page_x, page_y, depth, clut_x, clut_y, u0, v0, u1, v1, tw[0], tw[1], tw[2], tw[3],
-                    g_tex[g_regions[id].tex].png.c_str(), g_regions[id].x, g_regions[id].y);
     return true;
 }

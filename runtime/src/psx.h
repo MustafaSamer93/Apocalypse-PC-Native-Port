@@ -35,7 +35,6 @@ enum class Ev : int { Scanline, Cdrom, CdromRead, DmaGpu, DmaCd, DmaSpu, DmaMdec
 void sched_init(R3000* c);
 void sched_add(R3000* c, Ev ev, uint64_t cycles_from_now);
 void sched_cancel(R3000* c, Ev ev);
-bool sched_pending(Ev ev);
 void sched_request_check(R3000* c);  // forces psx_run_events at the next check point
 
 // ---------------------------------------------------------------- interrupts
@@ -68,7 +67,6 @@ uint32_t gpu_read_stat(R3000* c);
 void gpu_write_gp0(R3000* c, uint32_t v);
 void gpu_write_gp1(R3000* c, uint32_t v);
 void gpu_vblank();
-bool gpu_is_interlaced_odd_field();
 struct GpuDisplay {
     const uint16_t* vram;  // 1024x512 16-bit
     int x, y, w, h;        // display area in VRAM pixels (w in 16-bit units for 15-bit mode)
@@ -113,12 +111,8 @@ void gte_precise_clear();
 // PGXP (gte.cpp): the exact vertex for a GPU vertex word read from RAM address a (0: none)
 bool pgxp_find(uint32_t a, uint32_t word, GtePrecise* out);
 bool pgxp_uv_find(uint32_t a, uint32_t word, float* u, float* v);  // exact texture coordinates (gte.cpp)
-extern uint32_t g_uv_stats[2];
 extern uint32_t g_gpu_word_addr;  // RAM address of the GP0 word being sent (0: not from a list)
-extern uint32_t g_precise_stats[8];
-extern uint32_t g_corner_stats[2];  // level grid vertices rebuilt from exact corners, corner sets rejected
 extern GteBlendMode g_gte_blend;
-extern uint32_t g_blend_stats[3];
 void gte_blend_begin(GteBlendMode m);
 
 // Draw distance (drawdist.cpp): percent of the game's own view distance (100 = original)
@@ -148,18 +142,13 @@ void subtitle_note_xa(uint32_t lba, int chan);  // cdrom.cpp: an XA sector is be
 void subtitle_poll(R3000* c);                    // once per frame (savestate.cpp)
 void game_voice_poll(R3000* c);                  // once per frame: queued pickup lines (game_menu.cpp)
 float subtitle_tilt(uint32_t text);
-void game_test_pickup(R3000* c, int what);
-void game_test_health(R3000* c, int amount);
-void game_test_grab(R3000* c);
-void game_test_spawn(R3000* c, int type);
-void game_test_spawn_poll(R3000* c);
 // Cheats (cheats.cpp): 0 health, 1 lives, 2 weapons, 3 ammo, 4 smart bombs. Off at start, not saved.
 bool cheat_on(int which);
 void cheat_set(int which, bool on);
 void cheats_frame(R3000* c);                     // once per frame (savestate.cpp)
-bool cheat_quiet();
-void weapons_check(R3000* c, uint32_t player);  // a freed weapon left in a slot is dropped (cheats.cpp)                              // the cheat is giving a weapon: no voice line
-void cheat_note_pickup(uint32_t player, int type);  // a weapon pickup (8005E260)  // debug: APOC_TEST_PICKUP (game_menu.cpp)  // gpu.cpp: the angle to draw the text at `text` with (0 = level)
+bool cheat_quiet();  // the cheat is giving a weapon: no voice line
+void weapons_check(R3000* c, uint32_t player);  // a freed weapon left in a slot is dropped (cheats.cpp)
+void cheat_note_pickup(uint32_t player, int type);  // a weapon pickup (8005E260)
 extern bool g_subtitles;  // setting (subtitles.cpp)
 extern bool g_autosave;  // setting: auto-save at checkpoints (savestate.cpp)
 
@@ -180,9 +169,6 @@ extern float g_gte_widescreen;
 void gpu_note_movie_frame();
 bool gpu_movie_playing();
 void gpu_list_done();  // an ordering table was sent to the GPU (hw.cpp)
-// Soft glows (gpu.cpp): the packets from `packet` on draw a glow centred at view depth z that
-// fades out where the scene is up to `fade` nearer; end: the glow renderer is done.
-bool gpu_soft_glows();
 bool gpu_title_screen();
 // texture dump (texdump.cpp; F1 -> Dump textures)
 extern bool g_tex_dump;
@@ -192,12 +178,8 @@ void texdump_vram_changed(int x, int y, int w, int h);
 extern bool g_tex_replace;
 void texreplace_vram_changed();
 void texreplace_atlas_lost();  // the renderer's atlas is gone (shut down)
-extern bool g_texreplace_trace;  // log the next texreplace_find's regions (gpu.cpp, APOC_TEXREPLACE_AT)
 bool texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
                      float v1, const int tw[4], const uint16_t* vram);  // the title screen (PRESS START) is up
-void gpu_packet_start(uint32_t addr);  // before each packet of a list (0: the list ended; gpu.cpp)
-void gpu_glow_begin(uint32_t packet, float z, float fade);
-void gpu_glow_end(uint32_t packet);
 extern uint32_t g_gpu_ot_z;  // depth of the ordering-table slot being sent (hw.cpp; 0: none)
 // Replacement pictures (replace.cpp): uploads and copies in VRAM, the whole VRAM re-sent, and the
 // look for known pictures at each VBlank.
@@ -268,7 +250,6 @@ void host_request_quit();            // close the game (as closing the window do
 void host_present(const GpuDisplay& d);
 void host_throttle_frame();          // sleep to hold 60 Hz
 void host_audio_push(const int16_t* stereo, int frames);
-int host_audio_queued_frames();
 
 // ---------------------------------------------------------------- BIOS HLE / CPU glue
 
@@ -290,15 +271,12 @@ extern const uint8_t* g_bios_rom;    // while the boot sequence runs (512 KB), e
 bool interp_run_machine(R3000* c, uint32_t pc, uint32_t stop_pc, uint64_t cycle_limit, bool (*skip)());
 
 void dispatch_register(const RecompFunc* table, uint32_t count);
-void dispatch_unregister_range(uint32_t start, uint32_t end);
 RecompFuncPtr dispatch_lookup(uint32_t addr);
 void interp_run(R3000* c, uint32_t pc);  // runs until jr to the entry ra
 void interp_run_until(R3000* c, uint32_t pc, uint32_t return_to);
 
 // Memory helpers for C++ code (always go through the full address decode).
 inline uint8_t* ram_ptr(uint32_t addr) { return psx_ram + (addr & (PSX_RAM_SIZE - 1)); }
-uint32_t ram_r32(uint32_t addr);
-void ram_w32(uint32_t addr, uint32_t v);
 std::string ram_cstr(uint32_t addr, size_t max = 256);
 
 extern R3000* g_cpu;

@@ -128,26 +128,6 @@ void weapons_check(R3000* c, uint32_t p) {
     }
 }
 
-// Debug (APOC_WEAPON_TRACE=1): 8002FF34 free(block): a free of an object a weapon slot still
-// holds, with the return addresses found on the stack.
-extern "C" void psx_hook_free(R3000* c) {
-    static const bool on = std::getenv("APOC_WEAPON_TRACE") != nullptr;
-    if (!on || core_in_ghost()) return;
-    const uint32_t p = player(c), a = c->r[4];
-    if (!p) return;
-    for (int t = 0; t <= kTypes; t++) {
-        if (MEM_R32(c, p + 612 + 4 * (uint32_t)t) != a) continue;
-        std::string chain;
-        char b[16];
-        for (uint32_t s = c->r[29]; s < c->r[29] + 256; s += 4) {
-            const uint32_t w = MEM_R32(c, s);
-            if (w >= 0x80010000u && w < 0x800A0000u && !(w & 3)) std::snprintf(b, sizeof b, " %08X", w), chain += b;
-        }
-        log_msg(LogCat::Host, "weapon trace: free of weapon %d object %08X (current %d) ra=%08X frame %llu stack:%s", t, a,
-                (int)MEM_R32(c, p + kCurrent), c->r[31], (unsigned long long)host_frame_count(), chain.c_str());
-    }
-}
-
 bool cheat_quiet() { return g_quiet; }
 
 // A weapon pickup the player made (not ours): it is theirs to keep.
@@ -172,14 +152,6 @@ extern "C" void psx_hook_enemy_damage(R3000* c) {
 // Once per frame (savestate.cpp psx_safepoint).
 void cheats_frame(R3000* c) {
     static bool invincible_set = false;
-    if (static const char* t = std::getenv("APOC_TEST_CHEATS"); t) {  // debug: "10110" = cheats 0, 2, 3 on
-        for (int i = 0; i < kCheats && t[i]; i++) g_on[i] = t[i] == '1';
-        t = nullptr;
-    }
-    if (static const char* t = std::getenv("APOC_TEST_CHEATS_OFF"); t && host_frame_count() >= std::strtoull(t, nullptr, 10)) {
-        for (bool& on : g_on) on = false;  // debug: all off at that frame
-        t = nullptr;
-    }
     const uint32_t p = player(c);
     if (p) weapons_check(c, p);
     // health: the game's own switch, and only while ours is on (its cheat code can use it too)
