@@ -72,7 +72,7 @@ void usage() {
 void make_asset_folders() {
     std::error_code ec;
     for (const char* d : {"assets/game disks", "assets/bios", "assets/replacements/textures",
-                          "assets/replacements/fmvs", "assets/replacements/images"})
+                          "assets/replacements/fmvs"})
         std::filesystem::create_directories(d, ec);
 }
 

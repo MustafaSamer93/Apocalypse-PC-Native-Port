@@ -1,6 +1,8 @@
-// Replacement pictures: a full-screen picture the game puts into VRAM (the title screen) is
-// recognised by its contents and a picture from assets\replace\ is drawn over it at full
-// detail, so what the game draws on top (the blinking PRESS START) still appears.
+// Replacement pictures: a full-screen picture the game puts into VRAM (title, loading screens,
+// logos: CD.WAD's .bmr / .rle files) is recognised by its contents and its replacement from
+// assets/replacements/textures/screens/<name>.png (as tools/psx_textures.py names them) is drawn
+// over it at full detail, so what the game draws on top (the blinking PRESS START) still appears.
+// The originals are read from the disc at the first look, so any of them can be replaced.
 //
 // The replacement may have any size and shape: it is fitted to the shape the game's picture
 // has on screen (4:3, or 16:9 / 16:10 in widescreen), cut at the edges where it is wider or
@@ -8,6 +10,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -21,10 +25,13 @@
 #include <wincodec.h>
 #endif
 
+bool texreplace_wad_file(const std::string& name, std::vector<uint8_t>& out);
+
 namespace {
 
 struct Picture {
-    const char* name;  // file name in assets\replace\ (without extension)
+    std::string name;  // the original's file name without extension ("title", "load03")
+    std::string file;  // its replacement
     uint32_t hash;     // FNV-1a of the original's 15-bit pixels (see content_hash)
     int w, h;          // the original's size in VRAM
     bool tried = false;
@@ -36,9 +43,10 @@ struct Picture {
     std::vector<uint32_t> fitted;
 };
 
-Picture g_pictures[] = {
-    {"title", 0x865681EF, 512, 240},  // "APOCALYPSE / PRESS START"
-};
+constexpr uint32_t kTitleHash = 0x865681EF;  // title.bmr, 512 x 240: "APOCALYPSE / PRESS START"
+constexpr const char* kScreens = "assets/replacements/textures/screens";
+std::vector<Picture> g_pictures;
+bool g_scanned = false;
 
 // The two frame buffers (y = 0 and 256): an upload or copy changed it since the last look (it
 // may hold a new picture). Only writes into a buffer count: the picture is drawn once, and drawing
@@ -101,14 +109,62 @@ bool load_image(const std::wstring&, std::vector<uint32_t>&, int&, int&) { retur
 bool load(Picture& p) {
     if (p.tried) return !p.rgba.empty();
     p.tried = true;
-    for (const char* ext : {".png", ".webp", ".jpg", ".jpeg", ".bmp"}) {
-        std::string file = std::string("assets/replacements/images/") + p.name + ext;
-        if (load_image(std::wstring(file.begin(), file.end()), p.rgba, p.pw, p.ph)) {
-            log_msg(LogCat::Host, "replacement %s: %dx%d", file.c_str(), p.pw, p.ph);
-            return true;
-        }
+    if (load_image(std::filesystem::u8path(p.file).wstring(), p.rgba, p.pw, p.ph)) {
+        log_msg(LogCat::Host, "replacement %s: %dx%d", p.file.c_str(), p.pw, p.ph);
+        return true;
     }
+    log_msg(LogCat::Host, "replacement %s: cannot read it", p.file.c_str());
     return false;
+}
+
+// The replacements in kScreens whose original is on the disc: its 15-bit pixels (.bmr raw
+// 512 x 240; .rle "_RLE_16_", u32 size, u16 commands: bit 15 = repeat the next word, else copy
+// that many) give the contents to look for.
+void scan_pictures() {
+    g_scanned = true;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(kScreens, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        std::string ext = e.path().extension().string(), name = e.path().stem().string();
+        for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+        for (char& ch : name) ch = (char)std::tolower((unsigned char)ch);
+        if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp" && ext != ".bmp") continue;
+        std::vector<uint8_t> b;
+        std::vector<uint16_t> words;
+        if (texreplace_wad_file(name + ".bmr", b)) {
+            words.resize(std::min<size_t>(b.size() / 2, 512 * 240));
+            std::memcpy(words.data(), b.data(), words.size() * 2);
+        } else if (texreplace_wad_file(name + ".rle", b) && b.size() >= 12 && std::memcmp(b.data(), "_RLE_16_", 8) == 0) {
+            for (size_t o = 12; o + 2 <= b.size() && words.size() < 512 * 240;) {
+                uint16_t c;
+                std::memcpy(&c, b.data() + o, 2);
+                o += 2;
+                if (c & 0x8000) {
+                    uint16_t v = 0;
+                    if (o + 2 <= b.size()) std::memcpy(&v, b.data() + o, 2);
+                    o += 2;
+                    words.insert(words.end(), c & 0x7FFF, v);
+                } else {
+                    for (int i = 0; i < c && o + 2 <= b.size(); i++, o += 2) {
+                        uint16_t v;
+                        std::memcpy(&v, b.data() + o, 2);
+                        words.push_back(v);
+                    }
+                }
+            }
+        }
+        const int h = (int)std::min<size_t>(words.size() / 512, 240);
+        if (h < 16) continue;  // not a screen on the disc
+        std::vector<uint16_t> vram((size_t)1024 * h);  // as in VRAM: 1024-word rows
+        for (int y = 0; y < h; y++) std::memcpy(&vram[(size_t)y * 1024], &words[(size_t)y * 512], 512 * 2);
+        Picture p;
+        p.name = name;
+        p.file = e.path().u8string();
+        p.hash = content_hash(vram.data(), 0, 0, 512, h);
+        p.w = 512, p.h = h;
+        g_pictures.push_back(std::move(p));
+    }
+    log_msg(LogCat::Host, "replacement screens: %zu", g_pictures.size());
 }
 
 // The replacement resampled to the VRAM area (w x h at `scale`) that shows at `aspect` on
@@ -205,9 +261,11 @@ void replace_check(const uint16_t* vram) {
         if (!g_check[b]) continue;
         g_check[b] = false;
         const int y = b * 256;
+        const uint32_t full = content_hash(vram, 0, y, 512, 240);
+        if (full == kTitleHash) g_title[b] = true;
+        if (!g_scanned) scan_pictures();
         for (Picture& p : g_pictures) {
-            if (content_hash(vram, 0, y, p.w, p.h) != p.hash) continue;
-            if (&p == &g_pictures[0]) g_title[b] = true;
+            if ((p.h == 240 ? full : content_hash(vram, 0, y, p.w, p.h)) != p.hash) continue;
             if (!load(p)) continue;
             fit(p, hw_scale(), aspect);
             hw_draw_picture(0, y, p.w, p.h, p.fitted.data());

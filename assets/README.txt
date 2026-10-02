@@ -4,8 +4,11 @@ assets\game disks             REQUIRED - your own dump of Apocalypse (USA):
                                 Apocalypse (USA) (Track 2).bin
 assets\bios                   optional - a US PlayStation BIOS (e.g. SCPH1001.BIN, 512 KB):
                                 plays the PlayStation boot sequence at start
-assets\replacements\textures  optional - HD textures (F1 -> Texture replacements)
-assets\replacements\images    optional - replacement pictures (title.png)
+assets\replacements\textures  optional - HD textures: <file>\<index>.png for every texture of the
+                                game files, screens\<name>.png for the full-screen pictures
+                                (title, loading screens, logos), as tools\psx_textures.py
+                                exports them. Used whenever present; anything missing comes
+                                from the disc (F1 -> Texture replacements to compare)
 assets\replacements\fmvs      optional - HD movies: <NAME>.mkv or .mp4 plays instead of the
                                 disc's <NAME>.STR (INTRO, ATVILOGO, SEWER, ...)
 

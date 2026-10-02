@@ -28,7 +28,7 @@
 
 bool replace_load_image(const std::string& path, std::vector<uint32_t>& rgba, int& w, int& h);  // replace.cpp
 
-bool g_tex_replace = false;  // setting (settings.ini "texreplace")
+bool g_tex_replace = true;  // setting (settings.ini "texreplace"; on: whatever is in the folder is used)
 bool g_texreplace_trace = false;  // gpu.cpp: log the next texreplace_find's regions (APOC_TEXREPLACE_AT)
 
 namespace {
@@ -57,6 +57,8 @@ struct Region {
 bool g_loaded = false;
 std::vector<Tex> g_tex;
 std::unordered_multimap<uint64_t, int> g_keys;  // first non-zero window -> texture
+// textures under 4 words wide (font letters, small icons): the first non-zero 4-row column instead
+std::unordered_multimap<uint64_t, int> g_keys_v;
 std::vector<Region> g_regions;
 std::vector<int> g_cells[16][32];            // 32 x 32-word cells -> regions overlapping them
 std::vector<Region> g_placed;  // what the HD copy holds now (a later one may have overwritten part of an earlier one)
@@ -161,6 +163,12 @@ void parse(const std::vector<uint8_t>& b, const std::string& dir) {
                 for (int j = 0; j < 4; j++) k = k << 16 | t.data[(size_t)y * t.hw + x + j];
                 if (k) t.key_dx = x, t.key_dy = y, found = true, g_keys.emplace(k, (int)g_tex.size());
             }
+        for (int x = 0; x < t.hw && !found; x++)
+            for (int y = 0; y + 4 <= t.h && !found; y++) {
+                uint64_t k = 0;
+                for (int j = 0; j < 4; j++) k = k << 16 | t.data[(size_t)(y + j) * t.hw + x];
+                if (k) t.key_dx = x, t.key_dy = y, found = true, g_keys_v.emplace(k, (int)g_tex.size());
+            }
         if (found) g_tex.push_back(std::move(t));
     }
 }
@@ -264,25 +272,35 @@ void scan(const uint16_t* vram) {
     g_regions.clear();
     for (auto& row : g_cells)
         for (auto& c : row) c.clear();
-    if (g_keys.empty()) return;
+    if (g_keys.empty() && g_keys_v.empty()) return;
+    // every texture whose key is at (x, y) and whose texels all match there becomes a region
+    auto try_keys = [&](const std::unordered_multimap<uint64_t, int>& keys, uint64_t k, int x, int y) {
+        auto range = keys.equal_range(k);
+        for (auto it = range.first; it != range.second; ++it) {
+            const Tex& t = g_tex[it->second];
+            const int ox = x - t.key_dx, oy = y - t.key_dy;
+            if (ox < 512 || oy < 0 || ox + t.hw > 1024 || oy + t.h > 512) continue;
+            bool same = true;
+            for (int r = 0; r < t.h && same; r++)
+                same = std::memcmp(vram + (oy + r) * 1024 + ox, t.data.data() + (size_t)r * t.hw, t.hw * 2) == 0;
+            if (!same) continue;
+            const int id = (int)g_regions.size();
+            g_regions.push_back({ox, oy, it->second});
+            for (int cy = oy / 32; cy <= (oy + t.h - 1) / 32; cy++)
+                for (int cx = ox / 32; cx <= (ox + t.hw - 1) / 32; cx++) g_cells[cy][cx].push_back(id);
+        }
+    };
     for (int y = 0; y < 512; y++)
-        for (int x = 512; x + 4 <= 1024; x++) {
+        for (int x = 512; x < 1024; x++) {
             uint64_t k = 0;
-            for (int i = 0; i < 4; i++) k = k << 16 | vram[y * 1024 + x + i];
-            if (!k) continue;
-            auto range = g_keys.equal_range(k);
-            for (auto it = range.first; it != range.second; ++it) {
-                const Tex& t = g_tex[it->second];
-                const int ox = x - t.key_dx, oy = y - t.key_dy;
-                if (ox < 512 || oy < 0 || ox + t.hw > 1024 || oy + t.h > 512) continue;
-                bool same = true;
-                for (int r = 0; r < t.h && same; r++)
-                    same = std::memcmp(vram + (oy + r) * 1024 + ox, t.data.data() + (size_t)r * t.hw, t.hw * 2) == 0;
-                if (!same) continue;
-                const int id = (int)g_regions.size();
-                g_regions.push_back({ox, oy, it->second});
-                for (int cy = oy / 32; cy <= (oy + t.h - 1) / 32; cy++)
-                    for (int cx = ox / 32; cx <= (ox + t.hw - 1) / 32; cx++) g_cells[cy][cx].push_back(id);
+            if (x + 4 <= 1024 && !g_keys.empty()) {
+                for (int i = 0; i < 4; i++) k = k << 16 | vram[y * 1024 + x + i];
+                if (k) try_keys(g_keys, k, x, y);
+            }
+            if (y + 4 <= 512 && !g_keys_v.empty()) {
+                k = 0;
+                for (int i = 0; i < 4; i++) k = k << 16 | vram[(y + i) * 1024 + x];
+                if (k) try_keys(g_keys_v, k, x, y);
             }
         }
     LOG(Host, "texture replacements: %zu found in VRAM", g_regions.size());
@@ -331,6 +349,35 @@ bool place(int id) {
 }
 
 }  // namespace
+
+// One file inside CD.WAD by name ("title.bmr"; replace.cpp: the full-screen pictures), read from
+// the disc sector by sector.
+bool texreplace_wad_file(const std::string& name, std::vector<uint8_t>& out) {
+    std::vector<uint8_t> hed;
+    uint32_t wad_lba = 0, wad_size = 0;
+    if (!read_disc_file("CD.HED", hed) || !cdrom_find_file("CD.WAD", &wad_lba, &wad_size)) return false;
+    for (size_t p = 0; p < hed.size() && hed[p] != 0xFF;) {
+        const size_t end = std::find(hed.begin() + p, hed.end(), 0) - hed.begin();
+        std::string n(hed.begin() + p, hed.begin() + end);
+        for (char& ch : n) ch = (char)std::tolower((unsigned char)ch);
+        p = (end + 1 + 3) & ~(size_t)3;
+        const uint32_t off = rd32(hed, p), size = rd32(hed, p + 4);
+        p += 8;
+        if (n != name) continue;
+        if ((uint64_t)off + size > wad_size) return false;
+        std::vector<uint8_t> sec(2048);
+        out.resize(size);
+        for (uint32_t done = 0; done < size;) {
+            const uint32_t at = off + done;
+            if (!cdrom_read_sector_user(wad_lba + at / 2048, sec.data())) return false;
+            const uint32_t n2 = std::min<uint32_t>(2048 - at % 2048, size - done);
+            std::memcpy(out.data() + done, sec.data() + at % 2048, n2);
+            done += n2;
+        }
+        return true;
+    }
+    return false;
+}
 
 void texreplace_vram_changed() { g_dirty = true; }
 
