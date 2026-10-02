@@ -49,6 +49,7 @@ int psx_opt_sim60 = 0;
 // demos always run at 30 Hz: they replay input recorded per 30 Hz update.
 int g_sim60_setting = 1;
 bool g_sim60_force = false;  // --sim60: on in any level, even when it is not known yet
+bool g_sim60_fps30 = false;  // frame rate "30 (original)" (host_sdl.cpp): the game runs as it was
 std::string g_sim60_level;  // base name of the level's trigger file ("prsn" = level 1)
 bool g_sim60_demo = false;
 
@@ -61,7 +62,7 @@ bool sim60_tested(const std::string& level) {
 
 void sim60_apply() {
     bool on = !g_sim60_demo &&
-              (g_sim60_force || (!g_sim60_level.empty() && (g_sim60_setting == 2 ||
+              (g_sim60_force || (!g_sim60_fps30 && !g_sim60_level.empty() && (g_sim60_setting == 2 ||
                                                             (g_sim60_setting == 1 && sim60_tested(g_sim60_level)))));
     if ((on ? 1 : 0) != psx_opt_sim60)
         log_msg(LogCat::Host, "60 Hz simulation %s (level \"%s\"%s)", on ? "on" : "off", g_sim60_level.c_str(),

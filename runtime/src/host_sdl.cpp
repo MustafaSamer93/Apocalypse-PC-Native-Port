@@ -185,7 +185,8 @@ std::string msaa_label() {
 std::string sim60_label() {
     const char* names[] = {"30 Hz original", "60 Hz all levels", "60 Hz all (beta)"};
     std::string s = names[std::clamp(g_sim60_setting, 0, 2)];
-    if (psx_opt_sim60) s += " ON";  // active in the current level
+    if (g_sim60_fps30) s += " (frame rate 30)";  // the frame rate setting keeps it off
+    else if (psx_opt_sim60) s += " ON";          // active in the current level
     return s;
 }
 
@@ -234,6 +235,11 @@ int render_scale() {
 }
 
 void apply_graphics() {
+    // "30 (original)": the game as it was, so no 60 Hz simulation either (sim60.cpp)
+    if (g_sim60_fps30 != (g_gfx.fps == 30)) {
+        g_sim60_fps30 = g_gfx.fps == 30;
+        sim60_apply();
+    }
     const int want = render_scale();
     if (g_gl_ok && (want != g_active_scale || g_gfx.msaa != g_active_msaa)) {
         g_active_scale = gpu_set_renderer(want, g_gfx.msaa);

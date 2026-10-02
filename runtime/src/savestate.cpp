@@ -453,6 +453,8 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             LOG(Host, "boss %08X health set to %d at frame %llu", boss, hp, frame);
         }
     }
+    if (static const char* t = std::getenv("APOC_TEST_MESSAGE"); t && frame == std::strtoull(t, nullptr, 10))
+        game_message(c, "Auto Saved");  // Debug: APOC_TEST_MESSAGE=FRAME shows the auto-save message there
     if (static const char* t = std::getenv("APOC_RAW_DUMP"); t) {  // Debug: APOC_RAW_DUMP=FRAME:PREFIX -> PREFIX.ram / PREFIX.vram
         static bool done = false;
         unsigned long long tf = 0;

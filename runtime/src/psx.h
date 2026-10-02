@@ -166,6 +166,7 @@ extern bool g_autosave;  // setting: auto-save at checkpoints (savestate.cpp)
 // 60 Hz simulation (sim60.cpp)
 extern int g_sim60_setting;    // 0 = 30 Hz, 1 = 60 Hz in level 1, 2 = 60 Hz in every level
 extern bool g_sim60_force;     // --sim60
+extern bool g_sim60_fps30;     // frame rate 30 chosen: no 60 Hz simulation
 extern std::string g_sim60_level;
 extern bool g_sim60_demo;
 void sim60_apply();

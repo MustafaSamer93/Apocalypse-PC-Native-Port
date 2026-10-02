@@ -657,7 +657,7 @@ void write_keyframe(R3000* c, uint32_t at, int frames, int scale0, int scale1, i
 
 void game_message(R3000* c, const char* text) {
     constexpr uint32_t kClear = 0x8001B708, kShow = 0x8001B788, kFrames = 16;
-    constexpr int kScale = 176, kX = 76, kY = 22;  // centre of the text: about 10 letters from the left edge
+    constexpr int kScale = 176, kX = 96, kY = 22;  // centre of the text: about 12 letters from the left edge
     if (!g_message) g_message = game_call(c, kAlloc, kFrames + 4 * 28);
     if (!g_message) return;
     write_text(c, g_message, text, kFrames);
