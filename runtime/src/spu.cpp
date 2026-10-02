@@ -334,6 +334,11 @@ void mix_sample(int16_t& out_l, int16_t& out_r) {
         g_cd_fifo.pop_front();
         g_cd_fifo.pop_front();
     }
+    if (movie_replacing()) {  // a replacement movie's sound instead of the disc movie's (movie.cpp)
+        int16_t ml = 0, mr = 0;
+        if (movie_audio(&ml, &mr)) cdl = ml, cdr = mr;
+        else cdl = cdr = 0;
+    }
     if (cnt & 1) {
         int32_t cl = mul15(cdl, (int16_t)reg(0x1B0)), cr = mul15(cdr, (int16_t)reg(0x1B2));
         l += cl;

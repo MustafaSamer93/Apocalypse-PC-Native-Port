@@ -458,6 +458,7 @@ void cdrom_read_event(R3000* c) {
         queue(c, 5, {(uint8_t)(g_stat | ST_ERROR), 0x04}, 100);
         return;
     }
+    movie_cd_sector(lba);  // a replacement movie starts or stops (movie.cpp)
     std::memcpy(g_last_header, raw + 12, 8);
     uint8_t file = raw[16], chan = raw[17], submode = raw[18];
     bool is_audio = (submode & 0x04) && (submode & 0x20);  // audio + form 2

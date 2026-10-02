@@ -209,6 +209,12 @@ uint32_t cdrom_dma_read_word();
 // Direct file access for the BIOS HLE (FlushCache-free loaders, open("cdrom:...")).
 bool cdrom_find_file(const char* path, uint32_t* lba, uint32_t* size);
 bool cdrom_read_sector_user(uint32_t lba, uint8_t out[2048]);
+// replacement movies (movie.cpp; assets/replacements/fmvs)
+void movie_cd_sector(uint32_t lba);
+bool movie_replacing();
+bool movie_audio(int16_t* l, int16_t* r);
+void movie_vblank(bool movie_picture_shown);
+const uint32_t* movie_picture(int* w, int* h);
 
 void spu_init();
 uint16_t spu_read(uint32_t addr);

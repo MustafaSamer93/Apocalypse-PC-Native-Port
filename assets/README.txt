@@ -6,7 +6,8 @@ assets\bios                   optional - a US PlayStation BIOS (e.g. SCPH1001.BI
                                 plays the PlayStation boot sequence at start
 assets\replacements\textures  optional - HD textures (F1 -> Texture replacements)
 assets\replacements\images    optional - replacement pictures (title.png)
-assets\replacements\fmvs      optional - replacement movies
+assets\replacements\fmvs      optional - HD movies: <NAME>.mkv or .mp4 plays instead of the
+                                disc's <NAME>.STR (INTRO, ATVILOGO, SEWER, ...)
 
 Run build.bat from the project folder; it makes apocalypse.exe next to this folder.
 No game data or BIOS is distributed with this project.

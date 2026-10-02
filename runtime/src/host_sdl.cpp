@@ -1082,6 +1082,21 @@ static void draw_game(const GpuDisplay& d, double frac) {
     int w = std::clamp(d.w, 1, 1024), h = std::clamp(d.h, 1, 512);
     PresentOptions opt = present_options();
     const int crop = movie_crop(h);
+    // A replacement movie (movie.cpp) in place of the game's own movie picture, cropped like it.
+    if (int mw = 0, mh = 0; d.enabled && d.rgb24) {
+        if (const uint32_t* px = movie_picture(&mw, &mh)) {
+            const int mc = (int)((int64_t)crop * mh / h);
+            present_game_pixels(px + (size_t)mc * mw, mw, mh - 2 * mc, opt);
+            if (g_last_image != (smooth_flips() << 8 | 1)) g_images++;
+            g_last_image = smooth_flips() << 8 | 1;
+            maybe_screenshot();
+            draw_toast();
+            draw_fps_counter();
+            maybe_screenshot_overlays();
+            present_swap();
+            return;
+        }
+    }
     // 15-bit images drawn by the OpenGL renderer are shown straight from its VRAM (or an
     // extra frame in between the game's own, see smooth.cpp); 24-bit movie frames (and
     // the software renderer) go through the CPU copy.
@@ -1194,6 +1209,7 @@ static void bot_step() {
 void host_present(const GpuDisplay& d) {
     bot_step();
     g_frame++;
+    movie_vblank(d.enabled && d.rgb24);
     run_state_script();
     state_poll_load(g_cpu);
     if (g_dump_vram_frame && g_frame == g_dump_vram_frame) {

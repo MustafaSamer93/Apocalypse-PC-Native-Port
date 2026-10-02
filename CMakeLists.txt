@@ -118,6 +118,7 @@ add_executable(apocalypse
     runtime/src/game_menu.cpp
     runtime/src/subtitles.cpp
     runtime/src/cheats.cpp
+    runtime/src/movie.cpp
     ${volk_SOURCE_DIR}/volk.c)
 target_include_directories(apocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
 target_compile_definitions(apocalypse PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
@@ -143,6 +144,7 @@ find_package(OpenGL REQUIRED)
 target_link_libraries(apocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL Vulkan::Headers)
 if(WIN32)
     target_link_libraries(apocalypse PRIVATE windowscodecs ole32)  # replacement pictures (replace.cpp)
+    target_link_libraries(apocalypse PRIVATE mfplat mfreadwrite mfuuid)  # replacement movies (movie.cpp)
 endif()
 if(MSVC)
     target_compile_options(apocalypse PRIVATE /W3 /permissive- $<$<NOT:$<CXX_COMPILER_ID:Clang>>:/Zc:preprocessor>)
