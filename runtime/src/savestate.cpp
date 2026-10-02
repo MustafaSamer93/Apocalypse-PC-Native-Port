@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_timer.h>
 
 #include "memcard.h"
 #include "psx.h"
@@ -48,6 +49,19 @@ uint32_t g_resume_pc = 0;
 constexpr uint32_t kProgressLevel = 0x800A53D8;    // level file name ("prsn_t")
 constexpr uint32_t kProgressRestart = 0x800A53E1;  // restart point ("Re_Cat1_Prsn")
 bool g_progress_pending = false;
+// Boss checkpoint: when the boss (the one the health bar shows, gp+2224) is down to half its
+// health (its second phase) the game is saved to kBossSlot; dying while it still lives loads
+// that (with the lives left) instead of starting the fight again.
+constexpr int kBossSlot = 98;
+constexpr uint32_t kBoss = 0x800FF76C;
+uint32_t g_boss = 0;
+int g_boss_full = 0;
+bool g_boss_saved = false;
+int g_after_load_lives = -1;  // set the lives to this after the next state load
+bool g_boss_reloaded = false;  // the checkpoint was just loaded: the same fight goes on
+std::string g_start_level;  // the level of the first progress point seen in it, and its record
+uint8_t g_start_record[136];
+constexpr uint32_t kLives = 0x800FF874, kRecordLives = 0x6C;  // (the death state keeps lives at record +0x6C)
 uint64_t g_progress_frame = 0;
 std::string g_saved_level, g_saved_restart;  // the point of the last auto-save (or the start)
 bool g_demo_loaded = false;          // a .dem file was loaded since the last level start
@@ -267,6 +281,13 @@ void state_poll_load(R3000* c) {
     host_toast(slot == kAutoSlot       ? "Auto-save loaded"
                : slot >= kChapterBase ? "Chapter " + std::to_string(slot - kChapterBase + 1) + " loaded"
                                       : "State " + std::to_string(slot) + " loaded");
+    if (g_after_load_lives >= 0) {  // the boss checkpoint after a death
+        MEM_W32(c, 0x800FF874, (uint32_t)g_after_load_lives);
+        g_after_load_lives = -1;
+        g_boss_reloaded = true;
+        host_toast("Boss checkpoint");
+    }
+    texreplace_vram_changed();  // (VRAM came from the state)
     g_resume_pc = resume_pc;
     g_resume_pending = true;
     // the loaded game's progress point is where auto-saves continue from
@@ -294,6 +315,22 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
     subtitle_poll(c);
     game_voice_poll(c);
     cheats_frame(c);
+
+    {  // boss checkpoint (see kBossSlot)
+        const uint32_t boss = MEM_R32(c, kBoss), player = MEM_R32(c, 0x800FF5A0);
+        const int hp = boss ? (int16_t)MEM_R16(c, boss + 0xDA) : 0;
+        static int last_hp = 0;
+        // another boss, or this one back at more health (the fight started again, a state loaded)
+        if (g_boss_reloaded) g_boss_reloaded = false;
+        else if (boss != g_boss || hp > last_hp) g_boss = boss, g_boss_full = hp, g_boss_saved = false;
+        last_hp = hp;
+        const bool alive = player && (int16_t)MEM_R16(c, player + 0xDA) > 0;
+        if (boss && !g_boss_saved && alive && hp > 0 && hp * 2 <= g_boss_full) {
+            g_boss_saved = save_to(kBossSlot, c, pc);
+            log_msg(LogCat::Core, "boss checkpoint: boss %08X at %d of %d health", boss, hp, g_boss_full);
+            if (g_boss_saved) game_message(c, "Checkpoint");
+        }
+    }
 
     if (g_save_request >= 0) {
         int slot = g_save_request;
@@ -405,6 +442,46 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             game_test_pickup(c, what);
         }
     }
+    {  // Debug: APOC_TEST_BOSSHP=FRAME:HP sets the boss's health (boss at gp+2224, health +0xDA)
+        static const char* t = std::getenv("APOC_TEST_BOSSHP");
+        static bool done = false;
+        unsigned long long tf = 0;
+        int hp = 0;
+        if (t && !done && std::sscanf(t, "%llu:%d", &tf, &hp) == 2 && frame >= tf) {
+            const uint32_t boss = MEM_R32(c, 0x800FF76C);
+            if (boss) MEM_W16(c, boss + 0xDA, (uint16_t)hp), done = true;
+            LOG(Host, "boss %08X health set to %d at frame %llu", boss, hp, frame);
+        }
+    }
+    if (static const char* t = std::getenv("APOC_RAW_DUMP"); t) {  // Debug: APOC_RAW_DUMP=FRAME:PREFIX -> PREFIX.ram / PREFIX.vram
+        static bool done = false;
+        unsigned long long tf = 0;
+        char prefix[400] = "";
+        if (!done && std::sscanf(t, "%llu:%399s", &tf, prefix) == 2 && frame >= tf) {
+            done = true;
+            if (FILE* f = std::fopen((std::string(prefix) + ".ram").c_str(), "wb")) std::fwrite(psx_ram, 1, PSX_RAM_SIZE, f), std::fclose(f);
+            if (FILE* f = std::fopen((std::string(prefix) + ".vram").c_str(), "wb")) std::fwrite(gpu_display().vram, 2, 1024 * 512, f), std::fclose(f);
+        }
+    }
+    if (static const char* t = std::getenv("APOC_TEST_FREEZE"); t && frame == std::strtoull(t, nullptr, 10))
+        for (;;) SDL_Delay(100);  // Debug: APOC_TEST_FREEZE=FRAME hangs there (the freeze report, core.cpp)
+    {  // Debug: APOC_TEST_GAMEOVER=FRAME[:LIVES]: the player dies there with LIVES (default 1: the last)
+        static const char* t = std::getenv("APOC_TEST_GAMEOVER");
+        static bool done = false;
+        unsigned long long tf = 0;
+        unsigned lives = 1;
+        if (t && !done && std::sscanf(t, "%llu:%u", &tf, &lives) >= 1 && frame >= tf) {
+            done = true;
+            if (uint32_t player = MEM_R32(c, 0x800FF5A0)) {
+                MEM_W32(c, kLives, lives);
+                const R3000 keep = *c;
+                c->r[4] = player;
+                c->r[31] = 0;
+                call_indirect(c, 0x8005E708);
+                *c = keep;
+            }
+        }
+    }
     {  // Debug: APOC_TEST_HEALTH=FRAME:PERIOD:COUNT health pickups (+20) every PERIOD frames from FRAME
         static const char* t = std::getenv("APOC_TEST_HEALTH");
         static int left = -1;
@@ -452,6 +529,10 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
         std::string level, restart;
         read_progress(&level, &restart);
         if (g_demo_loaded || level.empty() || restart.empty()) return;
+        if (level != g_start_level) {  // the level's first point: where a game over starts it again
+            g_start_level = level;
+            for (uint32_t i = 0; i < kSaveRecordSize; i++) g_start_record[i] = (uint8_t)MEM_R8(c, kSaveRecord + i);
+        }
         save_chapter(level, restart, c, pc);
         if (g_saved_level.empty()) {  // the first point of this session (new game or loaded save)
             g_saved_level = level;
@@ -467,6 +548,30 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             game_message(c, "Auto Saved");  // as the game shows a pickup (game_menu.cpp)
         }
     }
+}
+
+// Game over (80031264, the death state: at 800312A0 v1 = lives left, 0 = game over): the level
+// starts again from its first point with what the player had there (lives, health, weapons) -
+// its record goes back into the progress record and the game takes its own respawn path.
+extern "C" void psx_hook_game_over(R3000* c) {
+    if (core_in_ghost()) return;
+    // a death in a boss fight past its checkpoint: back there, with the lives left
+    const uint32_t boss = MEM_R32(c, kBoss);
+    if (c->r[3] != 0 && g_boss_saved && boss == g_boss && (int16_t)MEM_R16(c, boss + 0xDA) > 0) {
+        g_after_load_lives = (int)c->r[3];
+        g_load_request = kBossSlot;
+        log_msg(LogCat::Core, "death in the boss fight: back to its checkpoint with %u lives", c->r[3]);
+        return;
+    }
+    if (c->r[3] != 0 || g_start_level.empty() || core_in_ghost() || !record_ok(g_start_record)) return;
+    for (uint32_t i = 0; i < kSaveRecordSize; i++) MEM_W8(c, kSaveRecord + i, g_start_record[i]);
+    uint32_t lives = 0;
+    std::memcpy(&lives, g_start_record + kRecordLives, 4);
+    lives = std::clamp(lives, 1u, 99u);
+    MEM_W32(c, kLives, lives);
+    c->r[3] = lives;
+    g_progress_pending = false;
+    log_msg(LogCat::Core, "game over: %s starts again with %u lives", g_start_level.c_str(), lives);
 }
 
 extern "C" void psx_hook_progress(R3000* c) {
@@ -546,4 +651,19 @@ bool state_take_resume(uint32_t* pc) {
     g_resume_pending = false;
     *pc = g_resume_pc;
     return true;
+}
+
+// The whole machine in memory (bios.cpp: the PlayStation boot sequence runs on a scratch machine
+// and the game then starts from this copy).
+std::vector<uint8_t> state_capture(R3000* c, uint32_t pc) {
+    StateIO s(false);
+    serialize(s, c, pc);
+    return std::move(s.data());
+}
+
+void state_restore(const std::vector<uint8_t>& data, R3000* c) {
+    StateIO s(data);
+    uint32_t pc;
+    serialize(s, c, pc);
+    sched_refresh(c);
 }

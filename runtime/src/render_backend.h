@@ -41,7 +41,10 @@
     X(void, hw_capture, (int slot, int x, int y, int w, int h), (slot, x, y, w, h))                            \
     X(unsigned, hw_capture_texture, (int slot, int* tw, int* th), (slot, tw, th))                              \
     X(void, hw_stash, (int x, int y, int w, int h), (x, y, w, h))                                              \
+    X(void, hw_depth_draw, (const HwVtx* tris, int n), (tris, n))                                              \
+    X(void, hw_depth_reset, (), ())                                                                                X(bool, hw_depth_ready, (), ()) X(bool, hw_zbuffer_ready, (), ())                                                                            \
     X(void, hw_unstash, (), ())                                                                                \
+    X(bool, hw_hd_upload, (int level, int x, int y, int w, int h, const uint32_t* rgba), (level, x, y, w, h, rgba))              \
     X(bool, present_init, (SDL_Window * window), (window))                                                     \
     X(void, present_shutdown, (), ())                                                                          \
     X(void, present_set_vsync, (bool on), (on))                                                                \

@@ -101,7 +101,7 @@ bool load(Picture& p) {
     if (p.tried) return !p.rgba.empty();
     p.tried = true;
     for (const char* ext : {".png", ".webp", ".jpg", ".jpeg", ".bmp"}) {
-        std::string file = std::string("assets/replace/") + p.name + ext;
+        std::string file = std::string("assets/replacements/images/") + p.name + ext;
         if (load_image(std::wstring(file.begin(), file.end()), p.rgba, p.pw, p.ph)) {
             log_msg(LogCat::Host, "replacement %s: %dx%d", file.c_str(), p.pw, p.ph);
             return true;
@@ -153,6 +153,11 @@ void fit(Picture& p, int scale, float aspect) {
 }
 
 }  // namespace
+
+// texreplace.cpp: a replacement texture's pixels (R G B A bytes).
+bool replace_load_image(const std::string& path, std::vector<uint32_t>& rgba, int& w, int& h) {
+    return load_image(std::wstring(path.begin(), path.end()), rgba, w, h);
+}
 
 void replace_note_upload(int x, int y, int w, int h) {
     for (int b = 0; b < 2; b++)

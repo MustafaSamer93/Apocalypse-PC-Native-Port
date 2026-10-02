@@ -1,9 +1,13 @@
 // High-level emulation of the PS1 kernel (A0/B0/C0 function tables and the exception
 // handler). Only what Apocalypse and its PsyQ libraries call is implemented; anything
 // else is reported loudly so it can be added.
+#include <algorithm>
 #include <csetjmp>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -562,6 +566,7 @@ void bios_take_interrupt(R3000* c) {
 
 // The pads into their BIOS buffers (at VBlank, and again after the host waited for the display).
 void bios_pad_refresh(R3000* c) {
+    if (g_bios_rom) return;  // the real BIOS is running (boot sequence)
     if (g_pad_started) {
         for (int port = 0; port < 2; port++) {
             uint32_t buf = g_pad_buf[port];
@@ -581,6 +586,7 @@ void bios_pad_refresh(R3000* c) {
 }
 
 void bios_vblank(R3000* c) {
+    if (g_bios_rom) return;
     bios_pad_refresh(c);
     // Card I/O completes one frame after it was requested.
     size_t n = g_card_events.size();
@@ -640,4 +646,52 @@ void bios_state(StateIO& s) {
         g_dir_list.clear();
         g_dir_index = 0;
     }
+}
+
+// ---------------------------------------------------------------- boot sequence (real BIOS)
+
+const uint8_t* g_bios_rom = nullptr;
+
+std::vector<uint8_t> state_capture(R3000* c, uint32_t pc);
+void state_restore(const std::vector<uint8_t>& data, R3000* c);
+
+// The machine is ready for the game (EXE loaded, HLE kernel set up). Keep that, run the player's
+// BIOS from reset on the same hardware - Sony logo, PlayStation logo, its own disc checks - until
+// it jumps to the game's entry point, then put the ready machine back: the game starts exactly as
+// without a BIOS. No BIOS in assets/bios (a 512 KB file), or Start pressed: nothing / cut short.
+void bios_boot_sequence(R3000* c, uint32_t entry) {
+    constexpr size_t kRomSize = 512 * 1024;
+    std::vector<uint8_t> rom;
+    std::error_code ec;
+    std::vector<std::filesystem::path> files;
+    const char* dir = std::getenv("APOC_BIOS_DIR") ? std::getenv("APOC_BIOS_DIR") : "assets/bios";  // (tests)
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+        if (e.is_regular_file(ec) && e.file_size(ec) == kRomSize) files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    for (const auto& f : files) {
+        std::ifstream in(f, std::ios::binary);
+        rom.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        if (rom.size() == kRomSize) {
+            log_msg(LogCat::Bios, "boot sequence from %s", f.string().c_str());
+            break;
+        }
+        rom.clear();
+    }
+    if (rom.empty()) return;
+
+    const std::vector<uint8_t> ready = state_capture(c, entry);
+    std::memset(psx_ram, 0, sizeof psx_ram);
+    std::memset(psx_scratch, 0, sizeof psx_scratch);
+    const uint64_t cycles = c->cycles, next = c->next_event;
+    std::memset(c->r, 0, sizeof c->r);
+    std::memset(c->cop0, 0, sizeof c->cop0);
+    c->cop0[12] = 1u << 22;  // reset: SR.BEV (exception vectors in ROM)
+    c->cop0[15] = 2;
+    c->cycles = cycles, c->next_event = next;
+    g_bios_rom = rom.data();
+    const bool done = interp_run_machine(c, 0xBFC00000u, entry, PSX_CPU_HZ * 40,
+                                         [] { return (host_pad(0).buttons & 0x0008) == 0; });  // Start
+    g_bios_rom = nullptr;
+    log_msg(LogCat::Bios, "boot sequence %s", done ? "finished" : "skipped");
+    state_restore(ready, c);
 }

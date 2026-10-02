@@ -7,10 +7,10 @@
 #include <cstdint>
 
 // 1 = off (the original 30 fps); 2..5 = images per simulation step (60..150 fps).
-void smooth_set_factor(int k);
-int smooth_factor();
+void smooth_set_factor(double k);
+double smooth_factor();  // images per game step of 2 vblanks (fps / 30; 2.5 = 75 fps)
 // Images per step that suit a display refresh rate (e.g. 90 Hz -> 3).
-int smooth_factor_for_refresh(float hz);
+double smooth_factor_for_refresh(float hz);
 
 // Forget the previous step (level start, loaded state): the next frame is not blended.
 void smooth_reset();

@@ -330,13 +330,17 @@ void wait_next_submit(VkSemaphore s) { g_wait_sem = s; }
 void submit_frame(VkSemaphore done) { submit(done, false); }
 int frame_slot() { return g_slot; }
 
-bool create_image(VkImg& img, int w, int h, VkFormat format, VkImageUsageFlags usage, VkSampleCountFlagBits samples) {
+VkImageAspectFlags aspect_of(VkFormat f) {
+    return f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_D16_UNORM ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+}
+
+bool create_image(VkImg& img, int w, int h, VkFormat format, VkImageUsageFlags usage, VkSampleCountFlagBits samples, int mips) {
     img = VkImg{};
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = format;
     ici.extent = {(uint32_t)w, (uint32_t)h, 1};
-    ici.mipLevels = 1;
+    ici.mipLevels = (uint32_t)mips;
     ici.arrayLayers = 1;
     ici.samples = samples;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -358,7 +362,7 @@ bool create_image(VkImg& img, int w, int h, VkFormat format, VkImageUsageFlags u
     vci.image = img.image;
     vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vci.format = format;
-    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vci.subresourceRange = {aspect_of(format), 0, (uint32_t)mips, 0, 1};
     vkCreateImageView(device, &vci, nullptr, &img.view);
     img.format = format;
     img.w = w;
@@ -396,14 +400,15 @@ void transition(VkImg& img, VkImageLayout layout) {
     b.newLayout = layout;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = img.image;
-    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.subresourceRange = {aspect_of(img.format), 0, VK_REMAINING_MIP_LEVELS, 0, 1};
     vkCmdPipelineBarrier(cmd(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &b);
     img.layout = layout;
 }
 
-void begin_rendering(VkImg& target) {
-    if (g_rendering == &target) return;
+VkImg* g_rendering_depth = nullptr;
+void begin_rendering(VkImg& target, VkImg* depth) {
+    if (g_rendering == &target && g_rendering_depth == depth) return;
     end_rendering();
     transition(target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -411,13 +416,23 @@ void begin_rendering(VkImg& target) {
     att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingAttachmentInfo datt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    if (depth) {
+        transition(*depth, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        datt.imageView = depth->view;
+        datt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        datt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        datt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    }
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, {(uint32_t)target.w, (uint32_t)target.h}};
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &att;
+    ri.pDepthAttachment = depth ? &datt : nullptr;
     vkCmdBeginRendering(cmd(), &ri);
     g_rendering = &target;
+    g_rendering_depth = depth;
 }
 
 void end_rendering() {
@@ -468,11 +483,12 @@ VkShaderModule shader(const uint32_t* code, size_t bytes) {
     return m;
 }
 
-VkPipelineLayout make_layout(uint32_t push_bytes) {
+VkPipelineLayout make_layout(uint32_t push_bytes, uint32_t sets) {
     VkPushConstantRange pr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, push_bytes};
     VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    ci.setLayoutCount = 1;
-    ci.pSetLayouts = &g_sampler_layout;
+    const VkDescriptorSetLayout layouts[2] = {g_sampler_layout, g_sampler_layout};
+    ci.setLayoutCount = sets;
+    ci.pSetLayouts = layouts;
     ci.pushConstantRangeCount = push_bytes ? 1 : 0;
     ci.pPushConstantRanges = &pr;
     VkPipelineLayout l = VK_NULL_HANDLE;
@@ -480,8 +496,8 @@ VkPipelineLayout make_layout(uint32_t push_bytes) {
     return l;
 }
 
-// Vertex layout shared with gpu_vk.cpp (VkVtx): pos, colour, uv, info, w, box.
-static constexpr uint32_t kVtxStride = 36;
+// Vertex layout shared with gpu_vk.cpp (VkVtx): pos, colour, uv, info, w, box, z, fade.
+static constexpr uint32_t kVtxStride = 44;
 
 VkPipeline make_pipeline(const PipelineDesc& d) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
@@ -494,19 +510,21 @@ VkPipeline make_pipeline(const PipelineDesc& d) {
     st[1].pName = "main";
 
     VkVertexInputBindingDescription bind{0, kVtxStride, VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attrs[6] = {
+    VkVertexInputAttributeDescription attrs[8] = {
         {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
         {1, 0, VK_FORMAT_R8G8B8A8_UNORM, 8},
         {2, 0, VK_FORMAT_R32G32_SFLOAT, 12},
         {3, 0, VK_FORMAT_R32G32_UINT, 20},
         {4, 0, VK_FORMAT_R32_SFLOAT, 28},
         {5, 0, VK_FORMAT_R32_UINT, 32},
+        {6, 0, VK_FORMAT_R32_SFLOAT, 36},
+        {7, 0, VK_FORMAT_R32_SFLOAT, 40},
     };
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     if (d.vertices != Vertices::None) {
         vi.vertexBindingDescriptionCount = 1;
         vi.pVertexBindingDescriptions = &bind;
-        vi.vertexAttributeDescriptionCount = d.vertices == Vertices::Vram ? 6 : 1;
+        vi.vertexAttributeDescriptionCount = d.vertices == Vertices::Vram ? 8 : 1;
         vi.pVertexAttributeDescriptions = attrs;
     }
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -555,13 +573,19 @@ VkPipeline make_pipeline(const PipelineDesc& d) {
     VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cb.attachmentCount = 1;
     cb.pAttachments = &ba;
-    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+                            VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE};
     VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    ds.dynamicStateCount = 3;
+    ds.dynamicStateCount = d.depth != VK_FORMAT_UNDEFINED ? 5 : 3;
     ds.pDynamicStates = dyn;
+    // Z-buffer (gpu_vk.cpp): LEQUAL, test and write set per batch (dynamic state)
+    VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    dss.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    dss.maxDepthBounds = 1.0f;
     VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     rci.colorAttachmentCount = 1;
     rci.pColorAttachmentFormats = &d.format;
+    rci.depthAttachmentFormat = d.depth;
     VkGraphicsPipelineCreateInfo pci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rci};
     pci.stageCount = 2;
     pci.pStages = st;
@@ -571,6 +595,7 @@ VkPipeline make_pipeline(const PipelineDesc& d) {
     pci.pRasterizationState = &rs;
     pci.pMultisampleState = &ms;
     pci.pColorBlendState = &cb;
+    pci.pDepthStencilState = d.depth != VK_FORMAT_UNDEFINED ? &dss : nullptr;
     pci.pDynamicState = &ds;
     pci.layout = d.layout;
     VkPipeline p = VK_NULL_HANDLE;

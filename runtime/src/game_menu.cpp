@@ -50,7 +50,7 @@ constexpr uint32_t kGpRepeat = 0x800FEEBC + 344, kUpdateCount = 0x800FF2F0;
 // Our pages: their settings (host_sdl.cpp enh_*), in order.
 constexpr int kEnhSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_FPS, E_FPS_COUNTER, E_FONT_SCALE,
                                 E_AUTOSAVE, E_SUBTITLES};
-constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS};
+constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT};
 // The game's own options, for the pause menu (the front end has its own pages for them); ids
 // after the enhancement settings. Found in the front end (80011BA0) and 80016014 (options from
 // a save): the volumes are s16 at 800ECC78.., difficulty and vibration words.
@@ -97,7 +97,7 @@ constexpr uint32_t kMainMade = 0x80011F38;  // return address of the main menu's
 uint32_t g_main = 0, g_main_text = 0;
 bool g_main_drawn = false;
 
-// A theme song in the main menu (the original's is silent): one of the level songs (the table at
+// A theme song in the main menu (the original's is silent): level 3's (plague; the table at
 // 800A5254, 24 bytes an entry, +8 its name: prison sewer plague death rooftops cemetary plague
 // warfact warboss backwall beast), loaded and played the way Options -> Sound's music test does
 // (80015F48 stops the song and loads NAME.VAB/.SEQ, 8006A428 plays it at the music level).
@@ -482,7 +482,7 @@ extern "C" int psx_hook_menu_draw(R3000* c) {
         if (!ghost && !g_song_started) {
             g_song_started = true;
             static const char* e = std::getenv("APOC_MENU_SONG");
-            const int song = e ? std::atoi(e) : 0;
+            const int song = e ? std::atoi(e) : 2;  // plague (level 3; entry 6 is the same song)
             if (song >= 0 && song <= 10) {
                 game_call(c, kSongLoad, MEM_R32(c, kSongs + 24 * (uint32_t)song + 8));
                 game_call(c, kSongPlay);

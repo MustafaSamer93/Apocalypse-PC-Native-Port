@@ -77,6 +77,9 @@ struct GpuDisplay {
 };
 GpuDisplay gpu_display();
 bool gpu_drawn_display(GpuDisplay* out);  // the frame just drawn, where the game will show it
+extern bool g_host_menu_open;             // the F1 / chapter menu is open (core.cpp watchdog)
+void watchdog_start();                    // freeze report thread (core.cpp)
+void core_early_cancel();                // a picture upload: forget the frame shown early (core.cpp)
 void core_frame_drawn(R3000* c);          // a frame's ordering table was drawn (gpu_run_list)
 uint32_t gpu_run_list(R3000* c, uint32_t addr);  // walks a GPU packet list (ordering table) into GP0
 void gpu_vram_save(int x, int y, int w, int h, std::vector<uint16_t>& out);
@@ -109,6 +112,8 @@ int gte_precise_find(uint32_t xy, GtePrecise* out, int max);  // candidates foun
 void gte_precise_clear();
 // PGXP (gte.cpp): the exact vertex for a GPU vertex word read from RAM address a (0: none)
 bool pgxp_find(uint32_t a, uint32_t word, GtePrecise* out);
+bool pgxp_uv_find(uint32_t a, uint32_t word, float* u, float* v);  // exact texture coordinates (gte.cpp)
+extern uint32_t g_uv_stats[2];
 extern uint32_t g_gpu_word_addr;  // RAM address of the GP0 word being sent (0: not from a list)
 extern uint32_t g_precise_stats[8];
 extern uint32_t g_corner_stats[2];  // level grid vertices rebuilt from exact corners, corner sets rejected
@@ -122,7 +127,7 @@ extern bool g_smooth_font;  // setting: draw the game's text and button icons wi
 extern int g_menu_zoom;     // setting: the game's menus at this percent of their size (game_menu.cpp)
 // Enhancement settings, shared by F1 and the game's Options -> Enhancements (host_sdl.cpp).
 enum EnhSetting { E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_RES, E_ASPECT, E_DISPLAY, E_AUTOSAVE, E_SUBTITLES, E_AA,
-                   E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS,
+                   E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT,
                    E_FPS_COUNTER };
 const char* enh_name(int id);
 std::string enh_value(int id);
@@ -168,6 +173,25 @@ extern float g_gte_widescreen;
 void gpu_note_movie_frame();
 bool gpu_movie_playing();
 void gpu_list_done();  // an ordering table was sent to the GPU (hw.cpp)
+// Soft glows (gpu.cpp): the packets from `packet` on draw a glow centred at view depth z that
+// fades out where the scene is up to `fade` nearer; end: the glow renderer is done.
+bool gpu_soft_glows();
+bool gpu_title_screen();
+// texture dump (texdump.cpp; F1 -> Dump textures)
+extern bool g_tex_dump;
+void texdump_note(int page_x, int page_y, int depth, int clut_x, int clut_y, const uint16_t* vram);
+void texdump_vram_changed(int x, int y, int w, int h);
+// texture replacements (texreplace.cpp; F1 -> Texture replacements, assets/replacements/textures)
+extern bool g_tex_replace;
+void texreplace_vram_changed();
+void texreplace_atlas_lost();  // the renderer's atlas is gone (shut down)
+extern bool g_texreplace_trace;  // log the next texreplace_find's regions (gpu.cpp, APOC_TEXREPLACE_AT)
+bool texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
+                     float v1, const int tw[4], const uint16_t* vram);  // the title screen (PRESS START) is up
+void gpu_packet_start(uint32_t addr);  // before each packet of a list (0: the list ended; gpu.cpp)
+void gpu_glow_begin(uint32_t packet, float z, float fade);
+void gpu_glow_end(uint32_t packet);
+extern uint32_t g_gpu_ot_z;  // depth of the ordering-table slot being sent (hw.cpp; 0: none)
 // Replacement pictures (replace.cpp): uploads and copies in VRAM, the whole VRAM re-sent, and the
 // look for known pictures at each VBlank.
 void replace_note_upload(int x, int y, int w, int h);
@@ -194,6 +218,9 @@ uint32_t spu_dma_read();
 void spu_scanline();           // produces samples due so far (keeps sound events on time)
 void spu_end_frame(R3000* c);  // hands this frame's samples to the host
 void spu_push_cd_audio(const int16_t* stereo, int frames, int sample_rate);
+bool voice_clip_end(uint32_t lba, int chan, uint32_t* end);  // subtitles.cpp
+size_t spu_cd_queued();  // CD audio frames not played yet
+void cdrom_voice_poll();  // once a frame: the rest of a voice line a data read cut
 
 void mdec_init();
 uint32_t mdec_read(uint32_t reg);
@@ -240,6 +267,13 @@ void bios_vblank(R3000* c);          // BIOS-side pad/card polling at VBlank
 void bios_pad_refresh(R3000* c);     // the pads into their BIOS buffers
 extern bool g_display_flipped;       // the game set the display start since VBlank (gpu.cpp)
 void bios_deliver_event(R3000* c, uint32_t cls, uint32_t spec);
+// The PlayStation boot sequence from the player's BIOS (assets/bios, optional): the real BIOS
+// runs until it starts the game at `entry`, then the machine is put back as it was.
+void bios_boot_sequence(R3000* c, uint32_t entry);
+extern const uint8_t* g_bios_rom;    // while the boot sequence runs (512 KB), else null
+// The real BIOS on a real (interpreted) CPU: exceptions and interrupts go to its own handlers.
+// Returns true when execution reached stop_pc, false at the cycle limit or on a skip.
+bool interp_run_machine(R3000* c, uint32_t pc, uint32_t stop_pc, uint64_t cycle_limit, bool (*skip)());
 
 void dispatch_register(const RecompFunc* table, uint32_t count);
 void dispatch_unregister_range(uint32_t start, uint32_t end);

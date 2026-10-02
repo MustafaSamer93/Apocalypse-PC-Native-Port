@@ -1,6 +1,7 @@
 #version 450
 // Vulkan port of gpu_hw.cpp kFS: palette lookups, texture windows, semi-transparency passes.
 layout(set = 0, binding = 0) uniform sampler2D u_vram;
+layout(set = 1, binding = 0) uniform sampler2D u_hd;  // replacement textures (bit 27: v_uv is in its pixels)
 layout(push_constant) uniform PC {
     int scale;
     int pass_;     // 0: draw all, 1: only opaque texels, 2: only semi-transparent texels
@@ -12,6 +13,8 @@ layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
 layout(location = 2) flat in uvec2 v_info;
 layout(location = 3) flat in uint v_box;
+layout(location = 4) in float v_z;
+layout(location = 5) flat in float v_fade;
 layout(location = 0) out vec4 o_color;
 
 uint fetch16(ivec2 p) {
@@ -104,6 +107,47 @@ vec4 text_texel(vec2 uv, out bool transparent) {
     return best;
 }
 
+// Replacement textures (HwPrim::hd): HD texel p of mip level l (n = 4 >> l per game texel), in the
+// texture's own coordinates. p stays inside the polygon's own texels (v_box) and its game texel
+// goes through the texture window, so a filter never reaches another texture, the atlas's empty
+// parts or the wrong side of a repeating floor.
+vec4 hd_fetch(ivec2 p, int l) {
+    int sh = 2 - l, n = 1 << sh;
+    ivec2 lo = ivec2(int(v_box & 255u), int((v_box >> 8) & 255u)), hi = ivec2(int((v_box >> 16) & 255u), int(v_box >> 24));
+    p = clamp(p, lo * n, hi * n + n - 1);
+    int d = int((v_info.x >> 20) & 3u);
+    ivec2 base = ivec2((int(v_info.x & 1023u) - 512) * (d == 0 ? 4 : 2), int((v_info.x >> 10) & 511u) + (d == 1 ? 512 : 0));
+    return texelFetch(u_hd, (base + window(p >> sh)) * n + (p & (n - 1)), l);
+}
+
+// Bilinear at level l, weighted by alpha (see-through texels don't darken the edges): colour
+// times coverage in rgb, coverage in a.
+vec4 hd_level(vec2 uv, int l) {
+    vec2 st = uv * float(4 >> l) - 0.5;
+    ivec2 b = ivec2(floor(st));
+    vec2 f = st - vec2(b);
+    vec4 acc = vec4(0.0);
+    for (int j = 0; j < 2; j++)
+        for (int i = 0; i < 2; i++) {
+            vec4 c = hd_fetch(b + ivec2(i, j), l);
+            float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y) * c.a;
+            acc += vec4(c.rgb * w, w);
+        }
+    return acc;
+}
+
+// Trilinear over the atlas's levels 0-2 (texreplace.cpp makes them): level 2 is one pixel per
+// game texel, so far away it looks like the game's own texture instead of shimmering.
+vec4 hd_texel(vec2 uv, vec2 dx, vec2 dy, out bool transparent) {
+    float lod = clamp(log2(max(length(dx), length(dy)) * 4.0), 0.0, 2.0);
+    int l = int(lod);
+    float m = lod - float(l);
+    vec4 acc = hd_level(uv, l);
+    if (m > 0.0) acc = mix(acc, hd_level(uv, l + 1), m);
+    transparent = acc.a < 0.5;
+    return vec4(acc.rgb / max(acc.a, 1e-4), 1.0);
+}
+
 void main() {
     bool textured = ((v_info.x >> 22) & 1u) != 0u;
     bool raw = ((v_info.x >> 23) & 1u) != 0u;
@@ -112,10 +156,20 @@ void main() {
     float mbit = 0.0;
     if (textured) {
         // PS1 samples at the pixel's top-left corner, the GPU at its centre
-        vec2 uv = v_uv - 0.5 * dFdx(v_uv) - 0.5 * dFdy(v_uv);
+        vec2 duv_x = dFdx(v_uv), duv_y = dFdy(v_uv);
+        vec2 uv = v_uv - 0.5 * duv_x - 0.5 * duv_y;
         vec4 tc;
         bool transparent;
-        if (((v_info.x >> 24) & 1u) != 0u) {  // game text
+        if (((v_info.x >> 27) & 1u) != 0u) {  // a replacement texture: its HD copy of VRAM (texreplace.cpp)
+            tc = hd_texel(v_uv, duv_x, duv_y, transparent);
+            // the game's own texel decides what is solid and semi-transparent: palette black uploaded
+            // with the mask bit (8000h) is solid on the PS1, while exports (and so replacements) have it
+            // see-through. There the game's colour shows; the replacement keeps its own soft edges.
+            bool game_transparent;
+            vec4 g = texel(ivec2(floor(v_uv)), vec2(0.0), game_transparent);
+            if (transparent && !game_transparent) { tc.rgb = g.rgb; transparent = false; }
+            tc.a = g.a;
+        } else if (((v_info.x >> 24) & 1u) != 0u) {  // game text
             tc = text_texel(uv, transparent);
         } else if (pc.filter_ != 0) {
             vec2 st = uv - 0.5;
@@ -140,11 +194,17 @@ void main() {
             tc = texel(ivec2(fl), uv - fl, transparent);
         }
         if (transparent) discard;
+        if (((v_info.x >> 26) & 1u) != 0u) tc.rgb = vec3(min(max(tc.r, max(tc.g, tc.b)) * 1.5, 1.0));  // selected item: white
         semi_px = tc.a > 0.5;
         col = raw ? tc.rgb : min(tc.rgb * v_color.rgb * (255.0 / 128.0), vec3(1.0));
         mbit = semi_px ? 1.0 : 0.0;
     }
+    if (((v_info.x >> 25) & 1u) != 0u) {  // glow: u_vram is the depth image (native size)
+        float zs = texelFetch(u_vram, ivec2(gl_FragCoord.xy) / pc.scale, 0).r;
+        col *= clamp((zs - v_z + v_fade) / v_fade, 0.0, 1.0);
+    }
     if (pc.pass_ == 1 && semi_px) discard;
     if (pc.pass_ == 2 && !semi_px) discard;
     o_color = vec4(col, max(mbit, float(pc.set_mask)));
+    gl_FragDepth = clamp(v_z * (1.0 / 65536.0), 0.0, 1.0);  // Z-buffer (HwPrim::ztest batches)
 }

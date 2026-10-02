@@ -47,7 +47,10 @@ constexpr uint32_t kUpdateCount = 0x800FF2F0;  // gp+0x434: world updates so far
 constexpr uint32_t kRenderCount = 0x800FFB8C;  // gp+0xCD0: updates at the last render
 constexpr int kObjPos = 0x04;
 constexpr int kPlayerExtra = 0xB8;
-constexpr int kCameraVecs[] = {0x18, 0x48, 0x54, 0x60};
+// +0x04 eye and +0x158 look-at target are what the view is built from (80077680); some cameras
+// (chapters 62, 68) set them without the others
+constexpr int kCameraVecs[] = {0x04, 0x18, 0x48, 0x54, 0x60, 0x158};
+constexpr int kViewEye = 0x04, kViewTarget = 0x158;  // the view object (80077680's a0)
 // Frame buffer struct: DRAWENV at +0, ordering table (4096 entries, cleared reversed) at
 // +0x70, so DrawOTag starts at its last entry.
 constexpr uint32_t kOtStart = 0x406C;
@@ -63,7 +66,7 @@ struct Vec3 {
     int32_t x, y, z;
 };
 
-int g_factor = 1;
+double g_factor = 1;
 bool g_failed = false;
 
 // Positions at the last real render.
@@ -131,6 +134,18 @@ void record_prev(R3000* c) {
     });
     g_have_prev = true;
 }
+
+// The view the render is built from (80077680): in some places (chapters 62, 68) it is not in
+// the camera list, so it is blended where the render reads it (smooth_view, gte.cpp's camera
+// hook). Its eye and target at the last real render:
+uint32_t g_view = 0;
+Vec3 g_view_prev[2];
+// What the last extra render built the view as (before smooth_view): the same as the next real
+// one = the view ignores the blended camera (chapter 62), so it is blended itself; different =
+// it is built from the blended camera (chapter 1) and blending it again would overshoot.
+Vec3 g_view_seen[2];
+bool g_view_seen_ok = false, g_view_blend = false;
+int g_extra_j = 0, g_extra_k = 0;  // the extra render under way (0: a real one)
 
 // Moves everything j/k of the way from the last render's positions to the current ones.
 void apply_blend(R3000* c, int j, int k) {
@@ -220,11 +235,13 @@ bool render_extra(R3000* c, int j, int k, int slot) {
                 (unsigned long long)(c->cycles - cycles0), c->r[31]);
     } else {
         apply_blend(c, j, k);
+        g_extra_j = j, g_extra_k = k;
         MEM_W32(c, kRenderCount, MEM_R32(c, kUpdateCount));  // the render's own blend stays off
         c->r[31] = 0;
         call_indirect(c, kRenderFunc);
         done = draw_and_capture(c, slot);
     }
+    g_extra_j = g_extra_k = 0;
     int blocked = core_ghost_end(c);
     *c = saved_cpu;
     StateIO back(snap.data());
@@ -246,16 +263,38 @@ bool render_extra(R3000* c, int j, int k, int slot) {
 
 }  // namespace
 
-void smooth_set_factor(int k) {
-    k = std::clamp(k, 1, kMaxFactor);
+// gte.cpp psx_hook_camera: the render reads the view at `view` (x already in v0 = (eye x + shake
+// x) >> 12). Real renders remember it; extra ones blend it when it does not follow the
+// blended camera (g_view_blend).
+void smooth_view(R3000* c, uint32_t view, int32_t shake_x) {
+    const Vec3 now[2] = {rd(c, view + kViewEye), rd(c, view + kViewTarget)};
+    auto same = [](const Vec3& a, const Vec3& b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
+    if (!g_extra_k) {
+        if (g_view_seen_ok && view == g_view) g_view_blend = same(g_view_seen[0], now[0]) && same(g_view_seen[1], now[1]);
+        g_view_seen_ok = false;
+        g_view = view;
+        g_view_prev[0] = now[0], g_view_prev[1] = now[1];
+        return;
+    }
+    if (view != g_view) return;
+    g_view_seen[0] = now[0], g_view_seen[1] = now[1], g_view_seen_ok = true;
+    if (!g_view_blend) return;
+    const int off[2] = {kViewEye, kViewTarget};
+    for (int i = 0; i < 2; i++)
+        if (near(g_view_prev[i], now[i])) wr(c, view + off[i], blend(g_view_prev[i], now[i], g_extra_j, g_extra_k));
+    c->r[2] = (uint32_t)(((int32_t)MEM_R32(c, view + kViewEye) + shake_x) >> 12);
+}
+
+void smooth_set_factor(double k) {
+    k = std::clamp(k, 1.0, (double)kMaxFactor);
     if (k != g_factor) smooth_reset();
     g_factor = k;
     g_failed = false;
 }
 
-int smooth_factor() { return g_failed ? 1 : g_factor; }
+double smooth_factor() { return g_failed ? 1 : g_factor; }
 
-int smooth_factor_for_refresh(float hz) { return std::clamp((int)std::lround(hz / 30.0f), 2, kMaxFactor); }
+double smooth_factor_for_refresh(float) { return 2.0; }  // (Auto: 60 fps, the most offered)
 
 void smooth_reset() {
     g_have_prev = false;
@@ -268,6 +307,8 @@ void smooth_reset() {
 struct Stats { int extras; double ms; } g_st{};
 
 int sim60_render(R3000* c);
+bool sim60_in_render();
+extern GteBlendMode g_gte_blend;
 void drawdist_apply(R3000* c);
 void sim60_effects_dump(R3000* c);
 
@@ -279,11 +320,16 @@ extern "C" int psx_hook_render(R3000* c) {
         static const bool dump = std::getenv("APOC_EFFECT_DUMP") != nullptr;
         if (dump) sim60_effects_dump(c);
     }
-    if (psx_opt_sim60) return sim60_render(c);
-    const int k = smooth_factor();
+    // The 60 Hz simulation draws through its own render (sim60_render), which calls this one again
+    // with the frame's values in place: above 60 images/s the extra images are made there.
+    if (psx_opt_sim60 && !sim60_in_render()) return sim60_render(c);
+    const double k = smooth_factor();
     CaptureSet& back = g_sets[g_back];
-    // k images per 2 vblanks; a step the game takes longer over gets proportionally more.
-    back = CaptureSet{0, std::clamp((int)std::lround(k * g_period / 2.0), 1, kMaxFactor), g_period};
+    // k images per 2 vblanks; a step the game takes longer over gets proportionally more. A
+    // fraction rounds up (75 images/s at 60 frames/s: 2 per frame): each present then shows the
+    // image nearest its time (smooth_pick), however the display's refreshes fall.
+    const int images = std::clamp((int)std::ceil(k * g_period / 2.0 - 1e-6), 1, kMaxFactor);
+    back = CaptureSet{0, images, g_period};
     if (k >= 2 && g_have_prev && hw_active() && gpu_idle()) {
         for (int j = 1; j < back.images; j++) {
             auto t0 = std::chrono::steady_clock::now();
@@ -293,6 +339,8 @@ extern "C" int psx_hook_render(R3000* c) {
             if (++g_st.extras % 1800 == 0)
                 LOG(Host, "smooth frames: %d extra images, %.2f ms each", g_st.extras, g_st.ms / g_st.extras);
         }
+        // the 60 Hz simulation's pose blend: the real render pairs its models from the start again
+        if (psx_opt_sim60) gte_blend_begin(g_gte_blend);
     }
     record_prev(c);
     return 0;
@@ -303,7 +351,8 @@ uint64_t smooth_flips() { return g_flips; }
 void smooth_on_flip() {
     g_flips++;
     uint64_t f = host_frame_count() + 1;
-    if (g_last_flip && f > g_last_flip) g_period = (int)std::clamp<uint64_t>(f - g_last_flip, 2, 4);
+    // (every vblank with the 60 Hz simulation: 1)
+    if (g_last_flip && f > g_last_flip) g_period = (int)std::clamp<uint64_t>(f - g_last_flip, psx_opt_sim60 ? 1 : 2, 4);
     g_last_flip = f;
     g_front = g_back;
     g_back ^= 1;

@@ -137,7 +137,8 @@ constexpr int kCameraVecs[] = {0x18, 0x48, 0x54, 0x60};
 // takes damage on world-update ticks.
 constexpr int kPlayerHealth = 0xDA;
 constexpr int kJumpRise = 0x238;  // updates left in which holding jump keeps rising (8 at take-off)
-constexpr int32_t kJumpExtraTrim = 66752;  // calibration: 60 Hz held-jump peak = 104% of 30 Hz
+constexpr int32_t kJumpTrim = -44958;  // calibration: 60 Hz held-jump peak = 30 Hz peak (2,199,240)
+constexpr int kTrimTicks = 4;
 
 bool valid_ptr(uint32_t a) { return a && (a & 0x1FFFFFFF) < 0x200000 && !(a & 3); }
 // A function in the game's executable (80010000-800FFFFF).
@@ -696,7 +697,7 @@ constexpr int kJointJump = 0x800;  // (not a rotation) a larger change is drawn 
 struct Joints {
     uint32_t obj = 0, begin = 0, end = 0;
     uint32_t serial = 0, size_word = 0;  // the block's heap header (see heap_block) before the tick
-    std::vector<int16_t> before, after, mid;
+    std::vector<int16_t> before, after, mid, ghost;
     bool written = false;
 };
 std::vector<Joints> g_joints;
@@ -817,6 +818,39 @@ void joints_mid(R3000* c) {
             }
     }
 }
+bool pose_blend_off() {
+    static const bool off = std::getenv("APOC_NO_POSE_BLEND") != nullptr;  // for A/B comparisons
+    return off;
+}
+// A joint's offset (the last 3 of its 12 values) is in whole units and often steps by 1 per
+// update (the player's idle sway), so half way cannot be stored: the mid pose kept one end and
+// the model still moved at 30 Hz, in uneven steps (seen as flicker). For those, the render
+// draws the offset after the tick and a ghost render (record_previous_pose) the one before;
+// the rotations are the same in both, so the GTE's averaged vertices are exactly half way.
+// Returns whether any joint needs the ghost render.
+bool joints_split(R3000* c) {
+    if (pose_blend_off()) return false;
+    bool any = false;
+    for (Joints& j : g_joints) {
+        if (!j.written) continue;
+        j.ghost = j.mid;
+        for (size_t i = 0; i + kJointSize / 2 <= j.mid.size(); i += kJointSize / 2)
+            for (size_t k = i + 9; k < i + 12; k++)
+                if ((j.after[k] - j.before[k]) & 1) {
+                    j.mid[k] = j.after[k];
+                    j.ghost[k] = j.before[k];
+                    MEM_W16(c, j.begin + 2 * (uint32_t)k, (uint16_t)j.mid[k]);
+                    any = true;
+                }
+    }
+    return any;
+}
+// In the ghost render: the offsets from before the tick (see joints_split).
+void joints_ghost(R3000* c) {
+    for (Joints& j : g_joints)
+        if (j.written && j.ghost.size() == j.mid.size())
+            for (size_t i = 0; i < j.ghost.size(); i++) MEM_W16(c, j.begin + 2 * (uint32_t)i, (uint16_t)j.ghost[i]);
+}
 // Back to the real poses (only entries the render left as written).
 void joints_restore(R3000* c) {
     for (Joints& j : g_joints) {
@@ -916,7 +950,8 @@ struct Zone {
 };
 std::vector<Zone> g_zones;          // zones that pushed the player in the last world update
 std::vector<Zone> g_zones_changed;  // strengths changed during this world update (put back after)
-bool g_zones_odd = false;           // the odd tick is running them (psx_hook_zone leaves them be)
+bool g_player_odd = false;          // the odd tick is updating the player (psx_hook_player_use)
+bool g_zones_odd = false;          // the odd tick is running them (psx_hook_zone leaves them be)
 
 bool zone_live(R3000* c, uint32_t z) {
     if (MEM_R32(c, z) != kZoneClass) return false;
@@ -1032,8 +1067,8 @@ void retime(R3000* c, const Before& b, bool odd) {
         // first step and the jump rose ~15% lower (the cavern ledges in level 2 were out of reach).
         {
             static int age = -1;  // ticks since the take-off (8 written), -1 = not rising
-            static bool extra = false;  // the jump's extra rising tick was given
-            static int trim = 0;        // calls until the extra tick's height is trimmed
+            static bool extra = false;  // the peak trim was started for this jump
+            static int trim = 0;        // ticks of the peak trim left
             const uint8_t rise = (uint8_t)MEM_R8(c, p + kJumpRise);
             if (rise == 8 && b.rise != 8) {
                 age = 0;
@@ -1045,11 +1080,17 @@ void retime(R3000* c, const Before& b, bool odd) {
             }
             const bool undo = age < 0 ? odd : (age & 1) != 0;
             if (rise == (uint8_t)(b.rise - 1) && undo) MEM_W8(c, p + kJumpRise, b.rise);
-            // The user asked for a held jump 104% of the original (102.5% without this): the last
-            // rising step gets one more 60 Hz tick (107%), of which kJumpExtraTrim is taken back
-            // from the height on the tick after it. Measured 30 Hz 2,199,240 -> 60 Hz 2,287,210.
-            else if (rise == 0 && b.rise == 1 && age >= 0 && !extra) { MEM_W8(c, p + kJumpRise, 1); extra = true; trim = 2; }
-            if (trim && --trim == 0) MEM_W32(c, p + 8, MEM_R32(c, p + 8) + kJumpExtraTrim);
+            // The held jump rises a little higher at 60 Hz than at 30 Hz; the difference is taken
+            // back over kTrimTicks ticks from the top, so the peak matches the original. (It was
+            // 104% on request, but the game has no ceiling collision: in low rooms, the Death
+            // boss room, the original peak just fits and the extra went through the ceiling.)
+            else if (rise == 0 && b.rise == 1 && age >= 0 && !extra) { extra = true; trim = kTrimTicks; }
+            if (trim) {
+                trim--;
+                static const char* e = std::getenv("APOC_JUMP_TRIM");  // calibration
+                static const int32_t total = e ? std::atoi(e) : kJumpTrim;
+                MEM_W32(c, p + 8, MEM_R32(c, p + 8) + total / kTrimTicks);
+            }
             if (rise == 0 && MEM_R32(c, p + kPlayerState) != 2) age = -1;
         }
         // The hit timer (it also sets the damage flash) counts down 256 per update and the player
@@ -1074,10 +1115,18 @@ void retime(R3000* c, const Before& b, bool odd) {
 // The view camera is updated by the render (80078760), which runs every 60 Hz tick: it is
 // retimed around each render, its counters keeping their 30 Hz rate on the renders that follow
 // a player-only tick.
+// While the player is in the air the camera routine (8007876C, from 80078F40) keeps the view
+// level: each call adds the player's vertical speed (+0x6C, a per-update amount) to an offset
+// (gp+2700) that goes onto the point it looks at, and counts gp+2704 down while falling; it also
+// turns by a step (gp+2620). It runs with every render, twice per update at 60 Hz: the offset
+// grew twice as fast as the player rose and the view sank through the floor (a jump under the
+// Death room's low ceiling). Their per-render changes are halved / kept at the 30 Hz rate.
+constexpr uint32_t kCamJumpOffset = kGp + 2700, kCamJumpCount = kGp + 2704, kCamTurn = kGp + 2620;
 struct ViewCam {
     uint32_t obj = 0;
     Vec3 v[std::size(kViewCamVecs)];
     uint16_t n[std::size(kViewCamCounters)];
+    int32_t jump_offset = 0, jump_count = 0, turn = 0;
 };
 ViewCam view_before(R3000* c) {
     ViewCam b;
@@ -1085,13 +1134,31 @@ ViewCam view_before(R3000* c) {
     if (!valid_ptr(b.obj)) return b;
     for (size_t i = 0; i < std::size(kViewCamVecs); i++) b.v[i] = rd(c, b.obj + kViewCamVecs[i]);
     for (size_t i = 0; i < std::size(kViewCamCounters); i++) b.n[i] = (uint16_t)MEM_R16(c, b.obj + kViewCamCounters[i]);
+    b.jump_offset = (int32_t)MEM_R32(c, kCamJumpOffset);
+    b.jump_count = (int32_t)MEM_R32(c, kCamJumpCount);
+    b.turn = (int32_t)MEM_R32(c, kCamTurn);
     return b;
 }
 void view_retime(R3000* c, const ViewCam& b) {
     const uint32_t v = MEM_R32(c, kViewCamList);
     if (!valid_ptr(v) || v != b.obj) return;
+    static const bool off = std::getenv("APOC_NO_VIEW_RETIME") != nullptr;  // for A/B comparisons
+    if (off) return;
+    const int32_t offset = (int32_t)MEM_R32(c, kCamJumpOffset);
+    if (offset != 0 && offset != b.jump_offset) {  // (0: the routine reset it, kept)
+        const int32_t d = offset - b.jump_offset, half = b.jump_offset + (d + (d > 0) - (d < 0)) / 2;
+        MEM_W32(c, kCamJumpOffset, (uint32_t)half);
+        // the look-at point got the whole offset (80078FE4, while the count is above 0)
+        if ((int32_t)MEM_R32(c, kCamJumpCount) > 0) MEM_W32(c, v + 0x138, MEM_R32(c, v + 0x138) - (uint32_t)(offset - half));
+    }
+    const int32_t turn = (int32_t)MEM_R32(c, kCamTurn);
+    if (turn != b.turn) {
+        const int32_t d = ((turn - b.turn + 2048) & 0xFFF) - 2048;
+        MEM_W32(c, kCamTurn, (uint32_t)((b.turn + d / 2) & 0xFFF));
+    }
     for (size_t i = 0; i < std::size(kViewCamVecs); i++) halve(c, v + kViewCamVecs[i], b.v[i], g_raw[9][i]);
     if (MEM_R32(c, kHalfTicks) & 1) return;  // the last tick was a world update
+    if ((int32_t)MEM_R32(c, kCamJumpCount) == b.jump_count - 1) MEM_W32(c, kCamJumpCount, (uint32_t)b.jump_count);
     for (size_t i = 0; i < std::size(kViewCamCounters); i++) {
         const uint16_t now = (uint16_t)MEM_R16(c, v + kViewCamCounters[i]);
         if (now != b.n[i] && (uint16_t)(now - b.n[i] + 1) <= 2) MEM_W16(c, v + kViewCamCounters[i], b.n[i]);
@@ -1138,12 +1205,13 @@ void trace_player(R3000* c, uint32_t t) {
 void sim60_effects_dump(R3000* c) { effects_dump(c); }
 
 // Runs the render once outside emulated time (everything rolled back afterwards) with every
-// object's animation state from before the world update, recording what the GTE produced.
-bool record_previous_pose(R3000* c) {
-    static const bool off = std::getenv("APOC_NO_POSE_BLEND") != nullptr;  // for A/B comparisons
-    if (off) return false;
-    bool changed = false;
+// object's animation state from before the world update (anim) and the joint offsets from
+// before the tick (joints, see joints_split), recording what the GTE produced.
+bool record_previous_pose(R3000* c, bool anim, bool joints) {
+    if (pose_blend_off()) return false;
+    bool changed = joints;
     for (const AnimState& a : g_prev_anim) {
+        if (!anim || changed) break;
         if (MEM_R8(c, a.obj + kType) != a.type) continue;
         for (int i = 0; i < kAnimALen && !changed; i++) changed = MEM_R8(c, a.obj + kAnimA + i) != a.a[i];
         for (int i = 0; i < kAnimBLen && !changed; i++) changed = MEM_R8(c, a.obj + kAnimB + i) != a.b[i];
@@ -1161,7 +1229,9 @@ bool record_previous_pose(R3000* c) {
     volatile bool done = false;
     core_ghost_begin(c, 40'000'000, &abort);
     if (setjmp(abort) == 0) {
+        if (joints) joints_ghost(c);
         for (const AnimState& a : g_prev_anim) {
+            if (!anim) break;
             if (MEM_R8(c, a.obj + kType) != a.type) continue;  // object replaced since
             for (int i = 0; i < kAnimALen; i++) MEM_W8(c, a.obj + kAnimA + i, a.a[i]);
             for (int i = 0; i < kAnimBLen; i++) MEM_W8(c, a.obj + kAnimB + i, a.b[i]);
@@ -1204,7 +1274,10 @@ int sim60_render_lights_hidden(R3000* c) {
         const uint32_t ra = c->r[31], sp = c->r[29];
         g_in_render = true;
         joints_mid(c);
+        const bool blend = joints_split(c) && record_previous_pose(c, false, true);
+        gte_blend_begin(blend ? GteBlendMode::Blend : GteBlendMode::Off);
         call(c, kRender);
+        gte_blend_begin(GteBlendMode::Off);
         joints_restore(c);
         g_in_render = false;
         c->r[31] = ra;
@@ -1282,7 +1355,8 @@ int sim60_render_lights_hidden(R3000* c) {
     // animation state, so the ghost render must draw the same pose (recording the pose after
     // the update pulled them on to 3/4 of the way, and their parts could not be paired)
     joints_mid(c);
-    const bool blend = record_previous_pose(c);
+    const bool split = joints_split(c);
+    const bool blend = record_previous_pose(c, true, split);
     check_small(c, "ghost render");
     gte_blend_begin(blend ? GteBlendMode::Blend : GteBlendMode::Off);
     call(c, kRender);
@@ -1344,6 +1418,12 @@ extern "C" void psx_hook_contacts(R3000* c, int after) {
         for (size_t i = 0; i < std::size(kPlayerVecs); i++) g_own.end[i] = rd(c, p + kPlayerVecs[i]);
     }
 }
+
+// The player's use animations fire their switch on one frame (button 80062044 at frame 14, the
+// +516 wheel 80061D8C at frame 32). The odd tick sees that frame again (its +1 is undone), so
+// at 60 Hz a switch fired twice: the necropolis end button pushed in twice and its event (door
+// opening, enemies) cancelled itself. They fire on world updates only, like at 30 Hz.
+extern "C" int psx_hook_player_use(R3000*) { return g_player_odd; }
 
 extern "C" void psx_hook_zone(R3000* c) {
     if (!psx_opt_sim60 || !g_in_tick || g_zones_odd || core_in_ghost()) return;
@@ -1453,7 +1533,9 @@ extern "C" int psx_hook_tick(R3000* c) {
         const std::vector<uint32_t> lights_before = glow_lights(c);
         pad_odd_tick(c);
         call(c, kContactsBegin);
+        g_player_odd = true;
         call(c, kUpdateList, kPlayerList);
+        g_player_odd = false;
         call(c, kContactsEnd);
         odd_lights_made(c, lights_before);
         zones_odd_tick(c);
@@ -1469,15 +1551,43 @@ extern "C" int psx_hook_tick(R3000* c) {
     return 1;
 }
 
-// Glows (class 800A1154: hits, muzzle flashes, explosions) are flat screen-facing fans that the
-// game sorts at the depth of their centre, so the floor and walls in front of the centre are drawn
-// over a big one and cut hard straight edges into it (an explosion's light pool). Sort a glow
-// nearer (a fixed depth, at most half way to the camera): what lies around the light no longer
-// covers it, walls clearly in front still do. APOC_GLOW_SORT=N: the bias (0 = the original).
+// Glows (the glow list: lights, pickups, lamps) are flat screen-facing fans that the game sorts
+// at the depth of their centre, so the floor and walls in front of the centre are drawn over a
+// big one and cut hard straight edges into it (an explosion's light pool).
+// Soft glows (gpu.cpp, hardware renderer with precise 3D): every glow is drawn after the scene
+// and fades per pixel where the scene is nearer than its centre, fully gone at twice its radius
+// in front (APOC_GLOW_FADE=K: K radii). The radius is the fan's outer ring (rings add up, each
+// ring's largest spoke; 8003736C) in view units: the fan projects to 625 * r / z pixels.
+// Otherwise lights only (hits, muzzle flashes, explosions) are sorted nearer by a fixed depth,
+// at most half way to the camera (APOC_GLOW_SORT=N: the bias, 0 = the original); pickup and lamp
+// glows are small and sit near walls, and sorted nearer they showed through them.
 extern "C" void psx_hook_glow_sort(R3000* c) {
+    const int32_t z = (int32_t)c->r[5];
+    if (z <= 0) return;
+    const uint32_t g = c->r[20];  // s4 = the glow
+    if (gpu_soft_glows()) {
+        const uint32_t t = MEM_R32(c, g + 0x48), n = MEM_R32(c, g + 0x50), rings = MEM_R32(c, g + 0x54);
+        int32_t outer = 0;
+        if (valid_ptr(t) && n <= 64 && rings <= 8)
+            for (uint32_t r = 0; r < rings; r++) {
+                int32_t most = 0;
+                for (uint32_t i = 0; i < n; i++) most = std::max(most, (int32_t)MEM_R32(c, t + 8 * (r * n + i)));
+                outer += most;
+            }
+        const uint32_t h = (uint16_t)c->gte_ctrl[26];
+        static const char* env = std::getenv("APOC_GLOW_FADE");
+        static const float k = env ? (float)std::atof(env) : 2.0f;
+        const float radius = 625.0f * (float)outer / (float)(h ? h : 256);
+        gpu_glow_begin(MEM_R32(c, 0x800FF668) & 0x1FFFFC, (float)z, std::max(radius * k, 32.0f));
+        c->r[2] = 4;  // ordering-table slot 1: after the scene
+        return;
+    }
     static const char* env = std::getenv("APOC_GLOW_SORT");
     static const int bias = env ? std::atoi(env) : 768;  // depth units (0 = the original order)
-    const int32_t z = (int32_t)c->r[5];
-    if (bias <= 0 || z <= 0) return;
+    if (bias <= 0 || MEM_R32(c, g + kEffectClass) != kLightClass) return;
     c->r[2] = (uint32_t)(z - std::min(bias, z / 2)) & 0x3FFC;
 }
+extern "C" void psx_hook_glow_end(R3000* c) { gpu_glow_end(MEM_R32(c, 0x800FF668) & 0x1FFFFC); }
+
+// smooth.cpp: the 60 Hz simulation's own render is under way (its values are in place)
+bool sim60_in_render() { return g_in_render; }

@@ -53,7 +53,7 @@ uint32_t fnv1a(const uint8_t* p, size_t n) {
 void usage() {
     std::printf(
         "usage: apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--log cats]\n"
-        "  --cue PATH         disc image cue sheet (default: assets/Apocalypse (USA).cue)\n"
+        "  --cue PATH         disc image cue sheet (default: the .cue in assets/game disks)\n"
         "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
         "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
@@ -62,8 +62,31 @@ void usage() {
         "  --sim60            60 Hz simulation in every level (default: levels 1-4 only; F1 menu)\n"
         "  --chapter N        start at chapter N (saves/chapters; F2 or F1 -> Chapter lists them)\n"
         "  --renderer R       opengl or vulkan (default: the F1 setting, OpenGL at first)\n"
+        "  --bios-intro       play the BIOS boot sequence (assets/bios) even with other options\n"
         "keys: arrows, Z=Cross X=Circle A=Square S=Triangle Q/W=L1/R1 1/2=L2/R2\n"
         "      Enter=Start Backspace=Select Tab=fast-forward F2=chapters F11=fullscreen Esc=quit\n");
+}
+
+// The assets folder: the game disc (required) and the optional extras, made at start so the
+// player sees where things go.
+void make_asset_folders() {
+    std::error_code ec;
+    for (const char* d : {"assets/game disks", "assets/bios", "assets/replacements/textures",
+                          "assets/replacements/fmvs", "assets/replacements/images"})
+        std::filesystem::create_directories(d, ec);
+}
+
+// The disc image: "Apocalypse (USA).cue" in assets/game disks, else any .cue there.
+std::string find_disc() {
+    const std::filesystem::path dir = "assets/game disks";
+    if (std::filesystem::exists(dir / "Apocalypse (USA).cue")) return (dir / "Apocalypse (USA).cue").string();
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        std::string ext = e.path().extension().string();
+        for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+        if (ext == ".cue") return e.path().string();
+    }
+    return {};
 }
 
 // Returns the EXE's entry point.
@@ -159,10 +182,13 @@ int main(int argc, char** argv) {
         if (freopen_s(&f, "debug/apocalypse.log", "a", stderr) == 0) std::setvbuf(stderr, nullptr, _IONBF, 0);
     }
 #endif
-    std::string cue = "assets/Apocalypse (USA).cue";
+    std::string cue;  // --cue, else find_disc()
     std::string card_dir = "saves";
     int scale = 0;  // window: 0 = 1080 lines or as much as fits
     bool interp_only = false;  // debugging: run everything in the interpreter
+    // The BIOS boot sequence plays on a plain start; scripted runs (chapters, presses, screenshots)
+    // count frames from the game's start, so any option leaves it out unless --bios-intro is given.
+    bool bios_intro = argc == 1 && !std::getenv("APOC_NO_BIOS_BOOT");
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -181,6 +207,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--turbo") host_set_turbo(true);
         else if (a == "--interp") interp_only = true;
+        else if (a == "--bios-intro") bios_intro = true;
         else if (a == "--fps60") psx_opt_skip_frame_wait = 1;
         else if (a == "--sim60") {  // 60 Hz simulation in any level (sim60.cpp)
             g_sim60_force = true;
@@ -248,6 +275,18 @@ int main(int argc, char** argv) {
         else { usage(); return 1; }
     }
 
+    make_asset_folders();
+    if (cue.empty()) cue = find_disc();
+    if (cue.empty()) {
+        const char* msg =
+            "The game disc was not found.\n\nPut your own copy of Apocalypse (USA) in the \"assets\\game disks\" "
+            "folder next to apocalypse.exe:\n  Apocalypse (USA).cue\n  Apocalypse (USA) (Track 1).bin\n"
+            "  Apocalypse (USA) (Track 2).bin\n\nEverything else in assets (BIOS, replacements) is optional.";
+        std::fprintf(stderr, "%s\n", msg);
+        if (!std::getenv("APOC_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Apocalypse", msg, nullptr);
+        return 1;
+    }
+
     static R3000 cpu;
     std::memset(&cpu, 0, sizeof cpu);
     g_cpu = &cpu;
@@ -258,6 +297,7 @@ int main(int argc, char** argv) {
     memcard(1).load_or_create(card_dir + "/card2.mcr");
 
     if (!host_init("Apocalypse", scale)) fatal("could not initialise the window/audio");
+    watchdog_start();
     sched_init(&cpu);
     dma_init();
     timers_init();
@@ -273,6 +313,7 @@ int main(int argc, char** argv) {
     cpu.r[30] = cpu.r[29];
     cpu.r[31] = 0;
     sched_add(&cpu, Ev::Scanline, CYCLES_PER_SCANLINE_NTSC);
+    if (bios_intro) bios_boot_sequence(&cpu, entry);
 
     // Loading a save state longjmps back here (from the VSync safe point) with the machine
     // restored; the game then continues from VSync's entry: VSync itself runs recompiled,

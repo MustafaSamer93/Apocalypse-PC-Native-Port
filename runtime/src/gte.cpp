@@ -1,6 +1,8 @@
 // Geometry Transformation Engine (COP2), bit-accurate per the psx-spx documentation.
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <unordered_map>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -143,6 +145,7 @@ extern "C" {
 PgxpVal pgxp_gpr[32];
 PgxpVal pgxp_ram[PSX_RAM_SIZE / 4];
 PgxpVal pgxp_scratch[PSX_SCRATCH_SIZE / 4];
+uint32_t* pgxp_writer = std::getenv("APOC_PRECISE_WHY") ? new uint32_t[PSX_RAM_SIZE / 4]() : nullptr;
 }
 namespace {
 PgxpVal g_pgxp_sxy[3];  // SXY0..2
@@ -155,19 +158,107 @@ void pgxp_push(const PgxpVal& v) {
 }
 }  // namespace
 
-extern "C" void pgxp_gte_to_gpr(int gpr, int reg) { pgxp_gpr[gpr] = pgxp_sxy(reg); }
+PgxpVal g_rgb2_exact;  // shadow of D(22): x = u, y = v, w = -1 when exact (push_color)
+extern "C" void pgxp_gte_to_gpr(int gpr, int reg) { pgxp_gpr[gpr] = reg == 22 ? g_rgb2_exact : pgxp_sxy(reg); }
 extern "C" void pgxp_gpr_to_gte(int reg, int gpr) {
     if (reg == 15) pgxp_push(pgxp_gpr[gpr]);
     else pgxp_sxy(reg) = pgxp_gpr[gpr];
 }
 extern "C" void pgxp_gte_to_mem(int reg, uint32_t a) {
-    if (PgxpVal* m = PGXP_MEM(a)) *m = pgxp_sxy(reg);
+    if (PgxpVal* m = PGXP_MEM(a)) *m = reg == 22 ? g_rgb2_exact : pgxp_sxy(reg);
+}
+
+// The exact u, v behind a packet's UV word (its low half; the high half is the palette or page).
+uint32_t g_uv_stats[2];  // textured corners, with exact UVs
+bool pgxp_uv_find(uint32_t a, uint32_t word, float* u, float* v) {
+    g_uv_stats[0]++;
+    if (!a) return false;
+    const PgxpVal& s = pgxp_ram[(a & (PSX_RAM_SIZE - 1)) >> 2];
+    if (s.w != -1.0f || ((s.v ^ word) & 0xFFFF)) return false;
+    *u = s.x, *v = s.y;
+    g_uv_stats[1]++;
+    return true;
 }
 extern "C" void pgxp_mem_to_gte(int reg, uint32_t a) {
     const PgxpVal* m = PGXP_MEM(a);
     const PgxpVal v = m ? *m : PgxpVal{};
     if (reg == 15) pgxp_push(v);
     else pgxp_sxy(reg) = v;
+}
+
+// Strips (level props: the graveyard's hanging lamps, their poles): the level transform
+// (800809B0, vertices flagged 0x10 from 80080B9C) makes each strip corner on the CPU: an already
+// projected vertex A (the transform's cache, entry at a2: A's offset in the low half, cache at
+// v1) plus a width across the strip, projected with the screen offset at 0 (80080CA4). Added in
+// whole pixels, the corners had no exact position while the walls around them did: the lamps
+// shook against the level and came apart from their poles. Called before the corner's store
+// (80080D38 sw t1): its shadow becomes A's exact position plus the exact width.
+extern "C" void psx_hook_strip_corner(R3000* c) {
+    auto sx = [](uint32_t v) { return (int32_t)(v << 21) >> 21; };
+    auto sy = [](uint32_t v) { return (int32_t)((v >> 16) << 21) >> 21; };
+    PgxpVal& out = pgxp_gpr[9];  // t1 = the corner; its shadow is still the width's (mfc2 at 80080CA8)
+    const PgxpVal width = out;
+    out.w = 0;
+    const uint32_t a = c->r[3] + (MEM_R32(c, c->r[6]) & 0xFFFF);  // A's cache entry
+    const PgxpVal* pa = PGXP_MEM(a);
+    if (!pa || pa->w <= 0 || width.w <= 0) return;
+    const uint32_t aw = MEM_R32(c, a), corner = c->r[9];
+    if (pa->v != aw || sx(aw) + sx(width.v) != sx(corner) || sy(aw) + sy(width.v) != sy(corner)) return;
+    out = {corner, pa->x + width.x, pa->y + width.y, pa->w};
+}
+
+// Camera fraction. The render camera (80077680) is (view position + shake) >> 12: whole units.
+// The level pass then offsets model coordinates by that whole-unit camera and projects with
+// TR = 0, so as the camera moves the whole level steps in whole units. APOC_CAM_FRAC=1 puts the
+// fraction back into the exact projection (rtp); APOC_CAM_LOG=1 logs the fraction and the mean
+// screen acceleration of level vertices (frame to frame, native px) to measure the effect.
+double g_cam_frac[3];   // exact - whole, units (0..1)
+int32_t g_cam_int[3];
+void smooth_view(R3000* c, uint32_t view, int32_t shake_x);  // smooth.cpp
+
+extern "C" void psx_hook_camera(R3000* c) {
+    const uint32_t view = c->r[5], shake = 0x800ED510;
+    smooth_view(c, view, (int32_t)MEM_R32(c, shake));
+    for (int i = 0; i < 3; i++) {
+        const int32_t fixed = (int32_t)MEM_R32(c, view + 4 + 4 * i) + (int32_t)MEM_R32(c, shake + 4 * i);
+        g_cam_int[i] = fixed >> 12;
+        g_cam_frac[i] = (double)(fixed - (g_cam_int[i] << 12)) / 4096.0;
+    }
+}
+const bool g_cam_frac_on = std::getenv("APOC_CAM_FRAC") != nullptr;
+const bool g_cam_log = std::getenv("APOC_CAM_LOG") != nullptr;
+struct CamPath { float x[3], y[3]; uint32_t frame; };
+std::unordered_map<uint64_t, CamPath> g_cam_paths;
+double g_cam_accel_sum = 0;
+uint32_t g_cam_accel_n = 0, g_cam_frame = 0;
+void cam_path(int32_t vx, int32_t vy, int32_t vz, float sx, float sy) {
+    const uint64_t key = (uint64_t)(uint32_t)(vx + g_cam_int[0]) << 42 ^ (uint64_t)(uint32_t)(vy + g_cam_int[1]) << 21 ^
+                         (uint32_t)(vz + g_cam_int[2]);
+    CamPath& p = g_cam_paths[key];
+    if (p.frame == g_cam_frame) return;
+    const bool consecutive = p.frame + 1 == g_cam_frame && p.frame != 0;
+    p.x[2] = p.x[1], p.x[1] = p.x[0], p.x[0] = sx;
+    p.y[2] = p.y[1], p.y[1] = p.y[0], p.y[0] = sy;
+    if (consecutive && p.frame >= 2) {
+        const float ax = p.x[0] - 2 * p.x[1] + p.x[2], ay = p.y[0] - 2 * p.y[1] + p.y[2];
+        if (std::abs(ax) < 8 && std::abs(ay) < 8) g_cam_accel_sum += std::sqrt(ax * ax + ay * ay), g_cam_accel_n++;
+    } else if (!consecutive) {
+        p.x[1] = p.x[2] = sx, p.y[1] = p.y[2] = sy;
+        p.frame = g_cam_frame - 1;  // history restarts
+        if (p.frame >= 2) {}       // (keeps the counter honest below)
+    }
+    p.frame = g_cam_frame;
+}
+void cam_log_frame() {
+    if (!g_cam_log) return;
+    g_cam_frame++;
+    if (g_cam_frame % 60 == 0) {
+        log_msg(LogCat::Host, "cam: frac (%.3f %.3f %.3f) int (%d %d %d); level vertices mean |accel| %.3f px over %u",
+                g_cam_frac[0], g_cam_frac[1], g_cam_frac[2], g_cam_int[0], g_cam_int[1], g_cam_int[2],
+                g_cam_accel_n ? g_cam_accel_sum / g_cam_accel_n : 0.0, g_cam_accel_n);
+        g_cam_accel_sum = 0, g_cam_accel_n = 0;
+        if (g_cam_paths.size() > 200000) g_cam_paths.clear();
+    }
 }
 
 // Exact view-space corners (PGXP "CPU mode" for this game's level renderer). The level pass
@@ -231,7 +322,9 @@ bool pgxp_find(uint32_t a, uint32_t word, GtePrecise* out) {
     return true;
 }
 
+void cam_log_frame();
 void gte_precise_clear() {
+    cam_log_frame();
     if (g_corner_used) {
         g_corner_used = 0;
         if (++g_corner_gen == 0) {
@@ -299,6 +392,17 @@ int32_t lim_ir(int i, int32_t v, bool lm) {
     return v;
 }
 
+// Exact texture coordinates. The level renderer's subdivision (80082508..80082630) makes each
+// grid vertex's UV on the GTE: MVMVA with the corners' UVs (x16) as the light matrix and the grid
+// weights as the vector, GPF, then RGB2 = MAC >> 4: whole texels. On the PS1 the sub-texel error
+// is under a pixel; drawn at 8x with exact vertices it kinks texture lines at every grid seam and
+// swims as the grid changes with distance. The exact MAC of those commands is kept here and the
+// RGB2 word's exact u, v go along as a shadow (w = -1) to the GPU packet (pgxp_uv_find).
+}  // namespace
+double g_mac_exact[4];  // (outside the namespace: core.cpp saves them around ghost renders)
+bool g_mac_exact_ok = false;
+namespace {
+
 void set_mac_ir(int i, int64_t v, int shift, bool lm) {
     MAC(i) = (int32_t)(chk_mac(i, v) >> shift);
     IR(i) = lim_ir(i, MAC(i), lm);
@@ -363,6 +467,12 @@ void push_color() {
     D(21) = D(22);
     uint32_t r = lim_color(1, MAC(1) >> 4), g = lim_color(2, MAC(2) >> 4), b = lim_color(3, MAC(3) >> 4);
     D(22) = (int32_t)(r | g << 8 | b << 16 | (uint32_t)rgbc(3) << 24);
+    g_rgb2_exact = {(uint32_t)D(22), 0, 0, 0};
+    if (g_mac_exact_ok) {
+        const double u = g_mac_exact[1] / 16.0, v = g_mac_exact[2] / 16.0;
+        if (std::floor(u) == (double)r && std::floor(v) == (double)g)
+            g_rgb2_exact = {(uint32_t)D(22), (float)u, (float)v, -1.0f};
+    }
     if (g_gte_blend == GteBlendMode::Record) {
         blend_segment();
         g_blend_rgb.push_back((uint32_t)D(22));
@@ -504,6 +614,11 @@ void rtp(int n, const Cmd& c, bool last) {
             }
         }
     }
+    // the level pass (TR = 0, the screen offset set; not the grid): the camera's fraction back
+    const bool level_pass = g_gte_precise && c.shift == 12 && !rebuilt && K(5) == 0 && K(6) == 0 && K(7) == 0 && K(24) != 0;
+    if (level_pass && g_cam_frac_on)
+        for (int i = 0; i < 3; i++)
+            ev[i] -= (double)M(0, i, 0) * g_cam_frac[0] + (double)M(0, i, 1) * g_cam_frac[1] + (double)M(0, i, 2) * g_cam_frac[2];
     if (g_gte_precise && c.shift == 12) {
         const double u[3] = {ev[0] / 4096.0, ev[1] / 4096.0, ev[2] / 4096.0};
         corner_put(corner_key(IR(1), IR(2), IR(3)), u);
@@ -560,6 +675,7 @@ void rtp(int n, const Cmd& c, bool last) {
             g_blend_stats[1]++;
         }
     }
+    if (g_cam_log && level_pass && pw > 0) cam_path(x, y, z, px, py);
     g_pgxp_sxy[2] = {(uint32_t)D(14), px, py, pw};
     if (pw > 0 && g_gte_blend != GteBlendMode::Record) precise_put((uint32_t)D(14), px, py, pw);
     if (last) {
@@ -598,7 +714,9 @@ void mvmva_generic(int mx, int32_t x, int32_t y, int32_t z, int cv, const Cmd& c
         }
         MAC(i) = (int32_t)(v >> c.shift);
         IR(i) = lim_ir(i, MAC(i), c.lm);
+        g_mac_exact[i] = (double)v / (double)(1 << c.shift);
     }
+    g_mac_exact_ok = true;
 }
 
 // MAC/IR = [BK] + LCM * (LLM * V)
@@ -777,6 +895,7 @@ static void dump_rtp_state(const char* when, R3000* c) {
 
 extern "C" void gte_command(R3000* c, uint32_t cmd) {
     C = c;
+    if ((cmd & 0x3F) != 0x3D) g_mac_exact_ok = false;  // set by MVMVA, kept through GPF
     g_gte_counts[cmd & 0x3F]++;
     bool dump = g_gte_dump_frame && host_frame_count() == g_gte_dump_frame && g_gte_dumped < 12 &&
                 ((cmd & 0x3F) == 0x01 || (cmd & 0x3F) == 0x30);
@@ -911,7 +1030,12 @@ extern "C" void gte_command(R3000* c, uint32_t cmd) {
         }
         case 0x30: rtp(0, k, false); rtp(1, k, false); rtp(2, k, true); break;  // RTPT
         case 0x3D: {  // GPF
-            for (int i = 1; i <= 3; i++) set_mac_ir(i, (int64_t)IR(0) * IR(i), k.shift, k.lm);
+            const bool exact = g_mac_exact_ok;
+            for (int i = 1; i <= 3; i++) {
+                if (exact) g_mac_exact[i] = (double)IR(0) * g_mac_exact[i] / (double)(1 << k.shift);
+                set_mac_ir(i, (int64_t)IR(0) * IR(i), k.shift, k.lm);
+            }
+            g_mac_exact_ok = exact;
             push_color();
             break;
         }

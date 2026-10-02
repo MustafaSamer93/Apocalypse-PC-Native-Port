@@ -55,7 +55,7 @@ def main():
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "assets" / "extracted" / "voice"
     out_dir.mkdir(parents=True, exist_ok=True)
     exe = (ROOT / "extracted" / "SLUS_003.73").read_bytes()
-    disc = Disc(bin_from_cue(ROOT / "assets" / "Apocalypse (USA).cue"))
+    disc = Disc(bin_from_cue(ROOT / "assets" / "game disks" / "Apocalypse (USA).cue"))
     xa = disc.find("APOC.XA")
     f = disc.f
     clips = clip_table(exe)

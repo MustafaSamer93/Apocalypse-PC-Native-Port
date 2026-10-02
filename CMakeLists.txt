@@ -109,6 +109,8 @@ add_executable(apocalypse
     runtime/src/drawdist.cpp
     runtime/src/render_backend.cpp
     runtime/src/replace.cpp
+    runtime/src/texdump.cpp
+    runtime/src/texreplace.cpp
     runtime/src/vk_context.cpp
     runtime/src/gpu_vk.cpp
     runtime/src/present_vk.cpp

@@ -159,9 +159,18 @@ RECOMP_INLINE void PGXP_LW(int rt, uint32_t a) {
     if (m) pgxp_gpr[rt] = *m;
     else pgxp_gpr[rt].w = 0;
 }
-RECOMP_INLINE void PGXP_SW(int rt, uint32_t a) {
+// lh/lhu of a word's low half: its shadow (the exact UV behind the subdivision's UV halfword);
+// the high half gets none
+RECOMP_INLINE void PGXP_LH(int rt, uint32_t a) {
+    const PgxpVal* m = (a & 2) ? 0 : PGXP_MEM(a);
+    if (m) pgxp_gpr[rt] = *m;
+    else pgxp_gpr[rt].w = 0;
+}
+extern uint32_t* pgxp_writer;  // debug (APOC_PRECISE_WHY): the sw that last wrote each RAM word
+RECOMP_INLINE void PGXP_SW(int rt, uint32_t a, uint32_t pc) {
     PgxpVal* m = PGXP_MEM(a);
     if (m) *m = pgxp_gpr[rt];
+    if (pgxp_writer && PSX_IS_RAM(a)) pgxp_writer[(a & (PSX_RAM_SIZE - 1)) >> 2] = pc;
 }
 #define PGXP_MOVE(rd, rs) (pgxp_gpr[rd] = pgxp_gpr[rs])
 // SXY registers (12..15) to and from CPU registers and memory (gte.cpp)
@@ -234,8 +243,15 @@ int psx_hook_frustum(R3000* c);  // nonzero: the culling planes were built by th
 int psx_hook_tick(R3000* c);  // nonzero: the tick was handled (sim60.cpp)
 void psx_hook_player(R3000* c);  // entry of the player's update, a0 = player (sim60.cpp)
 void psx_hook_contacts(R3000* c, int after);  // just before (0) / after (1) the player's update in a tick (sim60.cpp)
+void psx_hook_game_over(R3000* c);  // no lives left: restart the level (savestate.cpp)
+void psx_hook_enemy_damage(R3000* c);  // one hit kill cheat (cheats.cpp)
+int psx_hook_player_use(R3000* c);   // a switch the player used fires: skip on the odd tick (sim60.cpp)
 void psx_hook_zone(R3000* c);  // a force zone pushes a list, a0 = zone, a1 = list head (sim60.cpp)
 void psx_hook_glow_sort(R3000* c);  // glow renderer: v0 = ordering-table slot, a1 = depth, s4 = glow (sim60.cpp)
+void psx_hook_glow_end(R3000* c);   // glow renderer: all glows made (sim60.cpp)
+void psx_hook_strip_corner(R3000* c);  // level transform: a strip corner is stored (gte.cpp)
+void psx_hook_camera(R3000* c);        // render camera position rounded to whole units (gte.cpp)
+void psx_hook_aim(R3000* c);           // player aim: s0 = player, fire vector +471/+472 just set (host_sdl.cpp)
 // the game's menus (game_menu.cpp): add item, destroy, move selection, draw, read select/back
 void psx_hook_menu_init(R3000* c);
 void psx_hook_menu_add(R3000* c);

@@ -2,6 +2,7 @@
 screens) from extracted/wad/ to PNG files. Textures (inside the .psx level files) are not included.
 
   python tools/extract_images.py [OUT_DIR]      (default: assets/extracted/images)
+  python tools/extract_images.py --4x3 [OUT_DIR] (default: assets/extracted/images_4x3)
 
 Formats:
   .bmr  raw 15-bit PS1 pixels (bits 0-4 red, 5-9 green, 10-14 blue), 512 wide, then 8 zero bytes
@@ -9,6 +10,8 @@ Formats:
         repeated (control & 0x7FFF) times, clear = that many words follow as they are. The
         decoded data is a .bmr.
 Every picture is saved at its full size in the file (512 x 240; warning.rle is 512 x 205).
+--4x3 resizes them to the shape a TV showed them: 512 x 240 fills a 4:3 screen, so 640 x 480
+(each pixel 1.25 wide, 2 tall; warning.rle becomes 640 x 410).
 """
 import struct
 import sys
@@ -66,7 +69,10 @@ def write_png(path: Path, rows: list[bytes], width: int, height: int):
 
 
 def main():
-    out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "assets" / "extracted" / "images"
+    args = sys.argv[1:]
+    four_three = "--4x3" in args
+    args = [a for a in args if a != "--4x3"]
+    out_dir = Path(args[0]) if args else ROOT / "assets" / "extracted" / ("images_4x3" if four_three else "images")
     out_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(WAD.glob("*.bmr")) + sorted(WAD.glob("*.rle"))
     if not files:
@@ -76,7 +82,12 @@ def main():
         pixels = rle_decode(data) if f.suffix == ".rle" else data
         rows, w, h = to_rgb(pixels)
         dest = out_dir / f"{f.stem}.png"
-        write_png(dest, rows, w, h)
+        if four_three:
+            from PIL import Image
+            w, h = w * 5 // 4, h * 2
+            Image.frombytes("RGB", (ROW, len(rows)), b"".join(rows)).resize((w, h), Image.LANCZOS).save(dest)
+        else:
+            write_png(dest, rows, w, h)
         print(f"{f.name:14s} -> {dest.name} ({w}x{h})")
     print(f"{len(files)} pictures in {out_dir}")
 

@@ -23,9 +23,13 @@ GLuint g_draw_tex, g_draw_fbo, g_read_tex, g_read_fbo, g_stage_tex;
 GLuint g_draw_rb = 0;                     // multisampled draw target (instead of g_draw_tex)
 int g_samples_wanted = 1, g_samples = 1;  // MSAA samples asked for / in use
 GLuint g_prog, g_copy_prog, g_vao, g_vbo;
-GLint u_scale, u_texwin, u_pass, u_set_mask, u_filter, u_vram;
+GLint u_scale, u_texwin, u_pass, u_set_mask, u_filter, u_vram, u_hd;
+GLuint g_hd_tex = 0;  // replacement textures' atlas (texreplace.cpp), on texture unit 1
+constexpr int kHdW = 8192, kHdH = 4096;  // VRAM's texture area x 4 (4-bit above, 8-bit below)
 GLint uc_src, uc_scale, uc_off;
 bool g_filter = false;
+GLuint g_zprog, g_zvao, g_zvbo, g_ztex, g_zfbo;  // soft glows: depth image (hw_depth_draw)
+bool g_zclear = true;
 
 struct GLVtx {
     float x, y;
@@ -34,6 +38,7 @@ struct GLVtx {
     uint32_t info0, info1;
     float w;  // 1, or view depth for perspective-correct texturing (HwVtx::w)
     uint32_t box;  // HwPrim::box
+    float z, fade;  // glows: centre depth and fade range (HwVtx::z, HwPrim::zfade)
 };
 
 // Primitives are batched while the state below stays the same.
@@ -41,15 +46,19 @@ struct BatchKey {
     bool semi = false;
     int semi_mode = 0;
     bool set_mask = false;
+    bool glow = false;  // reads the depth image instead of VRAM (untextured)
+    int ztest = 0;      // HwPrim::ztest
     int tw[4] = {};
     int sc[4] = {};  // scissor x1,y1,x2,y2 (native, inclusive)
     bool operator==(const BatchKey& o) const {
-        return semi == o.semi && (!semi || semi_mode == o.semi_mode) && set_mask == o.set_mask &&
+        return semi == o.semi && (!semi || semi_mode == o.semi_mode) && set_mask == o.set_mask && glow == o.glow &&
+               ztest == o.ztest &&
                std::memcmp(tw, o.tw, sizeof tw) == 0 && std::memcmp(sc, o.sc, sizeof sc) == 0;
     }
 };
 std::vector<GLVtx> g_batch;
 BatchKey g_key;
+GLuint g_zbuffer = 0;  // depth renderbuffer of the draw FBO (0: none)
 
 // Region drawn since `read` was last synchronised (native, exclusive max).
 bool g_dirty = false;
@@ -62,7 +71,11 @@ layout(location = 2) in vec2 a_uv;
 layout(location = 3) in uvec2 a_info;
 layout(location = 4) in float a_w;
 layout(location = 5) in uint a_box;
+layout(location = 6) in float a_z;
+layout(location = 7) in float a_fade;
 flat out uint v_box;
+out float v_z;
+flat out float v_fade;
 out vec4 v_color;  // like v_uv: perspective-correct when a_w varies (PGXP colour correction)
 out vec2 v_uv;  // perspective-correct when a_w varies (precise 3D); affine when it is 1
 flat out uvec2 v_info;
@@ -72,11 +85,14 @@ void main() {
     v_uv = a_uv;
     v_info = a_info;
     v_box = a_box;
+    v_z = a_z;
+    v_fade = a_fade;
 }
 )";
 
 const char* kFS = R"(#version 330 core
 uniform sampler2D u_vram;
+uniform sampler2D u_hd;   // replacement textures (bit 27: v_uv is in its pixels)
 uniform int u_scale;
 uniform ivec4 u_texwin;   // mask x, mask y, offset x, offset y (8-pixel units)
 uniform int u_pass;       // 0: draw all, 1: only opaque texels, 2: only semi-transparent texels
@@ -86,6 +102,8 @@ in vec4 v_color;
 in vec2 v_uv;
 flat in uvec2 v_info;
 flat in uint v_box;
+in float v_z;
+flat in float v_fade;
 out vec4 o_color;
 
 uint fetch16(ivec2 p) {
@@ -181,6 +199,47 @@ vec4 text_texel(vec2 uv, out bool transparent) {
     return best;
 }
 
+// Replacement textures (HwPrim::hd): HD texel p of mip level l (n = 4 >> l per game texel), in the
+// texture's own coordinates. p stays inside the polygon's own texels (v_box) and its game texel
+// goes through the texture window, so a filter never reaches another texture, the atlas's empty
+// parts or the wrong side of a repeating floor.
+vec4 hd_fetch(ivec2 p, int l) {
+    int sh = 2 - l, n = 1 << sh;
+    ivec2 lo = ivec2(int(v_box & 255u), int((v_box >> 8) & 255u)), hi = ivec2(int((v_box >> 16) & 255u), int(v_box >> 24));
+    p = clamp(p, lo * n, hi * n + n - 1);
+    int d = int((v_info.x >> 20) & 3u);
+    ivec2 base = ivec2((int(v_info.x & 1023u) - 512) * (d == 0 ? 4 : 2), int((v_info.x >> 10) & 511u) + (d == 1 ? 512 : 0));
+    return texelFetch(u_hd, (base + window(p >> sh)) * n + (p & (n - 1)), l);
+}
+
+// Bilinear at level l, weighted by alpha (see-through texels don't darken the edges): colour
+// times coverage in rgb, coverage in a.
+vec4 hd_level(vec2 uv, int l) {
+    vec2 st = uv * float(4 >> l) - 0.5;
+    ivec2 b = ivec2(floor(st));
+    vec2 f = st - vec2(b);
+    vec4 acc = vec4(0.0);
+    for (int j = 0; j < 2; j++)
+        for (int i = 0; i < 2; i++) {
+            vec4 c = hd_fetch(b + ivec2(i, j), l);
+            float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y) * c.a;
+            acc += vec4(c.rgb * w, w);
+        }
+    return acc;
+}
+
+// Trilinear over the atlas's levels 0-2 (texreplace.cpp makes them): level 2 is one pixel per
+// game texel, so far away it looks like the game's own texture instead of shimmering.
+vec4 hd_texel(vec2 uv, vec2 dx, vec2 dy, out bool transparent) {
+    float lod = clamp(log2(max(length(dx), length(dy)) * 4.0), 0.0, 2.0);
+    int l = int(lod);
+    float m = lod - float(l);
+    vec4 acc = hd_level(uv, l);
+    if (m > 0.0) acc = mix(acc, hd_level(uv, l + 1), m);
+    transparent = acc.a < 0.5;
+    return vec4(acc.rgb / max(acc.a, 1e-4), 1.0);
+}
+
 void main() {
     bool textured = ((v_info.x >> 22) & 1u) != 0u;
     bool raw = ((v_info.x >> 23) & 1u) != 0u;
@@ -189,10 +248,20 @@ void main() {
     float mbit = 0.0;
     if (textured) {
         // PS1 samples at the pixel's top-left corner, GL at its centre
-        vec2 uv = v_uv - 0.5 * dFdx(v_uv) - 0.5 * dFdy(v_uv);
+        vec2 duv_x = dFdx(v_uv), duv_y = dFdy(v_uv);
+        vec2 uv = v_uv - 0.5 * duv_x - 0.5 * duv_y;
         vec4 tc;
         bool transparent;
-        if (((v_info.x >> 24) & 1u) != 0u) {  // game text
+        if (((v_info.x >> 27) & 1u) != 0u) {  // a replacement texture: its HD copy of VRAM (texreplace.cpp)
+            tc = hd_texel(v_uv, duv_x, duv_y, transparent);
+            // the game's own texel decides what is solid and semi-transparent: palette black uploaded
+            // with the mask bit (8000h) is solid on the PS1, while exports (and so replacements) have it
+            // see-through. There the game's colour shows; the replacement keeps its own soft edges.
+            bool game_transparent;
+            vec4 g = texel(ivec2(floor(v_uv)), vec2(0.0), game_transparent);
+            if (transparent && !game_transparent) { tc.rgb = g.rgb; transparent = false; }
+            tc.a = g.a;
+        } else if (((v_info.x >> 24) & 1u) != 0u) {  // game text
             tc = text_texel(uv, transparent);
         } else if (u_filter != 0) {
             vec2 st = uv - 0.5;
@@ -217,14 +286,36 @@ void main() {
             tc = texel(ivec2(fl), uv - fl, transparent);
         }
         if (transparent) discard;
+        if (((v_info.x >> 26) & 1u) != 0u) tc.rgb = vec3(min(max(tc.r, max(tc.g, tc.b)) * 1.5, 1.0));  // selected item: white
         semi_px = tc.a > 0.5;
         col = raw ? tc.rgb : min(tc.rgb * v_color.rgb * (255.0 / 128.0), vec3(1.0));
         mbit = semi_px ? 1.0 : 0.0;
     }
+    if (((v_info.x >> 25) & 1u) != 0u) {  // glow: u_vram is the depth image (native size)
+        float zs = texelFetch(u_vram, ivec2(gl_FragCoord.xy) / u_scale, 0).r;
+        col *= clamp((zs - v_z + v_fade) / v_fade, 0.0, 1.0);
+    }
     if (u_pass == 1 && semi_px) discard;
     if (u_pass == 2 && !semi_px) discard;
     o_color = vec4(col, max(mbit, float(u_set_mask)));
+    gl_FragDepth = clamp(v_z * (1.0 / 65536.0), 0.0, 1.0);  // Z-buffer (HwPrim::ztest batches)
 }
+)";
+
+// Soft glows: the frame's 3D triangles into a native-size float image of view depth (x, y,
+// w, z per vertex; w as for the VRAM draws, so z is interpolated perspective-correct).
+const char* kDepthVS = R"(#version 330 core
+layout(location = 0) in vec4 a_v;
+out float v_z;
+void main() {
+    gl_Position = vec4(a_v.x / 512.0 - 1.0, a_v.y / 256.0 - 1.0, 0.0, 1.0) * a_v.z;
+    v_z = a_v.w;
+}
+)";
+const char* kDepthFS = R"(#version 330 core
+in float v_z;
+out vec4 o_z;
+void main() { o_z = vec4(v_z, 0.0, 0.0, 1.0); }
 )";
 
 // Copies the staging texture (native resolution) into the scaled VRAM: nearest filtering.
@@ -321,8 +412,12 @@ void flush() {
               (g_key.sc[3] - g_key.sc[1] + 1) * S);
     glUseProgram(g_prog);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_read_tex);
+    glBindTexture(GL_TEXTURE_2D, g_key.glow ? g_ztex : g_read_tex);
     glUniform1i(u_vram, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, g_hd_tex);
+    glUniform1i(u_hd, 1);
+    glActiveTexture(GL_TEXTURE0);
     glUniform1i(u_scale, S);
     glUniform4i(u_texwin, g_key.tw[0], g_key.tw[1], g_key.tw[2], g_key.tw[3]);
     glUniform1i(u_set_mask, g_key.set_mask ? 1 : 0);
@@ -330,6 +425,13 @@ void flush() {
     glBindVertexArray(g_vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g_batch.size() * sizeof(GLVtx)), g_batch.data(), GL_STREAM_DRAW);
+    if (g_key.ztest && g_zbuffer) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(g_key.ztest == 1 ? GL_TRUE : GL_FALSE);
+    } else {
+        glDisable(GL_DEPTH_TEST);
+    }
     if (!g_key.semi) {
         glDisable(GL_BLEND);
         glUniform1i(u_pass, 0);
@@ -343,6 +445,8 @@ void flush() {
         glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g_batch.size());
         glDisable(GL_BLEND);
     }
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
     glDisable(GL_SCISSOR_TEST);
     g_batch.clear();
 }
@@ -378,6 +482,8 @@ void begin_prim(const HwPrim& p, const HwState& s) {
     k.semi = p.semi;
     k.semi_mode = p.semi_mode;
     k.set_mask = s.set_mask;
+    k.glow = p.glow;
+    k.ztest = p.ztest;
     k.tw[0] = s.tw_mask_x; k.tw[1] = s.tw_mask_y; k.tw[2] = s.tw_off_x; k.tw[3] = s.tw_off_y;
     k.sc[0] = s.area_x1; k.sc[1] = s.area_y1; k.sc[2] = s.area_x2; k.sc[3] = s.area_y2;
     if (!(k == g_key)) {
@@ -388,13 +494,15 @@ void begin_prim(const HwPrim& p, const HwState& s) {
 
 uint32_t info0(const HwPrim& p) {
     return (uint32_t)(p.page_x & 1023) | (uint32_t)(p.page_y & 511) << 10 | (uint32_t)p.depth << 20 |
-           (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24;
+           (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24 | (uint32_t)p.glow << 25 |
+           (uint32_t)p.whiten << 26 | (uint32_t)p.hd << 27;
 }
 uint32_t info1(const HwPrim& p) { return (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10; }
 
-void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f) {
+void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f, float z = 0.0f) {
     GLVtx t;
     t.x = x; t.y = y; t.w = w;
+    t.z = z; t.fade = std::max(p.zfade, 1.0f);
     t.r = (uint8_t)r; t.g = (uint8_t)g; t.b = (uint8_t)b; t.a = 255;
     t.u = u; t.v = v;
     t.info0 = info0(p);
@@ -423,6 +531,7 @@ bool gl_hw_init(int scale) {
         u_set_mask = glGetUniformLocation(g_prog, "u_set_mask");
         u_filter = glGetUniformLocation(g_prog, "u_filter");
         u_vram = glGetUniformLocation(g_prog, "u_vram");
+        u_hd = glGetUniformLocation(g_prog, "u_hd");
         uc_src = glGetUniformLocation(g_copy_prog, "u_src");
         uc_scale = glGetUniformLocation(g_copy_prog, "u_scale");
         uc_off = glGetUniformLocation(g_copy_prog, "u_off");
@@ -442,6 +551,27 @@ bool gl_hw_init(int scale) {
         glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, w));
         glEnableVertexAttribArray(5);
         glVertexAttribIPointer(5, 1, GL_UNSIGNED_INT, sizeof(GLVtx), (void*)offsetof(GLVtx, box));
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, z));
+        glEnableVertexAttribArray(7);
+        glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, fade));
+        g_zprog = gl_program(kDepthVS, kDepthFS);
+        if (!g_zprog) return false;
+        glGenVertexArrays(1, &g_zvao);
+        glGenBuffers(1, &g_zvbo);
+        glBindVertexArray(g_zvao);
+        glBindBuffer(GL_ARRAY_BUFFER, g_zvbo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void*)0);
+        glGenTextures(1, &g_ztex);
+        glBindTexture(GL_TEXTURE_2D, g_ztex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, 1024, 512, 0, GL_RED, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        g_zfbo = make_fbo(g_ztex);
+        g_zclear = true;
         g_stage_tex = make_vram_texture(1024, 512);
     }
     gl_hw_shutdown();
@@ -498,6 +628,21 @@ bool gl_hw_init(int scale) {
         gl_hw_shutdown();
         return false;
     }
+    // Z-buffer: a depth buffer beside the VRAM image (same sample count); without one the
+    // renderer works as before (HwPrim::ztest ignored)
+    while (glGetError() != GL_NO_ERROR) {}
+    glGenRenderbuffers(1, &g_zbuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, g_zbuffer);
+    if (g_samples > 1) glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_samples, GL_DEPTH_COMPONENT32F, 1024 * S, 512 * S);
+    else glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, 1024 * S, 512 * S);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_draw_fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_zbuffer);
+    if (glGetError() != GL_NO_ERROR || glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
+        glDeleteRenderbuffers(1, &g_zbuffer);
+        g_zbuffer = 0;
+        log_msg(LogCat::Gpu, "hardware renderer: no depth buffer (Z-buffer off)");
+    }
     g_dirty = false;
     g_batch.clear();
     g_key = BatchKey{};
@@ -547,6 +692,8 @@ static bool clip_rect(int& x, int& y, int& w, int& h) {
 
 void gl_hw_shutdown() {
     if (!S) return;
+    if (g_zbuffer) glDeleteRenderbuffers(1, &g_zbuffer);
+    g_zbuffer = 0;
     for (auto& c : g_caps) free_capture(c);
     free_capture(g_stash);
     glDeleteFramebuffers(1, &g_draw_fbo);
@@ -554,8 +701,32 @@ void gl_hw_shutdown() {
     if (g_draw_tex) glDeleteTextures(1, &g_draw_tex);
     if (g_draw_rb) glDeleteRenderbuffers(1, &g_draw_rb);
     glDeleteTextures(1, &g_read_tex);
-    g_draw_tex = g_draw_rb = 0;
+    if (g_hd_tex) glDeleteTextures(1, &g_hd_tex), texreplace_atlas_lost();
+    g_draw_tex = g_draw_rb = g_hd_tex = 0;
     S = 0;
+}
+
+// A replacement texture into the atlas at (x, y) (texreplace.cpp places them).
+bool gl_hw_hd_upload(int level, int x, int y, int w, int h, const uint32_t* rgba) {
+    if (!S || level < 0 || level > 2 || x < 0 || y < 0 || x + w > kHdW >> level || y + h > kHdH >> level) return false;
+    flush();
+    glActiveTexture(GL_TEXTURE1);
+    if (!g_hd_tex) {
+        glGenTextures(1, &g_hd_tex);
+        glBindTexture(GL_TEXTURE_2D, g_hd_tex);
+        for (int l = 0; l <= 2; l++)
+            glTexImage2D(GL_TEXTURE_2D, l, GL_RGBA8, kHdW >> l, kHdH >> l, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 2);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    glBindTexture(GL_TEXTURE_2D, g_hd_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexSubImage2D(GL_TEXTURE_2D, level, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glActiveTexture(GL_TEXTURE0);
+    return true;
 }
 
 bool gl_hw_active() { return S != 0; }
@@ -574,7 +745,7 @@ void gl_hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim
     begin_prim(p, s);
     for (const HwVtx* v : {a, b, c}) {
         const HwVtx* col = p.gouraud ? v : a;
-        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p, v->w);
+        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p, v->w, v->z);
     }
     draw_area_dirty((int)std::floor(std::min({a->x, b->x, c->x})), (int)std::floor(std::min({a->y, b->y, c->y})),
                     (int)std::ceil(std::max({a->x, b->x, c->x})) + 1, (int)std::ceil(std::max({a->y, b->y, c->y})) + 1, s);
@@ -616,6 +787,44 @@ void gl_hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool g
         push(bx, by, r1, g1, b1, 0, 0, p); push(bx + 1, by, r1, g1, b1, 0, 0, p); push(ax + 1, ay, r0, g0, b0, 0, 0, p);
     }
     draw_area_dirty(std::min(x0, x1), std::min(y0, y1), std::max(x0, x1) + 1, std::max(y0, y1) + 1, s);
+}
+
+// ================================================================ soft glows
+
+void gl_hw_depth_reset() {
+    g_zclear = true;
+    if (!g_zbuffer) return;  // Z-buffer: a new frame starts far away everywhere
+    flush();
+    bind_draw_target();
+    glDisable(GL_SCISSOR_TEST);
+    glDepthMask(GL_TRUE);
+    glClearDepth(1.0);
+    glClear(GL_DEPTH_BUFFER_BIT);
+}
+bool gl_hw_depth_ready() { return S && g_zfbo; }
+bool gl_hw_zbuffer_ready() { return S && g_zbuffer; }
+
+void gl_hw_depth_draw(const HwVtx* tris, int n) {
+    if (!S || !g_zfbo) return;
+    std::vector<float> v((size_t)n * 4);
+    for (int i = 0; i < n; i++) v[i * 4] = tris[i].x, v[i * 4 + 1] = tris[i].y, v[i * 4 + 2] = tris[i].w, v[i * 4 + 3] = tris[i].z;
+    glBindFramebuffer(GL_FRAMEBUFFER, g_zfbo);
+    glViewport(0, 0, 1024, 512);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    if (g_zclear) {
+        glClearColor(1e9f, 0.0f, 0.0f, 0.0f);  // nothing there: glows stay whole
+        glClear(GL_COLOR_BUFFER_BIT);
+        g_zclear = false;
+    }
+    if (n > 0) {
+        glUseProgram(g_zprog);
+        glBindVertexArray(g_zvao);
+        glBindBuffer(GL_ARRAY_BUFFER, g_zvbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(v.size() * sizeof(float)), v.data(), GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, n);
+    }
+    bind_draw_target();
 }
 
 // ================================================================ VRAM operations

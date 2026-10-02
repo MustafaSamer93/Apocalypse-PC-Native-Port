@@ -15,6 +15,10 @@
 
 #include "copy.frag.h"
 #include "copy.vert.h"
+#if __has_include("depth.frag.h")  // soft glows: needs depth.frag and the vram shaders' glow fade
+#include "depth.frag.h"
+#define SOFT_GLOW_SHADERS 1
+#endif
 #include "vram.frag.h"
 #include "vram.vert.h"
 
@@ -29,6 +33,19 @@ VkShaderModule g_vs, g_fs, g_copy_vs, g_copy_fs;
 VkPipelineLayout g_layout = VK_NULL_HANDLE, g_copy_layout = VK_NULL_HANDLE;
 VkPipeline g_pipes[5] = {};          // opaque, then semi modes 0..3
 VkPipeline g_copy_pipe = VK_NULL_HANDLE;  // copy pass into `draw` (its sample count)
+// Soft glows: native-size float image of the frame's view depth (vk_hw_depth_draw), drawn with
+// vram.vert (x, y, w, z of each vertex) and depth.frag; glow batches sample it instead of VRAM.
+VkImg g_zimg;
+VkImg g_hd;  // replacement textures' atlas (texreplace.cpp), sampler set 1; made on first use
+constexpr int kHdW = 8192, kHdH = 4096;  // VRAM's texture area x 4 (4-bit above, 8-bit below)
+VkShaderModule g_zfs = VK_NULL_HANDLE;
+VkPipeline g_zpipe = VK_NULL_HANDLE;
+bool g_zclear = true;
+// Z-buffer: depth image beside `draw` (same size and sample count); HwPrim::ztest batches test
+// and write it, cleared for each frame (vk_hw_depth_reset).
+VkImg g_zbuf;
+bool g_zbuf_clear = true;
+void begin_draw() { vkc::begin_rendering(g_draw, g_zbuf.image ? &g_zbuf : nullptr); }
 
 struct VkVtx {
     float x, y;
@@ -37,8 +54,9 @@ struct VkVtx {
     uint32_t info0, info1;
     float w;  // 1, or view depth for perspective-correct texturing (HwVtx::w)
     uint32_t box;  // HwPrim::box
+    float z, fade;  // glows: centre depth and fade range (HwVtx::z, HwPrim::zfade)
 };
-static_assert(sizeof(VkVtx) == 36, "vertex layout (vk_context.cpp kVtxStride)");
+static_assert(sizeof(VkVtx) == 44, "vertex layout (vk_context.cpp kVtxStride)");
 
 struct VramPush {
     int32_t scale, pass, set_mask, filter;
@@ -53,10 +71,13 @@ struct BatchKey {
     bool semi = false;
     int semi_mode = 0;
     bool set_mask = false;
+    bool glow = false;  // samples the depth image instead of VRAM (untextured)
+    int ztest = 0;      // HwPrim::ztest
     int tw[4] = {};
     int sc[4] = {};  // scissor x1,y1,x2,y2 (native, inclusive)
     bool operator==(const BatchKey& o) const {
-        return semi == o.semi && (!semi || semi_mode == o.semi_mode) && set_mask == o.set_mask &&
+        return semi == o.semi && (!semi || semi_mode == o.semi_mode) && set_mask == o.set_mask && glow == o.glow &&
+               ztest == o.ztest &&
                std::memcmp(tw, o.tw, sizeof tw) == 0 && std::memcmp(sc, o.sc, sizeof sc) == 0;
     }
 };
@@ -107,23 +128,38 @@ void flush() {
     g_prof.flushes++;
     g_prof.verts += g_batch.size();
     // textures come from `read`; once it is readable, batches follow each other in one rendering
-    if (g_read.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        vkc::end_rendering();
-        vkc::transition(g_read, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-    vkc::begin_rendering(g_draw);
+    VkImg& tex = g_key.glow ? g_zimg : g_read;
+    VkImg& hd = g_hd.image ? g_hd : tex;  // (set 1 must hold an image even with no replacements)
+    for (VkImg* img : {&tex, &hd})
+        if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            vkc::end_rendering();
+            vkc::transition(*img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    begin_draw();
     const size_t bytes = g_batch.size() * sizeof(VkVtx);
     vkc::Staging st = vkc::stage(bytes);
     std::memcpy(st.ptr, g_batch.data(), bytes);
     VkCommandBuffer c = cb();
+    if (g_zbuf.image) {
+        const bool test = g_key.ztest != 0;
+        if (test && g_zbuf_clear) {  // a new frame: far away everywhere
+            VkClearAttachment ca{VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}};
+            ca.clearValue.depthStencil = {1.0f, 0};
+            VkClearRect cr{{{0, 0}, {(uint32_t)(1024 * S), (uint32_t)(512 * S)}}, 0, 1};
+            vkCmdClearAttachments(c, 1, &ca, 1, &cr);
+            g_zbuf_clear = false;
+        }
+        vkCmdSetDepthTestEnable(c, test);
+        vkCmdSetDepthWriteEnable(c, g_key.ztest == 1);
+    }
     vkCmdBindVertexBuffers(c, 0, 1, &st.buffer, &st.offset);
-    VkDescriptorSet set = vkc::sampler_set(g_read, false);
+    const VkDescriptorSet sets[2] = {vkc::sampler_set(tex, false), vkc::sampler_set(hd, true)};
     set_viewport_scissor(g_key.sc[0] * S, g_key.sc[1] * S, (g_key.sc[2] - g_key.sc[0] + 1) * S,
                          (g_key.sc[3] - g_key.sc[1] + 1) * S);
     VramPush pc{S, 0, g_key.set_mask ? 1 : 0, g_filter ? 1 : 0, {g_key.tw[0], g_key.tw[1], g_key.tw[2], g_key.tw[3]}};
     auto draw = [&](VkPipeline pipe, int pass) {
         vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-        vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &set, 0, nullptr);
+        vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 2, sets, 0, nullptr);
         pc.pass = pass;
         vkCmdPushConstants(c, g_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
         vkCmdDraw(c, (uint32_t)g_batch.size(), 1, 0, 0);
@@ -177,6 +213,8 @@ void begin_prim(const HwPrim& p, const HwState& s) {
     k.semi = p.semi;
     k.semi_mode = p.semi_mode;
     k.set_mask = s.set_mask;
+    k.glow = p.glow;
+    k.ztest = p.ztest;
     k.tw[0] = s.tw_mask_x; k.tw[1] = s.tw_mask_y; k.tw[2] = s.tw_off_x; k.tw[3] = s.tw_off_y;
     k.sc[0] = s.area_x1; k.sc[1] = s.area_y1; k.sc[2] = s.area_x2; k.sc[3] = s.area_y2;
     if (!(k == g_key)) {
@@ -187,12 +225,14 @@ void begin_prim(const HwPrim& p, const HwState& s) {
 
 uint32_t info0(const HwPrim& p) {
     return (uint32_t)(p.page_x & 1023) | (uint32_t)(p.page_y & 511) << 10 | (uint32_t)p.depth << 20 |
-           (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24;
+           (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24 | (uint32_t)p.glow << 25 |
+           (uint32_t)p.whiten << 26 | (uint32_t)p.hd << 27;
 }
 uint32_t info1(const HwPrim& p) { return (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10; }
 
-void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f) {
-    g_batch.push_back(VkVtx{x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b, 255, u, v, info0(p), info1(p), w, p.box});
+void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f, float z = 0.0f) {
+    g_batch.push_back(VkVtx{x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b, 255, u, v, info0(p), info1(p), w, p.box, z,
+                            std::max(p.zfade, 1.0f)});
 }
 
 void draw_area_dirty(int x0, int y0, int x1, int y1, const HwState& s) {
@@ -205,7 +245,7 @@ void draw_area_dirty(int x0, int y0, int x1, int y1, const HwState& s) {
 void draw_copy(VkImg& src, int offx, int offy, int scale, int x, int y, int w, int h) {
     vkc::end_rendering();
     vkc::transition(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    vkc::begin_rendering(g_draw);
+    begin_draw();
     VkVtx q[6] = {};
     float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
     float c[6][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x1, y0}, {x1, y1}, {x0, y1}};
@@ -215,6 +255,7 @@ void draw_copy(VkImg& src, int offx, int offy, int scale, int x, int y, int w, i
     VkCommandBuffer cmd = cb();
     VkDescriptorSet set = vkc::sampler_set(src, false);
     set_viewport_scissor(0, 0, 1024 * S, 512 * S);
+    if (g_zbuf.image) vkCmdSetDepthTestEnable(cmd, VK_FALSE), vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_copy_pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_copy_layout, 0, 1, &set, 0, nullptr);
     CopyPush pc{scale, 0, {offx, offy}};
@@ -294,6 +335,7 @@ void destroy_pipelines() {
     for (VkPipeline& p : g_pipes)
         if (p) vkDestroyPipeline(vkc::device, p, nullptr), p = VK_NULL_HANDLE;
     if (g_copy_pipe) vkDestroyPipeline(vkc::device, g_copy_pipe, nullptr), g_copy_pipe = VK_NULL_HANDLE;
+    if (g_zpipe) vkDestroyPipeline(vkc::device, g_zpipe, nullptr), g_zpipe = VK_NULL_HANDLE;
 }
 
 }  // namespace
@@ -305,7 +347,10 @@ bool vk_hw_init(int scale) {
         g_fs = vkc::shader(kSpv_vram_frag, sizeof kSpv_vram_frag);
         g_copy_vs = vkc::shader(kSpv_copy_vert, sizeof kSpv_copy_vert);
         g_copy_fs = vkc::shader(kSpv_copy_frag, sizeof kSpv_copy_frag);
-        g_layout = vkc::make_layout(sizeof(VramPush));
+#ifdef SOFT_GLOW_SHADERS
+        g_zfs = vkc::shader(kSpv_depth_frag, sizeof kSpv_depth_frag);
+#endif
+        g_layout = vkc::make_layout(sizeof(VramPush), 2);
         g_copy_layout = vkc::make_layout(sizeof(CopyPush));
         vkc::create_image(g_stage, 1024, 512, VK_FORMAT_R8G8B8A8_UNORM,
                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -348,12 +393,24 @@ bool vk_hw_init(int scale) {
     }
     g_samples = n;
     const VkSampleCountFlagBits sc = (VkSampleCountFlagBits)n;
+    static const bool no_z = std::getenv("APOC_NO_ZBUFFER") != nullptr;
+    if (no_z || !vkc::create_image(g_zbuf, W, H, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, sc)) {
+        g_zbuf = VkImg{};
+        log_msg(LogCat::Gpu, "Vulkan renderer: no depth buffer (Z-buffer off)");
+    }
+    const VkFormat zfmt = g_zbuf.image ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED;
+    g_zbuf_clear = true;
     const vkc::Blend modes[5] = {vkc::Blend::None, vkc::Blend::Half, vkc::Blend::Add, vkc::Blend::Subtract,
                                  vkc::Blend::AddQuarter};
     for (int i = 0; i < 5; i++)
-        g_pipes[i] = vkc::make_pipeline({g_vs, g_fs, g_layout, VK_FORMAT_R8G8B8A8_UNORM, sc, modes[i], vkc::Vertices::Vram});
+        g_pipes[i] = vkc::make_pipeline({g_vs, g_fs, g_layout, VK_FORMAT_R8G8B8A8_UNORM, sc, modes[i], vkc::Vertices::Vram, zfmt});
     g_copy_pipe = vkc::make_pipeline(
-        {g_copy_vs, g_copy_fs, g_copy_layout, VK_FORMAT_R8G8B8A8_UNORM, sc, vkc::Blend::None, vkc::Vertices::Position});
+        {g_copy_vs, g_copy_fs, g_copy_layout, VK_FORMAT_R8G8B8A8_UNORM, sc, vkc::Blend::None, vkc::Vertices::Position, zfmt});
+    if (g_zfs && vkc::create_image(g_zimg, 1024, 512, VK_FORMAT_R32_SFLOAT,
+                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
+        g_zpipe = vkc::make_pipeline(
+            {g_vs, g_zfs, g_layout, VK_FORMAT_R32_SFLOAT, VK_SAMPLE_COUNT_1_BIT, vkc::Blend::None, vkc::Vertices::Vram});
+    g_zclear = true;
     // start from black (the caller uploads the CPU copy of VRAM next)
     const VkClearColorValue black{};
     const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -376,9 +433,38 @@ void vk_hw_shutdown() {
     vkc::destroy_image(g_stash.img);
     vkc::destroy_image(g_draw);
     vkc::destroy_image(g_read);
+    vkc::destroy_image(g_zimg);
+    vkc::destroy_image(g_zbuf);
+    if (g_hd.image) vkc::destroy_image(g_hd), texreplace_atlas_lost();
     destroy_pipelines();
     g_batch.clear();
     S = 0;
+}
+
+// A replacement texture into the atlas at (x, y) (texreplace.cpp places them).
+bool vk_hw_hd_upload(int level, int x, int y, int w, int h, const uint32_t* rgba) {
+    if (!S || level < 0 || level > 2 || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > kHdW >> level || y + h > kHdH >> level)
+        return false;
+    flush();
+    if (!g_hd.image && !vkc::create_image(g_hd, kHdW, kHdH, VK_FORMAT_R8G8B8A8_UNORM,
+                                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SAMPLE_COUNT_1_BIT, 3))
+        return false;
+    const VkDeviceSize row_bytes = (VkDeviceSize)w * 4;
+    const int band = (int)std::max<VkDeviceSize>(1, vkc::stage_limit() / row_bytes);
+    for (int r0 = 0; r0 < h; r0 += band) {
+        const int rows = std::min(band, h - r0);
+        vkc::Staging st = vkc::stage(row_bytes * rows);
+        std::memcpy(st.ptr, rgba + (size_t)r0 * w, row_bytes * rows);
+        vkc::end_rendering();
+        vkc::transition(g_hd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy bic{};
+        bic.bufferOffset = st.offset;
+        bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)level, 0, 1};
+        bic.imageOffset = {x, y + r0, 0};
+        bic.imageExtent = {(uint32_t)w, (uint32_t)rows, 1};
+        vkCmdCopyBufferToImage(cb(), st.buffer, g_hd.image, g_hd.layout, 1, &bic);
+    }
+    return true;
 }
 
 bool vk_hw_active() { return S != 0; }
@@ -391,13 +477,50 @@ void vk_hw_set_texture_filter(bool on) {
     g_filter = on;
 }
 
+// ================================================================ soft glows
+
+void vk_hw_depth_reset() { g_zclear = g_zbuf_clear = true; }
+bool vk_hw_depth_ready() { return S && g_zpipe; }
+bool vk_hw_zbuffer_ready() { return S && g_zbuf.image; }
+
+void vk_hw_depth_draw(const HwVtx* tris, int n) {
+    if (!S || !g_zpipe) return;
+    flush();
+    vkc::begin_rendering(g_zimg);
+    VkCommandBuffer c = cb();
+    if (g_zclear) {  // nothing there: glows stay whole
+        VkClearAttachment ca{VK_IMAGE_ASPECT_COLOR_BIT, 0, {}};
+        ca.clearValue.color.float32[0] = 1e9f;
+        VkClearRect cr{{{0, 0}, {1024, 512}}, 0, 1};
+        vkCmdClearAttachments(c, 1, &ca, 1, &cr);
+        g_zclear = false;
+    }
+    if (n > 0) {
+        const size_t bytes = (size_t)n * sizeof(VkVtx);
+        vkc::Staging st = vkc::stage(bytes);
+        VkVtx* q = (VkVtx*)st.ptr;
+        for (int i = 0; i < n; i++) {
+            q[i] = VkVtx{};
+            q[i].x = tris[i].x, q[i].y = tris[i].y, q[i].w = tris[i].w, q[i].z = tris[i].z;
+        }
+        vkCmdBindVertexBuffers(c, 0, 1, &st.buffer, &st.offset);
+        VkViewport vp{0, 0, 1024, 512, 0, 1};
+        VkRect2D sc{{0, 0}, {1024, 512}};
+        vkCmdSetViewport(c, 0, 1, &vp);
+        vkCmdSetScissor(c, 0, 1, &sc);
+        vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_zpipe);
+        vkCmdDraw(c, (uint32_t)n, 1, 0, 0);
+    }
+    vkc::end_rendering();
+}
+
 // ================================================================ primitives
 
 void vk_hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim& p, const HwState& s) {
     begin_prim(p, s);
     for (const HwVtx* v : {a, b, c}) {
         const HwVtx* col = p.gouraud ? v : a;
-        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p, v->w);
+        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p, v->w, v->z);
     }
     draw_area_dirty((int)std::floor(std::min({a->x, b->x, c->x})), (int)std::floor(std::min({a->y, b->y, c->y})),
                     (int)std::ceil(std::max({a->x, b->x, c->x})) + 1, (int)std::ceil(std::max({a->y, b->y, c->y})) + 1, s);
@@ -447,7 +570,7 @@ void vk_hw_fill(int x, int y, int w, int h, uint16_t color) {
     if (w <= 0 || h <= 0) return;
     flush();
     uint32_t c = rgba_of(color & 0x7FFF);
-    vkc::begin_rendering(g_draw);
+    begin_draw();
     VkClearAttachment ca{VK_IMAGE_ASPECT_COLOR_BIT, 0, {}};
     ca.clearValue.color.float32[0] = (c & 0xFF) / 255.0f;
     ca.clearValue.color.float32[1] = ((c >> 8) & 0xFF) / 255.0f;
@@ -612,7 +735,7 @@ void vk_renderer_destroy() {
     if (!vkc::ready()) return;
     vk_hw_shutdown();
     vkc::destroy_image(g_stage);
-    for (VkShaderModule* m : {&g_vs, &g_fs, &g_copy_vs, &g_copy_fs})
+    for (VkShaderModule* m : {&g_vs, &g_fs, &g_copy_vs, &g_copy_fs, &g_zfs})
         if (*m) vkDestroyShaderModule(vkc::device, *m, nullptr), *m = VK_NULL_HANDLE;
     for (VkPipelineLayout* l : {&g_layout, &g_copy_layout})
         if (*l) vkDestroyPipelineLayout(vkc::device, *l, nullptr), *l = VK_NULL_HANDLE;

@@ -2,6 +2,7 @@
 // reverb and CD audio input. Samples are produced in emulated time (caught up on every
 // register access and every scanline) and handed to the host once per frame.
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <vector>
@@ -480,10 +481,13 @@ void spu_push_cd_audio(const int16_t* stereo, int frames, int rate) {
     while (g_cd_fifo.size() > max_samples) g_cd_fifo.pop_front();
 }
 
+size_t spu_cd_queued() { return g_cd_fifo.size() / 2; }
+
 void spu_scanline() { catch_up(); }
 
 void spu_end_frame(R3000* c) {
     (void)c;
+    cdrom_voice_poll();
     catch_up();
     if (!g_out.empty()) host_audio_push(g_out.data(), (int)(g_out.size() / 2));
     g_out.clear();

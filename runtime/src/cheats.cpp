@@ -7,6 +7,8 @@
 //                      when the cheat is switched off unless it was picked up meanwhile
 //   infinite ammo    - ammo spent is given back
 //   infinite bombs   - a smart bomb used is given back
+//   one hit kill     - any hit on anything but the player takes all its health (the damage
+//                      methods of the object classes, vtable +0x34, get a1 = damage raised)
 // Lives and bombs are never raised above what the player really has: pickups made meanwhile
 // count, and switching the cheat off leaves exactly that. (With none left, one is shown so one
 // can be used; it goes again when the cheat is switched off.)
@@ -28,7 +30,8 @@ constexpr uint32_t kAmmo = 56;                 // weapon object: ammo (1000 when
 constexpr uint32_t kGiveWeapon = 0x8005E260;   // (player, type): the pickup routine
 constexpr int kTypes = 7;
 
-bool g_on[5];
+constexpr int kCheats = 6;
+bool g_on[kCheats];
 // what the player really has while the cheat runs (-1 = not tracking)
 int32_t g_real_lives = -1, g_seen_lives = 0;
 int32_t g_real_bombs = -1, g_seen_bombs = 0;
@@ -152,16 +155,25 @@ void cheat_note_pickup(uint32_t p, int type) {
     if (!g_quiet && p == g_given_player && type >= 1 && type <= kTypes) g_given &= ~(1u << type);
 }
 
-bool cheat_on(int which) { return which >= 0 && which < 5 && g_on[which]; }
+bool cheat_on(int which) { return which >= 0 && which < kCheats && g_on[which]; }
 void cheat_set(int which, bool on) {
-    if (which >= 0 && which < 5) g_on[which] = on;
+    if (which >= 0 && which < kCheats) g_on[which] = on;
+}
+
+// Entry of an enemy's (or crate's, boss's ...) damage method (a0 = object, a1 = damage).
+extern "C" void psx_hook_enemy_damage(R3000* c) {
+    if (!g_on[5] || (int32_t)c->r[5] <= 0 || (int32_t)c->r[5] >= 20000) return;
+    static int told = 0;
+    if (told++ < 3)
+        log_msg(LogCat::Host, "one hit kill: %08X health %d, hit %d", c->r[4], (int16_t)MEM_R16(c, c->r[4] + 218), (int32_t)c->r[5]);
+    c->r[5] = 20000;
 }
 
 // Once per frame (savestate.cpp psx_safepoint).
 void cheats_frame(R3000* c) {
     static bool invincible_set = false;
     if (static const char* t = std::getenv("APOC_TEST_CHEATS"); t) {  // debug: "10110" = cheats 0, 2, 3 on
-        for (int i = 0; i < 5 && t[i]; i++) g_on[i] = t[i] == '1';
+        for (int i = 0; i < kCheats && t[i]; i++) g_on[i] = t[i] == '1';
         t = nullptr;
     }
     if (static const char* t = std::getenv("APOC_TEST_CHEATS_OFF"); t && host_frame_count() >= std::strtoull(t, nullptr, 10)) {

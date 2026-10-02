@@ -2,7 +2,7 @@
 plus the game's CD.HED/CD.WAD archive.
 
 Usage:
-    python tools/discfs.py extract [--cue assets/Apocalypse (USA).cue] [--out extracted]
+    python tools/discfs.py extract [--cue "assets/game disks/Apocalypse (USA).cue"] [--out extracted]
 """
 from __future__ import annotations
 
@@ -149,7 +149,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     ex = sub.add_parser("extract")
-    ex.add_argument("--cue", default="assets/Apocalypse (USA).cue")
+    ex.add_argument("--cue", default="assets/game disks/Apocalypse (USA).cue")
     ex.add_argument("--out", default="extracted")
     ex.set_defaults(func=cmd_extract)
     args = ap.parse_args()

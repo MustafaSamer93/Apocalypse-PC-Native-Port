@@ -25,7 +25,7 @@
 #include <io.h>
 #endif
 
-constexpr const char* kVersion = "v0.3.0 beta";
+constexpr const char* kVersion = "v1.0";
 int g_force_smooth = 0;  // --smooth K: images per game step regardless of the display
 void host_toast(const std::string& text);
 int g_renderer_override = -1;  // --renderer opengl|vulkan: 0 / 1, -1 = the saved setting
@@ -55,6 +55,7 @@ GfxSettings g_gfx;
 float g_refresh_hz = 60.0f;  // display refresh rate
 bool g_multi_present = false;  // not one image per emulated vblank: host_throttle_frame presents
 bool g_present_vsync = true;   // ...paced by the display (else by a timer, for rates above its refresh)
+bool g_present_timed = false;  // ...on our own clock with vsync on (a display not a multiple of 60 Hz: 75)
 uint64_t g_next_present_ns = 0;
 constexpr int kFpsChoices[] = {0, 30, 60, 90, 120, 150};
 int g_active_scale = -1;    // renderer actually in use
@@ -134,11 +135,7 @@ void draw_fps_counter() {
         SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
         const std::string text = std::to_string(value) + " FPS";
         const float tw = ui_text_width(ren, text.c_str(), (float)size);
-        // green at the display rate or more, yellow below it, red under half
-        const double rate = std::max(30.0, (double)g_refresh_hz);
-        if (value >= rate - 2) SDL_SetRenderDrawColor(ren, 120, 255, 120, 255);
-        else if (value >= rate / 2) SDL_SetRenderDrawColor(ren, 255, 220, 90, 255);
-        else SDL_SetRenderDrawColor(ren, 255, 110, 90, 255);
+        SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
         ui_text(ren, ((float)surf->w - tw) * 0.5f, (float)pad * 0.5f, text.c_str(), (float)size);
         SDL_RenderPresent(ren);
     }
@@ -155,6 +152,17 @@ void draw_toast() {
     SDL_RenderFillRect(r, &box);
     SDL_SetRenderDrawColor(r, 255, 230, 180, 255);
     ui_text(r, 16, 11, g_toast.c_str(), kSize);
+    present_overlay_end();
+}
+
+// The version in the title screen's lower-right corner.
+void draw_version() {
+    if (!gpu_title_screen()) return;
+    SDL_Renderer* r = present_overlay_begin();
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    constexpr float kSize = 18.0f;
+    SDL_SetRenderDrawColor(r, 200, 200, 200, 220);
+    ui_text(r, 640.0f - ui_text_width(r, kVersion, kSize) - 14.0f, 480.0f - kSize - 12.0f, kVersion, kSize);
     present_overlay_end();
 }
 
@@ -187,7 +195,7 @@ constexpr int kDrawDistChoices[] = {100, 150, 200, 300, 400};
 
 std::string drawdist_label() {
     if (g_draw_distance <= 100) return "Original";
-    if (g_draw_distance >= 400) return "Max";  // the 32000 limit in every level tried
+    if (g_draw_distance >= 400) return "Max";  // the depth range (16380) in every level (drawdist.cpp)
     std::string s = std::to_string(g_draw_distance / 100);
     if (g_draw_distance % 100) s += "." + std::to_string(g_draw_distance % 100 / 10);
     return s + "x";
@@ -195,26 +203,26 @@ std::string drawdist_label() {
 
 // Most images per game step the display can show (a frame rate above its refresh rate was
 // presented on a timer without vsync: no more images reached the screen, only uneven ones).
-int max_factor_for_display() { return std::max(1, (int)((g_refresh_hz + 2.0f) / 30.0f)); }
+double max_factor_for_display() { return std::max(1.0, (g_refresh_hz + 2.0) / 30.0); }
 
 // Settings screen text for the frame rate choice.
 std::string fps_label() {
     if (g_gfx.fps == 30) return "30 (original)";
     if (g_active_scale <= 0) return "30 (others need 1x+)";
-    int rate = g_gfx.fps ? g_gfx.fps : 30 * smooth_factor_for_refresh(g_refresh_hz);
+    const int rate = g_gfx.fps ? g_gfx.fps : (int)std::lround(30 * smooth_factor_for_refresh(g_refresh_hz));
+    const int screen = (int)std::lround(g_refresh_hz);
     std::string s = g_gfx.fps ? std::to_string(rate) : "Auto: " + std::to_string(rate);
-    if (g_gfx.fps && rate > 30 * max_factor_for_display()) s += " (screen: " + std::to_string(30 * max_factor_for_display()) + ")";
+    if (g_gfx.fps && rate > screen) s += " (screen: " + std::to_string(screen) + ")";
     return s;
 }
 
 // Applies graphics settings that affect emulation (renderer, widescreen projection).
 // Images per game step for the current settings and display (1 = the original 30 fps).
-int smooth_target() {
-    if (psx_opt_sim60) return 1;  // the game itself renders every VBlank
+double smooth_target() {
     if (g_force_smooth) return g_force_smooth;
     if (g_active_scale <= 0) return 1;  // extra images need the OpenGL renderer
     if (g_gfx.fps == 0) return smooth_factor_for_refresh(g_refresh_hz);
-    return std::clamp(g_gfx.fps / 30, 1, std::min(5, max_factor_for_display()));
+    return std::clamp(g_gfx.fps / 30.0, 1.0, std::min(5.0, max_factor_for_display()));
 }
 
 // Internal resolution actually rendered: the Resolution setting, raised by supersampling to
@@ -243,6 +251,11 @@ void apply_graphics() {
     const float rate = 30.0f * (float)smooth_factor();
     g_multi_present = smooth_factor() >= 2 && !(g_vsync_pacing && smooth_factor() == 2);
     g_present_vsync = rate <= g_refresh_hz + 2.0f;
+    // A display whose refreshes do not line up with the 60 Hz vblanks (75 Hz) shows at most one
+    // image per vblank when paced by it: present on our own clock there too (each swap still waits
+    // for the display, so no tearing).
+    const float beat = g_refresh_hz / 60.0f;
+    g_present_timed = g_present_vsync && std::abs(beat - std::round(beat)) * 60.0f > 2.0f;
     switch (g_gfx.aspect) {
         case Aspect::A16_9: g_gte_widescreen = 0.75f; break;       // (4/3) / (16/9)
         case Aspect::A16_10: g_gte_widescreen = 5.0f / 6.0f; break; // (4/3) / (16/10)
@@ -328,6 +341,7 @@ void save_settings() {
     std::fprintf(f, "autosave %d\n", g_autosave ? 1 : 0);
     std::fprintf(f, "subtitles %d\n", g_subtitles ? 1 : 0);
     std::fprintf(f, "fpscounter %d\n", g_fps_counter ? 1 : 0);
+    std::fprintf(f, "texreplace %d\n", g_tex_replace ? 1 : 0);
     std::fprintf(f, "fullscreen %d\n", g_fullscreen ? 1 : 0);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
     std::fprintf(f, "msaa %d\n", g_gfx.msaa);
@@ -372,7 +386,7 @@ void load_settings() {
             g_gfx.aspect = (Aspect)std::clamp(as, 0, 3);
             g_gfx.crt = crt != 0;
             g_gfx.texture_filter = filt != 0;
-            if (got == 5) g_gfx.fps = std::clamp(fps / 30 * 30, 0, 150);
+            if (got == 5) g_gfx.fps = fps == 0 ? 0 : std::clamp(fps / 30 * 30, 30, 60);  // (75-150 were offered once)
             else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
                 g_gfx.fps = smooth ? 0 : 30;  // older settings file
             continue;
@@ -397,6 +411,7 @@ void load_settings() {
             g_smooth_font = sf != 0;
             continue;
         }
+        if (int tr; std::sscanf(line, "texreplace %d", &tr) == 1) g_tex_replace = tr != 0;
         if (int fc; std::sscanf(line, "fpscounter %d", &fc) == 1) {
             g_fps_counter = fc != 0;
             continue;
@@ -410,7 +425,7 @@ void load_settings() {
             continue;
         }
         if (int mz; std::sscanf(line, "menuzoom %d", &mz) == 1) {
-            g_menu_zoom = std::clamp(mz, 30, 100);
+            g_menu_zoom = std::clamp(mz, 30, 80);
             continue;
         }
         if (int pr; std::sscanf(line, "precise %d", &pr) == 1) {
@@ -635,10 +650,16 @@ static bool g_shot_key = false;  // F12: save the next frame to debug/ (maybe_sc
 
 void host_poll() {
     bool open_menu = false, open_chapters = false;
+    // the mouse pointer hides after 2 s without moving and shows again when it moves
+    static uint64_t mouse_moved = SDL_GetTicks();
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
             case SDL_EVENT_QUIT: g_quit = true; break;
+            case SDL_EVENT_MOUSE_MOTION:
+                mouse_moved = SDL_GetTicks();
+                if (!SDL_CursorVisible()) SDL_ShowCursor();
+                break;
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) g_quit = true;
                 if (e.key.scancode == SDL_SCANCODE_F1 && !e.key.repeat) open_menu = true;
@@ -681,6 +702,7 @@ void host_poll() {
     combo_frames = ((held & B_SELECT) && (held & B_START)) ? combo_frames + 1 : 0;
     if (combo_frames == 90) open_menu = true;
     if (static const char* t = std::getenv("APOC_MENU_AT"); t && g_frame == std::strtoull(t, nullptr, 10)) open_menu = true;  // tests
+    if (SDL_CursorVisible() && SDL_GetTicks() - mouse_moved > 2000) SDL_HideCursor();
     if (open_menu && g_gl_ok) run_settings_menu();
     else if (open_chapters && g_gl_ok) run_chapter_menu();
 }
@@ -787,7 +809,71 @@ uint16_t mouse_buttons() {
     return pressed;
 }
 
+// Free aim: the exact direction of the right stick, or of the cursor while the left mouse
+// button is held (x right, y down). False when neither is aiming.
+bool free_aim(float& x, float& y) {
+    // Debug: APOC_AIM_TEST=DEG aims at a fixed screen angle (0 = right, 90 = down)
+    if (static const char* t = std::getenv("APOC_AIM_TEST"); t) {
+        double deg = std::atof(t);
+        if (const char* j = std::strchr(t, ':')) deg += std::atof(j + 1) * ((std::rand() % 2001) / 1000.0 - 1.0);  // DEG:JITTER
+        const double a = deg * 3.14159265358979 / 180.0;
+        x = (float)std::cos(a); y = (float)std::sin(a);
+        return true;
+    }
+    for (auto& dev : g_devices) {
+        if (!dev.pad) continue;
+        int rx = SDL_GetGamepadAxis(dev.pad, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(dev.pad, SDL_GAMEPAD_AXIS_RIGHTY);
+        if ((int64_t)rx * rx + (int64_t)ry * ry > 20000LL * 20000) {  // same threshold as gamepad_sticks
+            x = (float)rx; y = (float)ry;
+            return true;
+        }
+    }
+    if (!g_window || !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS)) return false;
+    float wx, wy;
+    if (!(SDL_GetMouseState(&wx, &wy) & SDL_BUTTON_LMASK)) return false;
+    present_window_to_game(wx, wy, &x, &y);
+    x -= 320.0f; y -= 270.0f;  // ponytail: assumes the player is near screen centre, like mouse_buttons()
+    return x * x + y * y > 64.0f;
+}
+
 }  // namespace
+
+constexpr int kAimDeadband = 16;        // 4096ths of a turn (1.4 degrees): smaller stick changes are noise
+constexpr int kStanceHysteresis = 96;   // 8.4 degrees past a stance border before the stance changes
+
+// The game turns the fire buttons into a vector (+471 y, +472 x, signed bytes, +-127 per
+// button) and aims at its atan2 (+476), so the buttons give only 8 directions. When the
+// game registered a fire direction, replace it by the exact stick / cursor direction; the
+// game's own code then does the rest (upper-body pose within each 45-degree sector, auto
+// aim, fire rate). APOC_NO_FREE_AIM=1 turns this off.
+extern "C" void psx_hook_aim(R3000* c) {
+    static const bool off = std::getenv("APOC_NO_FREE_AIM") != nullptr;
+    static int last = -1;  // game angle last written (-1: not firing)
+    const uint32_t p = c->r[16];
+    float x, y;
+    if (off || !(MEM_R8(c, p + 471) | MEM_R8(c, p + 472)) || !free_aim(x, y)) {
+        last = -1;
+        return;
+    }
+    // the game's angle: (1024 - atan2(-y, x)) in 4096ths of a turn, 0 = up the screen
+    constexpr double kUnit = 6.283185307179586 / 4096;
+    int a = (1024 - (int)std::lround(std::atan2(-y, x) / kUnit)) & 4095;
+    if (last >= 0) {
+        auto diff = [](int u, int v) { return ((u - v + 2048) & 4095) - 2048; };
+        if (std::abs(diff(a, last)) < kAimDeadband) a = last;  // stick noise: keep the aim still
+        // The player's stance is one of 8 (45 degrees each, centred on 0, 512, ...: see
+        // 80060834); near a border noise flipped it every tick, so stay until clearly past it.
+        const int centre = ((last + 256) & 4095) & ~511, d = diff(a, centre);
+        if (std::abs(d) > 255 && std::abs(d) <= 255 + kStanceHysteresis) a = (centre + (d > 0 ? 255 : -255)) & 4095;
+    }
+    last = a;
+    const double t = (1024 - a) * kUnit;
+    MEM_W8(c, p + 471, (uint8_t)(int8_t)std::lround(-std::sin(t) * 127));
+    MEM_W8(c, p + 472, (uint8_t)(int8_t)std::lround(std::cos(t) * 127));
+    if (std::getenv("APOC_AIM_TEST"))
+        log_msg(LogCat::Host, "aim %d,%d angle %u want %d frame %llu", (int8_t)MEM_R8(c, p + 472), (int8_t)MEM_R8(c, p + 471),
+                MEM_R16(c, p + 476), a, (unsigned long long)g_frame);
+}
 
 PadState host_pad(int port, bool analog) {
     uint16_t pressed = 0;
@@ -1018,6 +1104,7 @@ static void draw_game(const GpuDisplay& d, double frac) {
         g_last_image = image;
         maybe_screenshot();  // before the toasts: the picture is the game alone
         draw_toast();
+        draw_version();
         draw_fps_counter();
         maybe_screenshot_overlays();
         present_swap();
@@ -1051,6 +1138,7 @@ static void draw_game(const GpuDisplay& d, double frac) {
     present_game_pixels(g_pixels.data() + (size_t)crop * w, w, h - 2 * crop, opt);
     maybe_screenshot();
     draw_toast();
+    draw_version();
     draw_fps_counter();
     maybe_screenshot_overlays();
     present_swap();
@@ -1163,10 +1251,9 @@ void host_present(const GpuDisplay& d) {
 // game's own Options -> Enhancements page (game_menu.cpp). Changes apply and save at once.
 
 // Font scaling of the game's menus (percent, game_menu.cpp).
-constexpr int kFontScaleChoices[] = {30, 60, 90};
-const char* const kFontScaleNames[] = {"Small", "Medium", "Big"};
+constexpr int kFontScaleChoices[] = {30, 40, 50, 60, 70, 80};
 // Frame rates offered in the menus (30 = the original).
-constexpr int kMenuFpsChoices[] = {30, 60, 90};
+constexpr int kMenuFpsChoices[] = {30, 60};
 // Resolution choices: render scale (lines = 240 x scale, the first at or above the named lines;
 // the renderer works in whole multiples of the PS1's 240) and name.
 constexpr int kResChoices[] = {1, 3, 4, 5};
@@ -1202,7 +1289,7 @@ const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
                                   "Font scaling", "Renderer", "Screen mode", "Resolution", "Aspect ratio", "Display",
                                   "Autosave", "One-liners", "Anti-aliasing", "Infinite health", "Infinite lives",
-                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "FPS counter"};
+                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter"};
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -1213,11 +1300,7 @@ std::string enh_value(int id) {
         case E_DRAWDIST: return drawdist_label();
         case E_PRECISE: return g_gte_precise ? "On (no wobble)" : "Off (original)";
         case E_SMOOTH_FONT: return g_smooth_font ? "On" : "Off (original)";
-        case E_FONT_SCALE: {
-            for (int i = 0; i < 3; i++)
-                if (g_menu_zoom == kFontScaleChoices[i]) return kFontScaleNames[i];
-            return std::to_string(g_menu_zoom) + "%";
-        }
+        case E_FONT_SCALE: return std::to_string(g_menu_zoom) + "%";
         case E_RENDERER:
             return std::string(g_gfx.vulkan ? "Vulkan" : "OpenGL") +
                    ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)");
@@ -1236,7 +1319,8 @@ std::string enh_value(int id) {
         case E_CHEAT_LIVES:
         case E_CHEAT_WEAPONS:
         case E_CHEAT_AMMO:
-        case E_CHEAT_BOMBS: return cheat_on(id - E_CHEAT_HEALTH) ? "On" : "Off";
+        case E_CHEAT_BOMBS:
+        case E_CHEAT_ONEHIT: return cheat_on(id - E_CHEAT_HEALTH) ? "On" : "Off";
     }
     return "";
 }
@@ -1250,7 +1334,7 @@ void enh_change(int id, int dir) {
         return list[(k + dir + n) % n];
     };
     switch (id) {
-        case E_FPS: g_gfx.fps = cycle(kMenuFpsChoices, 3, g_gfx.fps); break;
+        case E_FPS: g_gfx.fps = cycle(kMenuFpsChoices, (int)std::size(kMenuFpsChoices), g_gfx.fps); break;
         case E_SIM: {  // 60 Hz simulation (sim60.cpp)
             static const int order[] = {1, 0, 2};  // level 1, off, all levels
             g_sim60_setting = cycle(order, 3, g_sim60_setting);
@@ -1260,7 +1344,7 @@ void enh_change(int id, int dir) {
         case E_DRAWDIST: g_draw_distance = cycle(kDrawDistChoices, (int)std::size(kDrawDistChoices), g_draw_distance); break;
         case E_PRECISE: g_gte_precise = !g_gte_precise; break;  // gte.cpp
         case E_SMOOTH_FONT: g_smooth_font = !g_smooth_font; break;  // gpu.cpp
-        case E_FONT_SCALE: g_menu_zoom = cycle(kFontScaleChoices, 3, g_menu_zoom); break;  // game_menu.cpp
+        case E_FONT_SCALE: g_menu_zoom = cycle(kFontScaleChoices, (int)std::size(kFontScaleChoices), g_menu_zoom); break;  // game_menu.cpp
         case E_RENDERER: g_gfx.vulkan = !g_gfx.vulkan; break;  // takes effect when the game is started again
         case E_SCREEN:
             g_fullscreen = !g_fullscreen;
@@ -1279,7 +1363,8 @@ void enh_change(int id, int dir) {
         case E_CHEAT_LIVES:
         case E_CHEAT_WEAPONS:
         case E_CHEAT_AMMO:
-        case E_CHEAT_BOMBS:  // cheats.cpp; never saved
+        case E_CHEAT_BOMBS:
+        case E_CHEAT_ONEHIT:  // cheats.cpp; never saved
             cheat_set(id - E_CHEAT_HEALTH, !cheat_on(id - E_CHEAT_HEALTH));
             return;
         case E_DISPLAY: {  // (supersampling, which renders more, is the Anti-aliasing row's)
@@ -1573,7 +1658,13 @@ static bool pick_chapter(const std::vector<std::string>& chapters, int* chapter,
 static int g_chapter_sel = 0;  // the chapter last chosen (shared by F1 -> Chapter and F2)
 
 // F2: the chapter list on its own, straight from the game. Paused like the settings screen.
+struct MenuOpen {  // (core.cpp watchdog: the game stops on purpose while a menu is open)
+    MenuOpen() { g_host_menu_open = true; }
+    ~MenuOpen() { g_host_menu_open = false; }
+};
+
 static void run_chapter_menu() {
+    MenuOpen open_flag;
     const std::vector<std::string> chapters = state_chapter_names();
     if (chapters.empty()) return;
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
@@ -1588,14 +1679,15 @@ static void run_chapter_menu() {
 // Modal settings screen. The game is paused while it is open (this runs inside the
 // emulated VBlank), and audio is paused with it.
 static void run_settings_menu() {
+    MenuOpen open_flag;
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
     enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
-               R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
-               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
+               R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
+               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
     // the main page, and the Enhancements page (what goes beyond the original game)
     static const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA,
-                                               R_ASPECT, R_CRT, R_FILTER, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
-    static const std::vector<Row> kEnhRows = {R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_ENH_BACK};
+                                               R_ASPECT, R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
+    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_ENH_BACK};
     bool enh_page = false;
     static int slot = 1;
     int& chapter = g_chapter_sel;
@@ -1666,6 +1758,12 @@ static void run_settings_menu() {
                     case R_ASPECT: g_gfx.aspect = (Aspect)(((int)g_gfx.aspect + step + 4) % 4); gfx_changed = true; break;
                     case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
                     case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
+                    case R_DUMP_TEX: g_tex_dump = !g_tex_dump; break;  // texdump.cpp (not saved)
+                    case R_TEX_REPLACE:  // texreplace.cpp: assets/replacements/textures
+                        g_tex_replace = !g_tex_replace;
+                        texreplace_vram_changed();
+                        save_settings();
+                        break;
                     case R_FPS:
                     case R_SIM:
                     case R_DRAWDIST:
@@ -1673,6 +1771,10 @@ static void run_settings_menu() {
                     case R_FONT:
                     case R_MENU_SIZE:
                         enh_change(row - R_FPS, step);
+                        gfx_changed = true;
+                        break;
+                    case R_FPS_COUNTER:
+                        enh_change(E_FPS_COUNTER, step);
                         gfx_changed = true;
                         break;
                     case R_CHAPTER:
@@ -1772,6 +1874,8 @@ static void run_settings_menu() {
                 case R_ASPECT: return choice("Aspect ratio", kAspect[(int)g_gfx.aspect]);
                 case R_CRT: return choice("CRT filter", g_gfx.crt ? "On" : "Off");
                 case R_FILTER: return choice("Smooth textures", g_gfx.texture_filter ? "On" : "Off");
+                case R_DUMP_TEX: return choice("Dump textures", g_tex_dump ? "On (assets/dumps/textures)" : "Off");
+                case R_TEX_REPLACE: return choice("Texture replacements", g_tex_replace ? "[x] On" : "[ ] Off (original)");
                 case R_ENHANCE: return "Enhancements\t>";
                 case R_DEVICE: return choice("Controls", dev_line);
                 case R_REMAP: return std::string("Set up buttons\t") + (custom ? "(custom)" : "(default)");
@@ -1783,6 +1887,7 @@ static void run_settings_menu() {
                 case R_PRECISE:
                 case R_FONT:
                 case R_MENU_SIZE: return choice(enh_name(r - R_FPS), enh_value(r - R_FPS));
+                case R_FPS_COUNTER: return choice(enh_name(E_FPS_COUNTER), enh_value(E_FPS_COUNTER));
                 case R_ENH_BACK: return "Back";
             }
             return "";
@@ -1838,7 +1943,7 @@ void host_throttle_frame() {
         auto frac_at = [&](uint64_t t) {
             return std::clamp((double)(int64_t)(t - start) / (double)FRAME_NS, 0.0, 0.999);
         };
-        if (g_present_vsync) {
+        if (g_present_vsync && !g_present_timed) {
             // As many display refreshes as fit before the next vblank is due (each swap
             // waits for the display).
             const uint64_t refresh = (uint64_t)(1e9 / g_refresh_hz);
@@ -1848,7 +1953,8 @@ void host_throttle_frame() {
                 draw_game(g_last_display, frac_at(now));
             }
         } else {
-            // The image rate is above the display refresh: present on our own clock.
+            // The image rate is above the display refresh, or does not line up with it: present
+            // on our own clock.
             const uint64_t period = (uint64_t)(1e9 / (30.0 * smooth_factor()));
             if (g_next_present_ns + 4 * period < start || g_next_present_ns > g_next_frame_ns + period)
                 g_next_present_ns = start;  // (re)start in step with emulated time

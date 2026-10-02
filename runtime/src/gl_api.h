@@ -19,6 +19,7 @@
     X(void, glGenRenderbuffers, (GLsizei, GLuint*))                                                         \
     X(void, glBindRenderbuffer, (GLenum, GLuint))                                                           \
     X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei))                  \
+    X(void, glRenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei))                                     \
     X(void, glFramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint))                                    \
     X(void, glDeleteRenderbuffers, (GLsizei, const GLuint*))                                                \
     X(GLenum, glCheckFramebufferStatus, (GLenum))                                                           \
@@ -72,6 +73,7 @@ GL_FUNCS(GL_DECLARE)
 #define glGenRenderbuffers p_glGenRenderbuffers
 #define glBindRenderbuffer p_glBindRenderbuffer
 #define glRenderbufferStorageMultisample p_glRenderbufferStorageMultisample
+#define glRenderbufferStorage p_glRenderbufferStorage
 #define glFramebufferRenderbuffer p_glFramebufferRenderbuffer
 #define glDeleteRenderbuffers p_glDeleteRenderbuffers
 #define glCheckFramebufferStatus p_glCheckFramebufferStatus

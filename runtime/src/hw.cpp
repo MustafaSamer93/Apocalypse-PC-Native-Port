@@ -46,6 +46,15 @@ uint32_t word_count(const DmaChan& d) {
 
 uint32_t g_gpu_packet_addr = 0;  // RAM address of the packet being sent (0 = not from a list)
 uint32_t g_gpu_word_addr = 0;
+uint32_t g_gpu_ot_z = 0;
+
+// The game's two ordering tables (frame buffers 800A72A0 / +1F070, table at +0x70, 4096 slots):
+// a slot's byte offset is the depth the game sorted the packets after it at.
+uint32_t ot_depth(uint32_t addr) {
+    for (uint32_t base : {0x0A7310u, 0x0C6380u})
+        if (addr >= base && addr < base + 0x4000) return addr - base;
+    return 0;
+}
 
 // Sends a linked list of GPU packets (an ordering table) to GP0; returns the words read.
 uint32_t gpu_run_list(R3000* c, uint32_t addr) {
@@ -55,6 +64,8 @@ uint32_t gpu_run_list(R3000* c, uint32_t addr) {
         uint32_t header;
         std::memcpy(&header, psx_ram + addr, 4);
         uint32_t n = header >> 24;
+        if (n == 0) g_gpu_ot_z = ot_depth(addr);
+        gpu_packet_start(addr);
         g_gpu_packet_addr = addr;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t w;
@@ -71,6 +82,8 @@ uint32_t gpu_run_list(R3000* c, uint32_t addr) {
             break;
         }
     }
+    g_gpu_ot_z = 0;
+    gpu_packet_start(0);
     if (words > 100) {  // a frame's ordering table (not the small setup lists)
         gpu_list_done();
         if (!core_in_ghost()) core_frame_drawn(c);

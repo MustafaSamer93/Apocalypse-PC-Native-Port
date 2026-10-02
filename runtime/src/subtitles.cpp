@@ -93,6 +93,22 @@ void subtitle_note_xa(uint32_t lba, int chan) {
         }
 }
 
+// The voice clip the XA sector of `chan` at `lba` belongs to: *end = the disc sector after its last.
+bool voice_clip_end(uint32_t lba, int chan, uint32_t* end) {
+    if (lba < kXaLba) return false;
+    const uint32_t off = lba - kXaLba;
+    if ((int)(off % kChannels) != chan) return false;
+    const int32_t p = (int32_t)(off / kChannels);
+    for (int b = 0; b < kBlocks; b++) {
+        const int32_t pos = (int32_t)ram32(kPosTable + 4 * b), len = (int32_t)ram32(kLenTable + 4 * (b * kChannels + chan));
+        if (len > 0 && p >= pos && p < pos + len) {
+            *end = kXaLba + (uint32_t)(pos + len) * kChannels + (uint32_t)chan;
+            return true;
+        }
+    }
+    return false;
+}
+
 // savestate.cpp psx_safepoint (once per frame, in the game's main loop): shows a pending line.
 void subtitle_poll(R3000* c) {
     if (g_subtitles) game_subtitle_keep(c);

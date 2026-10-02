@@ -40,6 +40,16 @@ ENTRY_HOOKS = {
     0x8005F688: "psx_hook_player(c);",
     0x80063CC4: "psx_hook_contacts(c, 0);",  # just before the player's update in a tick (sim60.cpp)
     0x80063CF0: "psx_hook_contacts(c, 1);",  # just after it
+    # the damage methods (vtable +0x34) of every class but the player's: one hit kill cheat
+    **{a: "psx_hook_enemy_damage(c);" for a in (
+        0x8003C490, 0x8003E354, 0x800422C0, 0x80045B14, 0x80048428, 0x8004A25C, 0x8004F5C8, 0x80054714,
+        0x80056C50, 0x80058A14, 0x800593CC, 0x8005A7B0, 0x8005B864, 0x800736AC, 0x800747A8, 0x80075930)},
+    # VSync's wait (target count, timeout): the timeout is a loop count, which this faster CPU
+    # used up before the VBlank came -> "VSync: timeout", a GPU reset: movies started at 7.5 fps
+    # and showed a frame of green stripes. 16x the loops (still ends if VBlanks stop).
+    0x800864A4: "c->r[5] <<= 4;",
+    0x80062044: "if (psx_hook_player_use(c)) return;",  # a button fires (sim60.cpp: once at 60 Hz)
+    0x80061D8C: "if (psx_hook_player_use(c)) return;",  # a wheel fires
     0x8003A288: "psx_hook_zone(c);",  # a force zone pushes a list's objects (sim60.cpp)
     0x8003A5CC: "psx_hook_zone(c);",
     0x8003A76C: "psx_hook_zone(c);",
@@ -52,6 +62,7 @@ ENTRY_HOOKS = {
     0x80016884: "psx_hook_2d(c, 1);",
     0x8001B8BC: "psx_hook_2d(c, 2);",
     0x8001C004: "psx_hook_2d(c, 3);",  # full-screen tint
+    0x8006D3C0: "psx_hook_2d(c, 4);",  # boss health bar (part of the HUD, centred)
     # menu / HUD drawing routines: their packets are 2D (gpu.cpp)
     0x8001AA28: "if (psx_hook_2d_call(c, 0)) return;",  # text
     0x8006D028: "if (psx_hook_2d_call(c, 1)) return;",  # icons (button symbols, ...)
@@ -76,6 +87,11 @@ ENTRY_HOOKS = {
 #            (v0): sort glows nearer (sim60.cpp psx_hook_glow_sort)
 INSN_HOOKS = {
     0x800376F8: "psx_hook_glow_sort(c);",
+    0x80037FC8: "psx_hook_glow_end(c);",  # the glow list is done (soft glows: packet ranges)
+    0x80080D38: "psx_hook_strip_corner(c);",
+    0x800312A0: "psx_hook_game_over(c);",  # lives left (v1) after a death: 0 restarts the level (savestate.cpp)  # a strip corner (lamps): exact position (gte.cpp)
+    0x800776B4: "psx_hook_camera(c);",
+    0x8005CDA0: "psx_hook_aim(c);",  # player fire vector +471/+472 set: exact stick/mouse angle (host_sdl.cpp)  # render camera = (view pos + shake) >> 12: keep the fraction (gte.cpp)
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.
@@ -186,12 +202,14 @@ class FunctionEmitter:
                 return [f"(void){expr};"]  # keep side effects of I/O reads
             if n == "lw":  # the address is taken before rt (which may be rs) changes
                 return [f"{{ const uint32_t a_ = {addr}; c->r[{rt}] = MEM_R32(c, a_); PGXP_LW({rt}, a_); }}"]
+            if n in ("lh", "lhu"):  # a word's low half carries its shadow (exact UVs, gte.cpp)
+                return [f"{{ const uint32_t a_ = {addr}; c->r[{rt}] = {expr.replace(addr, 'a_')}; PGXP_LH({rt}, a_); }}"]
             return set_(rt, expr)
         if k == K_STORE:
             fn = {"sb": "MEM_W8", "sh": "MEM_W16", "sw": "MEM_W32",
                   "swl": "MEM_SWL", "swr": "MEM_SWR"}[n]
             if n == "sw":
-                return [f"{{ const uint32_t a_ = {addr}; MEM_W32(c, a_, {R(rt)}); PGXP_SW({rt}, a_); }}"]
+                return [f"{{ const uint32_t a_ = {addr}; MEM_W32(c, a_, {R(rt)}); PGXP_SW({rt}, a_, 0x{i.addr:08X}u); }}"]
             return [f"{fn}(c, {addr}, {R(rt)});"]
         if k == K_COP0:
             if n == "mfc0": return set_(rt, f"cop0_read(c, {rd})")
@@ -200,7 +218,7 @@ class FunctionEmitter:
             return ["cop0_rfe(c);"]
         if k == K_GTE:
             sxy = 12 <= rd <= 15
-            if n == "mfc2" and sxy and rt != 0:
+            if n == "mfc2" and (sxy or rd == 22) and rt != 0:  # 22 = RGB2: exact UVs (gte.cpp)
                 return [f"c->r[{rt}] = gte_read_data(c, {rd}); pgxp_gte_to_gpr({rt}, {rd});"]
             if n == "mtc2" and sxy:
                 return [f"gte_write_data(c, {rd}, {R(rt)}); pgxp_gpr_to_gte({rd}, {rt});"]
@@ -213,6 +231,7 @@ class FunctionEmitter:
             if 12 <= rt <= 15:  # SXY: the precise-vertex shadow goes along
                 if n == "lwc2":
                     return [f"{{ const uint32_t a_ = {addr}; gte_write_data(c, {rt}, MEM_R32(c, a_)); pgxp_mem_to_gte({rt}, a_); }}"]
+            if 12 <= rt <= 15 or rt == 22:  # 22 = RGB2: exact UVs (gte.cpp)
                 if n == "swc2":
                     return [f"{{ const uint32_t a_ = {addr}; MEM_W32(c, a_, gte_read_data(c, {rt})); pgxp_gte_to_mem({rt}, a_); }}"]
             if n == "lwc2": return [f"gte_write_data(c, {rt}, MEM_R32(c, {addr}));"]

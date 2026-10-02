@@ -16,10 +16,11 @@
 // them and re-runs 8007D76C when the wanted distance differs: level loads, save states and
 // setting changes all take effect on the next frame.
 //
-// Limits: view z and the far plane are 16-bit, so the far plane stops at 32000. Both
-// ordering tables index by z & 0x3FFC (4096 slots, z up to 16383): meshes farther than that
-// all share the farthest slot (the game clamps them there), drawn in the order submitted;
-// sprites and particles would wrap to near slots, so their limit stays at 16380.
+// Limit: both ordering tables index by z & 0x3FFC (4096 slots, z up to 16383). Meshes farther
+// than that all share the farthest slot (the game clamps them there) and are drawn in the order
+// submitted, so a far building covered nearer ones (rooftops: the game's own far plane is
+// 16024, and at 400% big slabs and streaks showed over the skyline). The far plane stops at
+// 16380, as the sprites' limit does.
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -34,7 +35,7 @@ constexpr uint32_t kFogStart = 0x800FFACC;
 constexpr uint32_t kSpriteFar = 0x800FFAD8;  // sprite/particle far limit
 constexpr uint32_t kNear = 0x800FFAE8;
 constexpr uint32_t kFar = 0x800FFAEC;
-constexpr int32_t kMaxFar = 32000;  // view z and the far plane are 16-bit (32767)
+constexpr int32_t kMaxFar = 16380;  // the ordering tables' depth range (see above)
 
 int32_t rd32(uint32_t a) { int32_t v; std::memcpy(&v, ram_ptr(a), 4); return v; }
 void wr32(uint32_t a, int32_t v) { std::memcpy(ram_ptr(a), &v, 4); }
@@ -47,7 +48,9 @@ int g_draw_distance = 400;
 void drawdist_apply(R3000* c) {
     const int32_t orig_far = rd32(kViewDist), far_z = rd32(kFar), start = rd32(kFogStart);
     if (orig_far <= 0 || far_z <= 0 || start < 0 || start > far_z) return;  // not set up yet
-    const int32_t want = std::max(orig_far, (int32_t)std::min<int64_t>((int64_t)orig_far * g_draw_distance / 100, kMaxFar));
+    // Max (400 and up): the whole depth range in every level, however short the level's own is
+    const int64_t scaled = g_draw_distance >= 400 ? kMaxFar : (int64_t)orig_far * g_draw_distance / 100;
+    const int32_t want = std::max(orig_far, (int32_t)std::min<int64_t>(scaled, kMaxFar));
     if (want == far_z) return;
     const int32_t orig_start = (int32_t)((int64_t)start * orig_far / far_z);
     const int32_t new_start = (int32_t)((int64_t)orig_start * want / orig_far);

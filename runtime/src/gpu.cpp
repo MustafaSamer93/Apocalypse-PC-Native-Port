@@ -63,8 +63,22 @@ uint64_t g_vblanks = 0;
 constexpr uint32_t kNextPacket = 0x800FF668;
 uint32_t g_2d_from = 0, g_2d_mid = 0, g_2d_to = 0;  // packets: HUD from..mid, then menus/messages
                                                     // up to the tint's (phys)
+uint32_t g_2d_bar = 0;                              // the HUD's boss bar from here (up to mid)
 // Packets the text and icon routines made since the last frame was drawn (phys from, to).
 std::vector<std::pair<uint32_t, uint32_t>> g_text_packets;
+// The selected item of a game menu (menu draw 800156E0): its letters are drawn glowing white,
+// its flames (semi-transparent) as they are.
+std::vector<std::pair<uint32_t, uint32_t>> g_white_packets;
+bool white_packet(uint32_t a) {
+    for (const auto& r : g_white_packets)
+        if (a >= r.first && a < r.second) return true;
+    return false;
+}
+// The game draws the item's flames over its letters (additive): the letters are held back and
+// drawn after the item's last packet (gpu_packet_start), white over the fire.
+std::vector<std::pair<uint32_t, std::vector<uint32_t>>> g_deferred;  // packet, words
+bool g_replaying = false;
+void draw_polygon(const uint32_t* w);
 // HwPrim::box for texels u0..u1, v0..v1 at the vertices (the far ones are not drawn).
 uint32_t smooth_box(int u0, int v0, int u1, int v1) {
     u1 = std::max(u0, u1 - 1), v1 = std::max(v0, v1 - 1);
@@ -91,6 +105,30 @@ bool text_packet(uint32_t a) {
         if (a >= r.first && a < r.second) return true;
     return false;
 }
+// Soft glows. The glow renderer (8003736C) draws each light as a flat fan sorted at its centre's
+// depth, so the floor or wall it sits against, sorted nearer, cut hard straight edges into it
+// (and sorting it nearer showed it through walls). With the hardware renderer and precise 3D, the
+// frame's 3D triangles go into a depth image instead (native size, drawn just before the first
+// glow) and the glows are sorted after the scene: each glow pixel fades by how much nearer than
+// the glow's centre the scene there is, fully gone `fade` in front of it (sim60.cpp: twice the
+// glow's radius). Polygons without exact vertices use their ordering-table slot's depth.
+struct GlowRange {
+    uint32_t from, to;  // packets (phys)
+    float z, fade;
+};
+std::vector<GlowRange> g_glows;
+std::vector<HwVtx> g_ztris;  // 3D triangles not yet in the depth image (x, y, w, z)
+// A picture was uploaded (movie frame strips, full screens) this host frame: frames then are not
+// shown before the game flips to them. The first movie picture went into the other buffer while
+// the display was still 15-bit, and shown early it read as green stripes.
+uint64_t g_picture_frame = ~0ull;
+
+const GlowRange* glow_of(uint32_t a) {
+    for (const auto& g : g_glows)
+        if (a >= g.from && a < g.to) return &g;
+    return nullptr;
+}
+
 uint64_t g_movie_vblank = 0;  // when the MDEC last decoded a movie frame (VBlank count)
 bool g_movie_seen = false;
 
@@ -104,7 +142,8 @@ float squeeze_2d(float x0, float x1, float* fix) {
     const float left = (float)S.area_x1, right = (float)(S.area_x2 + 1), width = right - left;
     if (x1 - x0 >= 0.9f * width) return 1.0f;  // full-screen shapes
     const float mid = (x0 + x1) * 0.5f;
-    const bool hud = a >= g_2d_from && a < g_2d_mid;  // HUD text and icons too
+    // HUD text and icons too; the boss bar (from g_2d_bar) spans the middle: one piece, centred
+    const bool hud = a >= g_2d_from && a < g_2d_mid && a < g_2d_bar;
     if (hud && mid < left + width / 3) *fix = left;         // HUD, left side
     else if (hud && mid > right - width / 3) *fix = right;  // HUD, right side
     else *fix = (left + right) * 0.5f;
@@ -291,7 +330,7 @@ HwState hw_state() {
     return s;
 }
 
-HwVtx hw_vtx(const Vtx& v) { return HwVtx{(float)v.x, (float)v.y, v.r, v.g, v.b, v.u, v.v}; }
+HwVtx hw_vtx(const Vtx& v) { return HwVtx{(float)v.x, (float)v.y, v.r, v.g, v.b, (float)v.u, (float)v.v}; }
 
 // Hardware drops triangles whose bounding box is 1024x512 or larger.
 bool oversized(const Vtx& a, const Vtx& b, const Vtx& c) {
@@ -409,12 +448,74 @@ void shared_corners(const uint32_t* xyw, int nv, GtePrecise* pr, bool* ok) {
 
 // Scanline-accurate rasterization would need the exact hardware edge walker; the
 // edge-function rasterizer above follows the same fill convention (top/left inclusive).
+// Soft glows: a polygon's triangles for the depth image. Vertices without an exact depth take
+// the average of the others; a polygon with none takes its ordering-table slot's depth (not
+// see-through shading, not the 2D in slot 0).
+// A polygon's depth per vertex for the depth image and the Z-buffer: the exact view depth;
+// vertices without one take the average of the others; a polygon with none takes its
+// ordering-table slot's depth (false: it has no depth at all, or only the slot's while see-through).
+bool poly_depths(const float* zv, int nv, float* z, bool see_through) {
+    float sum = 0;
+    int known = 0;
+    for (int i = 0; i < nv; i++)
+        if (zv[i] > 0) sum += zv[i], known++;
+    for (int i = 0; i < nv; i++) z[i] = zv[i] > 0 ? zv[i] : known ? sum / (float)known : (float)g_gpu_ot_z;
+    return known || (!see_through && g_gpu_ot_z != 0);
+}
+
+void depth_triangles(const Vtx* v, const HwVtx* h, const float* zv, int nv, bool quad, bool see_through) {
+    float z[4];
+    if (!poly_depths(zv, nv, z, see_through)) return;
+    if (g_ztris.size() > 600000) return;
+    auto add = [&](int a, int b, int c) {
+        if (oversized(v[a], v[b], v[c])) return;
+        for (int i : {a, b, c}) {
+            HwVtx t = h[i];
+            t.z = z[i];
+            g_ztris.push_back(t);
+        }
+    };
+    add(0, 1, 2);
+    if (quad) add(1, 2, 3);
+}
+
+// debug (APOC_PRECISE_WHY=1): tallies the corners without an exact position by the sw that
+// last wrote the vertex word (pgxp_writer) and the shadow's state; gpu_list_done logs the top
+std::unordered_map<uint64_t, uint32_t> g_why;
+void precise_why(uint32_t a, uint32_t word, uint32_t cmd) {
+    if (!pgxp_writer) return;
+    uint32_t state = 0;  // 0 no address, 1 shadow never set (w 0), 2 shadow value differs, 3 shadow ok?
+    uint32_t pc = 0;
+    if (a) {
+        const PgxpVal& s = pgxp_ram[(a & (PSX_RAM_SIZE - 1)) >> 2];
+        pc = pgxp_writer[(a & (PSX_RAM_SIZE - 1)) >> 2];
+        state = s.w <= 0 ? 1 : s.v != word ? 2 : 3;
+    }
+    g_why[(uint64_t)pc << 16 | state << 8 | cmd]++;
+}
+void precise_why_log() {
+    if (!pgxp_writer || g_why.empty()) return;
+    std::vector<std::pair<uint32_t, uint64_t>> v;
+    for (auto& [k, n] : g_why) v.push_back({n, k});
+    std::sort(v.rbegin(), v.rend());
+    for (size_t i = 0; i < v.size() && i < 24; i++)
+        log_msg(LogCat::Host, "why: %6u corners  writer %08llx  state %llu  cmd %02llx", v[i].first, v[i].second >> 16,
+                (v[i].second >> 8) & 0xFF, v[i].second & 0xFF);
+    g_why.clear();
+}
+
 void draw_polygon(const uint32_t* w) {
     uint32_t cmd = w[0] >> 24;
     bool gouraud = cmd & 0x10, quad = cmd & 0x08, textured = cmd & 0x04, semi = cmd & 0x02, raw = cmd & 0x01;
     int nv = quad ? 4 : 3;
+    if (!g_replaying && textured && !semi && !g_white_packets.empty() && g_gpu_packet_addr && hw_active() &&
+        white_packet(g_gpu_packet_addr) && g_deferred.size() < 256) {
+        const int words = 1 + nv * 2 + (gouraud ? nv - 1 : 0);
+        g_deferred.push_back({g_gpu_packet_addr, std::vector<uint32_t>(w, w + words)});
+        return;
+    }
     Vtx v[4];
-    uint32_t xyw[4], xya[4];
+    uint32_t xyw[4], xya[4], uvw[4] = {}, uva[4] = {};
     TexCtx tex{};
     int idx = 0;
     uint32_t color = w[idx++] & 0xFFFFFF;
@@ -428,7 +529,8 @@ void draw_polygon(const uint32_t* w) {
         v[i].g = (color >> 8) & 0xFF;
         v[i].b = (color >> 16) & 0xFF;
         if (textured) {
-            uint32_t uv = w[idx++];
+            uva[i] = w == g_cmd.data() ? g_cmd_addr[idx] : 0;
+            uint32_t uv = uvw[i] = w[idx++];
             v[i].u = uv & 0xFF;
             v[i].v = (uv >> 8) & 0xFF;
             if (i == 0) {
@@ -451,6 +553,7 @@ void draw_polygon(const uint32_t* w) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi; p.gouraud = gouraud;
         p.smooth = textured && g_smooth_font && g_gpu_packet_addr && text_packet(g_gpu_packet_addr);
+        p.whiten = textured && !semi && g_gpu_packet_addr && !g_white_packets.empty() && white_packet(g_gpu_packet_addr);
         if (textured) {  // the texels it may use (the shader clamps to them)
             int u0 = v[0].u, u1 = v[0].u, v0 = v[0].v, v1 = v[0].v;
             for (int i = 1; i < nv; i++)
@@ -462,6 +565,7 @@ void draw_polygon(const uint32_t* w) {
         p.semi_mode = S.semi_mode;
         p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;
         p.clut_x = tex.clut_x; p.clut_y = tex.clut_y;
+        if (textured && g_tex_dump) texdump_note(tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, g_vram);
         HwState st = hw_state();
         HwVtx h[4];
         for (int i = 0; i < nv; i++) {
@@ -483,6 +587,14 @@ void draw_polygon(const uint32_t* w) {
         // Precise 3D (gte.cpp): each vertex the GTE projected goes to its exact position (all of
         // them, so neighbouring polygons still share their edges); when every vertex was, the
         // texture is perspective-correct too (w relative to the farthest vertex).
+        float zv[4] = {};  // exact view depth of each vertex (0: none)
+        // exact texture coordinates (gte.cpp): the subdivision's whole-texel UVs get their fraction back
+        static const bool no_uv = std::getenv("APOC_NO_EXACT_UV") != nullptr;  // for A/B comparisons
+        if (g_gte_precise && textured && !no_uv) {
+            static const bool show_uv = std::getenv("APOC_UV_SHOW") != nullptr;  // debug: exact-UV corners green
+            for (int i = 0; i < nv; i++)
+                if (pgxp_uv_find(uva[i], uvw[i], &h[i].u, &h[i].v) && show_uv) p.gouraud = true, h[i].r = h[i].b = 0, h[i].g = 255;
+        }
         if (g_gte_precise && k == 1.0f) {
             // the vertex the word itself came from (PGXP), else one projected to that pixel
             GtePrecise pr[4];
@@ -506,8 +618,10 @@ void draw_polygon(const uint32_t* w) {
             for (int i = 0; i < nv; i++) {
                 if (!nc[i]) {
                     all = false;
+                    precise_why(xya[i], xyw[i], w[0] >> 24);
                     continue;
                 }
+                zv[i] = pr[i].w;
                 h[i].x = pr[i].x + (float)S.off_x;
                 h[i].y = pr[i].y + (float)S.off_y;
                 wmax = std::max(wmax, pr[i].w);
@@ -515,6 +629,69 @@ void draw_polygon(const uint32_t* w) {
             if (all)
                 for (int i = 0; i < nv; i++) h[i].w = pr[i].w / wmax;
             g_precise_stats[all ? 0 : wmax > 0 ? 1 : 2]++;
+            // debug: APOC_PRECISE_SHOW=1 draws the corners without an exact position red (not glows)
+            static const bool show = std::getenv("APOC_PRECISE_SHOW") != nullptr;
+            if (show && !all && !(semi && !textured)) {
+                p.gouraud = true;
+                for (int i = 0; i < nv; i++)
+                    if (!nc[i]) h[i].r = 255, h[i].g = h[i].b = 0;
+            }
+        }
+        // a replacement texture (texreplace.cpp): drawn from its HD copy of VRAM
+        if (textured && g_tex_replace) {
+            float u0 = h[0].u, u1 = h[0].u, v0 = h[0].v, v1 = h[0].v;
+            for (int i = 1; i < nv; i++)
+                u0 = std::min(u0, h[i].u), u1 = std::max(u1, h[i].u), v0 = std::min(v0, h[i].v), v1 = std::max(v1, h[i].v);
+            const int tw[4] = {S.tw_mask_x, S.tw_mask_y, S.tw_off_x, S.tw_off_y};
+            // debug: APOC_TEXREPLACE_AT=x,y logs the replacements of polygons over that point
+            static int at_x = -1, at_y = -1;
+            static const bool at = std::getenv("APOC_TEXREPLACE_AT") && std::sscanf(std::getenv("APOC_TEXREPLACE_AT"), "%d,%d", &at_x, &at_y) == 2;
+            if (at) {
+                int x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+                for (int i = 1; i < nv; i++)
+                    x0 = std::min(x0, v[i].x), x1 = std::max(x1, v[i].x), y0 = std::min(y0, v[i].y), y1 = std::max(y1, v[i].y);
+                g_texreplace_trace = at_x < 0 || (at_x >= x0 && at_x <= x1 && at_y >= y0 && at_y <= y1);
+            }
+            const bool found = texreplace_find(tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, u0, v0, u1, v1, tw, g_vram);
+            if (g_texreplace_trace) {
+                uint32_t wr[4] = {};
+                for (int k = 0; k < 4 && pgxp_writer && g_gpu_packet_addr; k++) wr[k] = pgxp_writer[((g_gpu_packet_addr + 4 + 4 * k) & (PSX_RAM_SIZE - 1)) >> 2];
+                log_msg(LogCat::Host, "poly at point: page %d,%d d%d clut %d,%d uv %.0f,%.0f-%.0f,%.0f semi %d ot %u hd %d pkt %08X wr %08X %08X %08X %08X",
+                        tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, u0, v0, u1, v1, semi, g_gpu_ot_z, found, g_gpu_packet_addr, wr[0], wr[1], wr[2], wr[3]);
+            }
+            if (found) {
+                p.hd = true;
+            } else if (static const bool show = std::getenv("APOC_TEXREPLACE_SHOW") != nullptr; show) {
+                p.gouraud = true;  // debug: textured polygons without a replacement magenta
+                for (int i = 0; i < nv; i++) h[i].r = 255, h[i].g = 0, h[i].b = 255;
+            }
+        }
+        if (!g_glows.empty()) {
+            if (const GlowRange* g = g_gpu_packet_addr ? glow_of(g_gpu_packet_addr) : nullptr) {
+                p.glow = true;
+                p.zfade = g->fade;
+                for (int i = 0; i < nv; i++) h[i].z = g->z;
+                hw_depth_draw(g_ztris.data(), (int)g_ztris.size());  // the scene so far
+                g_ztris.clear();
+            } else {
+                depth_triangles(v, h, zv, nv, quad, semi && !textured);
+            }
+        }
+        // Z-buffer: 3D polygons test (and opaque ones write) their exact view depth, so the
+        // ordering table's one depth per polygon no longer lets near polygons show through far
+        // ones where they cross. Only polygons with every vertex exact take part; the rest,
+        // glows, 2D and the table's last slot (everything the game clamped there: the sky, far
+        // skylines - the sky is nearer than the skyline it must stay behind) draw in list order
+        // as before. Semi-transparent polygons (decals, shadows on the floor) test a little
+        // nearer than they are, not to fight the surface they lie on.
+        static const bool no_z = std::getenv("APOC_NO_ZBUFFER") != nullptr;  // for A/B comparisons
+        if (g_gte_precise && !no_z && !p.glow && k == 1.0f && g_gpu_ot_z && g_gpu_ot_z < 0x3FF0 && hw_zbuffer_ready()) {
+            bool exact = true;
+            for (int i = 0; i < nv; i++) exact &= zv[i] > 0;
+            if (exact) {
+                p.ztest = semi ? 2 : 1;
+                for (int i = 0; i < nv; i++) h[i].z = semi ? zv[i] * 0.99f : zv[i];
+            }
         }
         if (!oversized(v[0], v[1], v[2])) hw_triangle(&h[0], &h[1], &h[2], p, st);
         if (quad && !oversized(v[1], v[2], v[3])) hw_triangle(&h[1], &h[2], &h[3], p, st);
@@ -602,13 +779,22 @@ void draw_rect(const uint32_t* w) {
         p.semi_mode = S.semi_mode;
         p.page_x = tex.page_x; p.page_y = tex.page_y; p.depth = tex.depth;
         p.clut_x = tex.clut_x; p.clut_y = tex.clut_y;
+        if (textured && g_tex_dump) texdump_note(tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, g_vram);
         float cx = 0, k = squeeze_2d((float)x, (float)(x + wdt), &cx);
+        // a replacement texture (texreplace.cpp): drawn from its HD copy of VRAM
+        if (textured && g_tex_replace && wdt > 0 && hgt > 0) {
+            const int ua = S.rect_flip_x ? u0 - wdt + 1 : u0, va = S.rect_flip_y ? v0 - hgt + 1 : v0;
+            const int tw[4] = {S.tw_mask_x, S.tw_mask_y, S.tw_off_x, S.tw_off_y};
+            p.hd = texreplace_find(tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, (float)ua, (float)va,
+                                   (float)(ua + wdt), (float)(va + hgt), tw, g_vram);
+        }
         if (k != 1.0f && wdt > 0 && hgt > 0) {
             int r = color & 0xFF, g = (color >> 8) & 0xFF, b = (color >> 16) & 0xFF;
             float xa = cx + ((float)x - cx) * k, xb = cx + ((float)(x + wdt) - cx) * k;
             int ub = S.rect_flip_x ? u0 - wdt : u0 + wdt, vb = S.rect_flip_y ? v0 - hgt : v0 + hgt;
-            HwVtx q[4] = {{xa, (float)y, r, g, b, u0, v0}, {xb, (float)y, r, g, b, ub, v0},
-                          {xa, (float)(y + hgt), r, g, b, u0, vb}, {xb, (float)(y + hgt), r, g, b, ub, vb}};
+            const float fu0 = (float)u0, fv0 = (float)v0, fub = (float)ub, fvb = (float)vb;
+            HwVtx q[4] = {{xa, (float)y, r, g, b, fu0, fv0}, {xb, (float)y, r, g, b, fub, fv0},
+                          {xa, (float)(y + hgt), r, g, b, fu0, fvb}, {xb, (float)(y + hgt), r, g, b, fub, fvb}};
             HwState st = hw_state();
             hw_triangle(&q[0], &q[1], &q[2], p, st);
             hw_triangle(&q[1], &q[2], &q[3], p, st);
@@ -722,6 +908,8 @@ void execute(const std::vector<uint32_t>& w) {
             }
         if (hw_active()) hw_copy(sx, sy, dx, dy, ww, hh);
         replace_note_copy(sx, sy, dx, dy, ww, hh);
+        texdump_vram_changed(dx, dy, ww, hh);
+        if (dx + ww > 512) texreplace_vram_changed();
         return;
     }
     if (cmd >= 0xA0 && cmd < 0xC0) {  // CPU -> VRAM: data words follow
@@ -800,6 +988,21 @@ void upload_word(uint32_t v) {
                 g_upload.active = false;
                 LOG(Gpu, "upload %d,%d %dx%d", g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (hw_active()) hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
+                texdump_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
+                if (g_upload.x + g_upload.w > 512 && g_upload.h > 1) texreplace_vram_changed();
+                if (static const char* dir = std::getenv("APOC_UPLOAD_DUMP"); dir) {  // raw uploads (tools/extract_textures.py)
+                    char name[512];
+                    static int seq = 0;
+                    std::snprintf(name, sizeof name, "%s/%05d_%06llu_%d_%d_%dx%d.bin", dir, seq++, (unsigned long long)host_frame_count(),
+                                  g_upload.x, g_upload.y, g_upload.w, g_upload.h);
+                    if (FILE* f = std::fopen(name, "wb")) {
+                        for (int r = 0; r < g_upload.h; r++)
+                            for (int q = 0; q < g_upload.w; q++)
+                                std::fwrite(&g_vram[((g_upload.y + r) & 511) * 1024 + ((g_upload.x + q) & 1023)], 2, 1, f);
+                        std::fclose(f);
+                    }
+                }
+                if (g_upload.h >= 200) g_picture_frame = host_frame_count(), core_early_cancel();  // (gpu_drawn_display)
                 replace_note_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 // a whole picture: replace it now, before the game draws on it in the same
                 // frame (the title's PRESS START); pictures sent in strips wait for the VBlank
@@ -918,6 +1121,8 @@ uint32_t gpu_read_stat(R3000* c) {
     s |= ((m >> 5) & 1) << 22;         // interlace
     s |= (DS.enabled ? 0u : 1u) << 23;
     s |= (DS.irq ? 1u : 0u) << 24;
+    // interlace field: the opposite of the field bit 31 shows; always 1 when not interlaced
+    s |= ((m & 0x20) ? (g_odd_line ? 0u : 1u) : 1u) << 13;
     s |= 0x1C000000;                   // ready for cmd / VRAM->CPU / DMA block
     s |= (uint32_t)DS.dma_dir << 29;
     switch (DS.dma_dir) {              // DMA request bit
@@ -930,7 +1135,6 @@ uint32_t gpu_read_stat(R3000* c) {
     bool odd = (m & 0x24) == 0x24 ? g_odd_line : (line & 1);
     if (line >= 240) odd = false;
     s |= (odd ? 1u : 0u) << 31;
-    s |= (g_odd_line ? 1u : 0u) << 13;
     return s;
 }
 
@@ -989,6 +1193,7 @@ GpuDisplay gpu_display() {
 bool gpu_drawn_display(GpuDisplay* out) {
     GpuDisplay d = gpu_display();
     if (d.rgb24 || !d.enabled || S.area_x2 - S.area_x1 + 1 != d.w || S.area_y2 - S.area_y1 + 1 < d.h) return false;
+    if (g_picture_frame != ~0ull && host_frame_count() - g_picture_frame <= 1) return false;
     d.x = S.area_x1;
     d.y = S.area_y1;
     *out = d;
@@ -998,20 +1203,28 @@ bool gpu_drawn_display(GpuDisplay* out) {
 // ================================================================ save states
 
 // Entry hooks (tools/recomp/emit.py) on the level render's last routines, called from the
-// render (80030A30..80030A48): 0 = the HUD, 1 and 2 = more 2D, 3 = the full-screen tint.
+// render (80030A30..80030A48): 0 = the HUD, 1 and 2 = more 2D, 3 = the full-screen tint;
+// 4 = the boss health bar, the HUD's last routine (8006D3C0, called from 8006DF78).
 extern "C" void psx_hook_2d(R3000* c, int stage) {
-    static const uint32_t kFrom[4] = {0x80030A38, 0x80030A40, 0x80030A48, 0x80030A50};
+    static const uint32_t kFrom[5] = {0x80030A38, 0x80030A40, 0x80030A48, 0x80030A50, 0x8006DF80};
     if (c->r[31] != kFrom[stage]) return;
     const uint32_t next = MEM_R32(c, kNextPacket) & 0x1FFFFC;
     if (stage == 0) {
         g_2d_from = next;
-        g_2d_mid = g_2d_to = 0x200000;
+        g_2d_mid = g_2d_to = g_2d_bar = 0x200000;
+    } else if (stage == 4) {
+        g_2d_bar = next;
     } else if (stage == 1) {
         g_2d_mid = next;
     } else if (stage == 3) {
         g_2d_to = next;
     }
 }
+
+// The title screen's blinking "Press start" (str#2 at 800A0818) was drawn this recently: the
+// version number is shown in its corner (host_sdl.cpp draw_version).
+uint64_t g_press_start_seen = 0;
+bool gpu_title_screen() { return g_press_start_seen && host_frame_count() - g_press_start_seen < 90; }
 
 // Entry hooks on the text routine (8001AA28, a2 = the text) and the icon routines: run the
 // routine and note the packets it made.
@@ -1028,8 +1241,16 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
     if (from < g_last_text_from) {
         g_text_packets.clear();
         g_tilts.clear();
+        g_white_packets.clear();
     }
+    // the menu draw's text call (ra 800159CC) for the selected item (s6 = index, s3 = menu) could be
+    // drawn white (g_white_packets, HwPrim::whiten); the user wants the game's own font colours
+    const bool selected = false && which == 0 && ra == 0x800159CC && (c->r[22] & 0xFF) == MEM_R8(c, c->r[19] + 6);
     g_last_text_from = from;
+    if (which == 0 && c->r[6] == 0x800A0818 && !core_in_ghost()) {
+        if (!g_press_start_seen) log_msg(LogCat::Host, "title screen (version shown)");
+        g_press_start_seen = host_frame_count();
+    }
     const float tilt = which == 0 ? subtitle_tilt(c->r[6]) : 0.0f;  // (a2 = the text)
     const float tx = (float)(int32_t)c->r[4], ty = (float)(int32_t)c->r[5];
     inside[which] = true;
@@ -1037,6 +1258,7 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
     inside[which] = false;
     const uint32_t to = MEM_R32(c, kNextPacket) & 0x1FFFFC;
     if (to > from && g_text_packets.size() < 256) g_text_packets.push_back({from, to});
+    if (to > from && selected && g_white_packets.size() < 16) g_white_packets.push_back({from, to});
     if (to > from && tilt != 0.0f && g_tilts.size() < 16) g_tilts.push_back({from, to, tx, ty, tilt});
     c->r[31] = ra;
     c->r[29] = sp;
@@ -1049,11 +1271,14 @@ void gpu_list_done() {
     static const bool stats = std::getenv("APOC_PRECISE_STATS") != nullptr;
     static uint32_t lists = 0;
     if (stats && ++lists % 300 == 0) {
-        log_msg(LogCat::Host, "precise: %u polys all, %u partial, %u none; %u corners by shadow; %u grid vertices rebuilt, %u rejected; %u depth clashes; %u projections, %u too near, %u off",
+        log_msg(LogCat::Host, "precise: %u polys all, %u partial, %u none; %u corners by shadow; %u grid vertices rebuilt, %u rejected; %u depth clashes; %u projections, %u too near, %u off; %u/%u textured corners with exact UVs",
                 g_precise_stats[0], g_precise_stats[1], g_precise_stats[2], g_precise_stats[7], g_corner_stats[0],
-                g_corner_stats[1], g_precise_stats[3], g_precise_stats[4], g_precise_stats[5], g_precise_stats[6]);
+                g_corner_stats[1], g_precise_stats[3], g_precise_stats[4], g_precise_stats[5], g_precise_stats[6],
+                g_uv_stats[1], g_uv_stats[0]);
+        std::memset(g_uv_stats, 0, sizeof g_uv_stats);
         std::memset(g_corner_stats, 0, sizeof g_corner_stats);
         std::memset(g_precise_stats, 0, sizeof g_precise_stats);
+        precise_why_log();
     }
     if (g_seam_n[0] || g_seam_n[1])
         log_msg(LogCat::Host, "seam frame: %u glow corners, %u mismatched; textured semi: %u corners, %u mismatched", g_seam_n[0],
@@ -1063,8 +1288,43 @@ void gpu_list_done() {
     gte_precise_clear();
     g_text_packets.clear();
     g_tilts.clear();
+    g_white_packets.clear();
     g_last_text_from = 0;
-    g_2d_from = g_2d_mid = g_2d_to = 0;
+    g_2d_from = g_2d_mid = g_2d_to = g_2d_bar = 0;
+    g_glows.clear();
+    g_ztris.clear();
+    if (hw_active()) hw_depth_reset();
+}
+
+void gpu_packet_start(uint32_t addr) {
+    if (g_deferred.empty() || (addr && white_packet(addr))) return;
+    g_replaying = true;
+    const uint32_t keep = g_gpu_packet_addr;
+    for (const auto& d : g_deferred) {
+        g_gpu_packet_addr = d.first;
+        draw_polygon(d.second.data());
+    }
+    g_gpu_packet_addr = keep;
+    g_deferred.clear();
+    g_replaying = false;
+}
+
+bool gpu_soft_glows() {
+    // off by default (2026-10-01): light pools on floors and lamp halos near walls faded out wherever
+    // the scene was nearer than the glow's centre, cutting jagged shapes along polygon edges
+    static const bool on = std::getenv("APOC_SOFT_GLOW") != nullptr;
+    return on && g_gte_precise && hw_active() && hw_depth_ready();
+}
+
+void gpu_glow_begin(uint32_t packet, float z, float fade) {
+    // the frame is being built again (60 Hz / smooth-frame renders drop a build): forget the old
+    if (!g_glows.empty() && packet < g_glows.back().from) g_glows.clear();
+    if (!g_glows.empty() && g_glows.back().to > packet) g_glows.back().to = packet;
+    if (g_glows.size() < 1024) g_glows.push_back({packet, 0x200000, z, fade});
+}
+
+void gpu_glow_end(uint32_t packet) {
+    if (!g_glows.empty() && g_glows.back().to > packet) g_glows.back().to = packet;
 }
 
 void gpu_note_movie_frame() {

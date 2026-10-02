@@ -5,6 +5,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -68,6 +69,47 @@ void trace_dump() {
         const char* s = g_trace[(g_trace_pos + i) & 127];
         if (*s) std::fprintf(stderr, "  %s\n", s);
     }
+}
+
+// Freeze report: a thread that notices when no frame has come for 8 s (outside the F1 and chapter
+// menus, which stop the game on purpose) and writes, once per freeze, what the CPU was doing - its
+// registers and the return addresses on its stack - plus the RAM to debug/, like a crash.
+// (Read from another thread while the game runs: a snapshot, enough to see where it is stuck.)
+bool g_host_menu_open = false;
+void watchdog_start() {
+    std::thread([] {
+        uint64_t last = ~0ull;
+        int still = 0;
+        for (;;) {
+            SDL_Delay(1000);
+            const uint64_t f = host_frame_count();
+            still = (f == last && !g_host_menu_open) ? still + 1 : 0;
+            last = f;
+            if (still != 8 || !g_cpu) continue;
+            const R3000 c = *g_cpu;
+            std::fprintf(stderr, "FREEZE: no frame for 8 s at frame %llu, cycles=%llu ra=%08X sp=%08X\n",
+                         (unsigned long long)f, (unsigned long long)c.cycles, c.r[31], c.r[29]);
+            for (int i = 0; i < 32; i += 8) {
+                std::fprintf(stderr, "  r%-2d", i);
+                for (int k = i; k < i + 8; k++) std::fprintf(stderr, " %08X", c.r[k]);
+                std::fprintf(stderr, "\n");
+            }
+            std::fprintf(stderr, "  stack:");
+            for (uint32_t s = c.r[29] & 0x1FFFFC, n = 0; s < PSX_RAM_SIZE && n < 24; s += 4) {
+                uint32_t w;
+                std::memcpy(&w, psx_ram + s, 4);
+                if (w >= 0x80010000u && w < 0x800A0000u && !(w & 3)) std::fprintf(stderr, " %08X", w), n++;
+            }
+            std::fprintf(stderr, "\n");
+            std::error_code ec;
+            std::filesystem::create_directories("debug", ec);
+            if (FILE* out = std::fopen("debug/freeze_ram.bin", "wb")) {
+                std::fwrite(psx_ram, 1, PSX_RAM_SIZE, out);
+                std::fclose(out);
+                std::fprintf(stderr, "  RAM saved to debug/freeze_ram.bin\n");
+            }
+        }
+    }).detach();
 }
 
 void fatal(const char* fmt, ...) {
@@ -202,7 +244,8 @@ void psx_run_events(R3000* c) {
     sched_update(c);
     // Interrupts are only delivered from the outermost check point, never while the
     // runtime is itself inside event processing.
-    if (g_events_depth == 1 && irq_should_take(c)) bios_take_interrupt(c);
+    // (the real BIOS of the boot sequence takes its own: interp_run_machine)
+    if (g_events_depth == 1 && !g_bios_rom && irq_should_take(c)) bios_take_interrupt(c);
     g_events_depth--;
     sched_update(c);
 }
@@ -238,6 +281,10 @@ static void present_frame(R3000* c, const GpuDisplay& d) {
 }
 
 // What the screen shows now: the frame shown early while the game has not flipped to it yet.
+// gpu.cpp: a picture (a movie frame) was uploaded: a frame shown early is no longer what the
+// game will show (the first movie picture went into it while the display was still 15-bit).
+void core_early_cancel() { g_early_valid = false; }
+
 static GpuDisplay shown_display() {
     GpuDisplay d = gpu_display();
     if (g_early_valid) d.x = g_early.x, d.y = g_early.y;
@@ -457,7 +504,12 @@ uint32_t mem_read_slow(R3000* c, uint32_t addr, int size) {
         return v;
     }
     if (p >= 0x1F000000 && p < 0x1F800000) return 0xFFFFFFFFu;  // no expansion ROM
-    if (p >= 0x1FC00000 && p < 0x1FC80000) return 0;            // no BIOS ROM
+    if (p >= 0x1FC00000 && p < 0x1FC80000) {  // the BIOS ROM: only during the boot sequence
+        if (!g_bios_rom) return 0;
+        uint32_t v = 0;
+        std::memcpy(&v, g_bios_rom + (p - 0x1FC00000), size);
+        return v;
+    }
     LOG(Mem, "unhandled read%d %08X", size * 8, addr);
     return 0;
 }
@@ -658,8 +710,17 @@ struct CoreGhostSnap {
     bool force_check;
     uint32_t istat, imask;
     int cache_isolated;
+    // precise 3D's shadows (gte.cpp): a ghost render's stores would otherwise leave its in-between
+    // positions behind, taken later wherever the real word has the same whole-pixel value
+    std::vector<PgxpVal> pgxp_ram;
+    PgxpVal pgxp_scratch[PSX_SCRATCH_SIZE / 4], pgxp_gpr[32], rgb2;
+    double mac[4];
+    bool mac_ok;
 };
 static CoreGhostSnap g_snap;
+extern PgxpVal g_rgb2_exact;  // gte.cpp
+extern double g_mac_exact[4];
+extern bool g_mac_exact_ok;
 
 void core_ghost_begin(R3000* c, uint64_t cycle_budget, std::jmp_buf* abort) {
     g_snap.ram.assign(psx_ram, psx_ram + PSX_RAM_SIZE);
@@ -670,6 +731,17 @@ void core_ghost_begin(R3000* c, uint64_t cycle_budget, std::jmp_buf* abort) {
     g_snap.istat = g_istat;
     g_snap.imask = g_imask;
     g_snap.cache_isolated = psx_cache_isolated;
+    // ponytail: copies all 8 MB of shadows (~1 ms per ghost render); journal the ghost's shadow stores if that shows up in profiles
+    if (g_gte_precise) {
+        g_snap.pgxp_ram.assign(pgxp_ram, pgxp_ram + PSX_RAM_SIZE / 4);
+        std::memcpy(g_snap.pgxp_scratch, pgxp_scratch, sizeof pgxp_scratch);
+        std::memcpy(g_snap.pgxp_gpr, pgxp_gpr, sizeof pgxp_gpr);
+        g_snap.rgb2 = g_rgb2_exact;
+        std::memcpy(g_snap.mac, g_mac_exact, sizeof g_mac_exact);
+        g_snap.mac_ok = g_mac_exact_ok;
+    } else {
+        g_snap.pgxp_ram.clear();
+    }
     g_ghost = true;
     g_ghost_deadline = c->cycles + cycle_budget;
     g_ghost_abort = abort;
@@ -687,6 +759,14 @@ int core_ghost_end(R3000* c) {
     g_istat = g_snap.istat;
     g_imask = g_snap.imask;
     psx_cache_isolated = g_snap.cache_isolated;
+    if (!g_snap.pgxp_ram.empty()) {
+        std::memcpy(pgxp_ram, g_snap.pgxp_ram.data(), sizeof pgxp_ram);
+        std::memcpy(pgxp_scratch, g_snap.pgxp_scratch, sizeof pgxp_scratch);
+        std::memcpy(pgxp_gpr, g_snap.pgxp_gpr, sizeof pgxp_gpr);
+        g_rgb2_exact = g_snap.rgb2;
+        std::memcpy(g_mac_exact, g_snap.mac, sizeof g_mac_exact);
+        g_mac_exact_ok = g_snap.mac_ok;
+    }
     g_ghost = false;
     g_ghost_abort = nullptr;
     sched_update(c);

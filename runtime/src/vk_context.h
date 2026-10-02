@@ -55,13 +55,13 @@ int frame_slot();
 // Images and layouts. transition() always records a full barrier, so it also orders two
 // operations that use the same layout. Not allowed while rendering (call end_rendering).
 bool create_image(VkImg& img, int w, int h, VkFormat format, VkImageUsageFlags usage,
-                  VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
+                  VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT, int mips = 1);
 void destroy_image(VkImg& img);
 void transition(VkImg& img, VkImageLayout layout);
 
 // Dynamic rendering into `target` (whole image; draws set viewport/scissor). Starting on the
 // target already being rendered to is free; another target ends the current rendering.
-void begin_rendering(VkImg& target);
+void begin_rendering(VkImg& target, VkImg* depth = nullptr);  // depth: a depth image rendered with it
 void end_rendering();
 
 // Host-visible memory usable until the next submit: vertex data, uploads, read-backs.
@@ -91,8 +91,9 @@ struct PipelineDesc {
     VkSampleCountFlagBits samples;
     Blend blend;
     Vertices vertices;
+    VkFormat depth = VK_FORMAT_UNDEFINED;  // depth attachment format: depth test/write enable become dynamic
 };
-VkPipelineLayout make_layout(uint32_t push_bytes);
+VkPipelineLayout make_layout(uint32_t push_bytes, uint32_t sets = 1);  // sets: sampler sets 0..
 VkPipeline make_pipeline(const PipelineDesc& d);
 
 // Presenter handles for images (hw_display_texture, hw_capture_texture).
