@@ -97,7 +97,7 @@ if(RECOMP_RA_CHECK)
 endif()
 
 # ---------------------------------------------------------------- runtime
-add_executable(apocalypse
+add_executable(repocalypse
     runtime/src/main.cpp
     runtime/src/core.cpp
     runtime/src/bios.cpp
@@ -131,17 +131,17 @@ add_executable(apocalypse
     runtime/src/movie.cpp
     runtime/src/bootfont.cpp
     ${volk_SOURCE_DIR}/volk.c)
-target_include_directories(apocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
-target_compile_definitions(apocalypse PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
-add_dependencies(apocalypse vk_shaders)
+target_include_directories(repocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
+target_compile_definitions(repocalypse PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
+add_dependencies(repocalypse vk_shaders)
 # The exe's icon: the game's lives icon, made from the disc by tools/make_icon.py (build.bat).
 if(WIN32 AND EXISTS ${GEN_DIR}/apocalypse.ico)
-    file(WRITE ${CMAKE_BINARY_DIR}/apocalypse.rc "1 ICON \"${GEN_DIR}/apocalypse.ico\"\n")
-    target_sources(apocalypse PRIVATE ${CMAKE_BINARY_DIR}/apocalypse.rc)
+    file(WRITE ${CMAKE_BINARY_DIR}/repocalypse.rc "1 ICON \"${GEN_DIR}/apocalypse.ico\"\n")
+    target_sources(repocalypse PRIVATE ${CMAKE_BINARY_DIR}/repocalypse.rc)
 endif()
 # The game is a single self-contained exe (static SDL and C runtime) in the project folder,
 # next to assets\; a Windows app, so starting it opens no console window.
-set_target_properties(apocalypse PROPERTIES
+set_target_properties(repocalypse PROPERTIES
     WIN32_EXECUTABLE TRUE
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}
@@ -149,15 +149,15 @@ set_target_properties(apocalypse PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR})
 
 find_package(OpenGL REQUIRED)
-target_link_libraries(apocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL Vulkan::Headers)
+target_link_libraries(repocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL Vulkan::Headers)
 if(WIN32)
-    target_link_libraries(apocalypse PRIVATE windowscodecs ole32)  # replacement pictures (replace.cpp)
-    target_link_libraries(apocalypse PRIVATE mfplat mfreadwrite mfuuid)  # replacement movies (movie.cpp)
+    target_link_libraries(repocalypse PRIVATE windowscodecs ole32)  # replacement pictures (replace.cpp)
+    target_link_libraries(repocalypse PRIVATE mfplat mfreadwrite mfuuid)  # replacement movies (movie.cpp)
 endif()
 if(MSVC)
-    target_compile_options(apocalypse PRIVATE /W3 /permissive- $<$<NOT:$<CXX_COMPILER_ID:Clang>>:/Zc:preprocessor>)
-    target_compile_definitions(apocalypse PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_link_options(apocalypse PRIVATE /MAP)  # apocalypse.map: names for crash addresses (main.cpp)
+    target_compile_options(repocalypse PRIVATE /W3 /permissive- $<$<NOT:$<CXX_COMPILER_ID:Clang>>:/Zc:preprocessor>)
+    target_compile_definitions(repocalypse PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_link_options(repocalypse PRIVATE /MAP)  # repocalypse.map: names for crash addresses (main.cpp)
 else()
-    target_compile_options(apocalypse PRIVATE -Wall -Wno-unused-function)
+    target_compile_options(repocalypse PRIVATE -Wall -Wno-unused-function)
 endif()

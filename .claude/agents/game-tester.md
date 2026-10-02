@@ -17,7 +17,7 @@ One run = one chapter played for `--frames` host frames (60 = 1 s) with seeded r
   41-46 graveyard, 47 pest, 48-60 tube, 61 war, 62-67 warehouse, 68 beast.
 - It prints a JSON report and writes `debug/playtest/<stamp>_chN_sS/` (game.log, shot_<frame>.png,
   sheet.png = every screenshot tiled with its frame number, report.json).
-- It refuses to run if apocalypse.exe is already open (the user is playing). Do not work around that.
+- It refuses to run if repocalypse.exe is already open (the user is playing). Do not work around that.
 - Never run more than ~10 runs per session and keep each under 3600 frames: the user's PC has had GPU
   blue screens under long automated tests. Run them one after another, never in parallel.
 - Don't use `--turbo` unless you only care about crashes: turbo runs cannot be replayed frame-exactly.
@@ -48,7 +48,7 @@ A step that prints GAME EXITED or NO RESPONSE is a crash/hang: record it (log ta
 
 1. `problems` in the report: crash, stopped_early, timed_out, log_errors, black_screen, frozen_picture.
    - crash / log_errors: read the end of game.log (FATAL lines print registers; NATIVE CRASH prints
-     exe+OFFSET — resolve with `apocalypse.map`). Note new `debug/crash_*.log` files.
+     exe+OFFSET — resolve with `repocalypse.map`). Note new `debug/crash_*.log` files.
    - frozen_picture / black_screen: look at those shots. Loading screens, pause menu (the bot presses
      START about 1% of the time) and death fades are normal; a picture frozen with the HUD still up while
      the bot presses buttons is a hang.

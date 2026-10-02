@@ -167,6 +167,9 @@ void draw_version() {
 PresentOptions present_options() {
     PresentOptions o;
     o.aspect = g_gfx.aspect;
+    // the disc's own full-screen pictures keep their 4:3 (replacements are fitted to the screen)
+    if (o.aspect != Aspect::A4_3 && !gpu_movie_playing() && replace_original_picture_shown(gpu_display().y))
+        o.aspect = Aspect::A4_3;
     o.crt = g_gfx.crt;
     o.fxaa = g_gfx.aa & 1;
     return o;
@@ -549,13 +552,13 @@ static SDL_Window* create_window(const char* title, int w, int h, SDL_WindowFlag
 }
 #endif
 
-// The top of the log (debug/apocalypse.log): what a tester's report needs to know about the
+// The top of the log (debug/repocalypse.log): what a tester's report needs to know about the
 // game and the PC. The GPU, display and renderer follow when the window opens.
 void report_header() {
     char when[64];
     const std::time_t now = std::time(nullptr);
     std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", std::localtime(&now));
-    log_msg(LogCat::Host, "===== Apocalypse %s report log, started %s =====", kVersion, when);
+    log_msg(LogCat::Host, "===== Repocalypse %s report log, started %s =====", kVersion, when);
 #ifdef _WIN32
     using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
     OSVERSIONINFOW os{sizeof os};
@@ -1273,7 +1276,7 @@ void host_present(const GpuDisplay& d) {
         dt_min = ~0ull;
         dt_max = 0;
         char title[96];
-        std::snprintf(title, sizeof title, "Apocalypse %s - %.0f fps%s", kVersion, images,
+        std::snprintf(title, sizeof title, "Repocalypse %s - %.0f fps%s", kVersion, images,
                       g_turbo ? " (fast-forward)" : "");
         // only when it changes: renaming the window goes through Windows' window manager and
         // could hold the frame up by several ms (a hiccup every second)

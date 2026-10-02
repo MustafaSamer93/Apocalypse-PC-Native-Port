@@ -10,5 +10,5 @@ assets\replacements\textures  optional - HD textures: <file>\<index>.png for eve
 assets\replacements\fmvs      optional - HD movies: <NAME>.mkv or .mp4 plays instead of the
                                 disc's <NAME>.STR (INTRO, ATVILOGO, SEWER, ...)
 
-Run build.bat from the project folder; it makes apocalypse.exe next to this folder.
+Run build.bat from the project folder; it makes repocalypse.exe next to this folder.
 No game data or BIOS is distributed with this project.

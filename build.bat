@@ -2,7 +2,7 @@
 rem Builds the native Windows version of Apocalypse from your own disc image.
 rem   1. put your disc image (.cue and .bin files, any names, or just the .bin files) in "assets\image"
 rem   2. run build.bat
-rem   3. run apocalypse.exe (it is made in this folder)
+rem   3. run repocalypse.exe (it is made in this folder)
 setlocal
 cd /d "%~dp0"
 
@@ -30,4 +30,4 @@ echo [4/4] Building...
 cmake --build build-clang || exit /b 1
 
 echo.
-echo Done: apocalypse.exe
+echo Done: repocalypse.exe

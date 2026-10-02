@@ -196,7 +196,7 @@ bool init(SDL_Window* window) {
     Uint32 next = 0;
     const char* const* exts = SDL_Vulkan_GetInstanceExtensions(&next);
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = "Apocalypse";
+    app.pApplicationName = "Repocalypse";
     app.apiVersion = VK_API_VERSION_1_3;
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;

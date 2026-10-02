@@ -20,7 +20,7 @@ LIVE, SNAP = BOT / "live", BOT / "snap"
 
 
 def running():
-    return b"apocalypse.exe" in subprocess.run(["tasklist", "/FI", "IMAGENAME eq apocalypse.exe"],
+    return b"repocalypse.exe" in subprocess.run(["tasklist", "/FI", "IMAGENAME eq repocalypse.exe"],
                                                capture_output=True).stdout.lower()
 
 
@@ -42,7 +42,7 @@ def start(args):
     ap.add_argument("--renderer", default="opengl")
     a = ap.parse_args(args)
     if running():
-        sys.exit("apocalypse.exe is already running (the user may be playing, or run bot.py stop)")
+        sys.exit("repocalypse.exe is already running (the user may be playing, or run bot.py stop)")
     if SNAP.exists():
         sys.exit(f"{SNAP} exists: a previous session was not stopped. Run bot.py stop first.")
     LIVE.mkdir(parents=True, exist_ok=True)
@@ -56,7 +56,7 @@ def start(args):
     env = dict(os.environ, APOC_BOT=str(LIVE), APOC_BACKGROUND="1", APOC_SETTINGS=str(ini),
                SDL_AUDIO_DRIVER="dummy", APOC_SIM60_CHECK="1", APOC_NO_DIALOGS="1")
     with open(BOT / "game.log", "wb") as log:
-        subprocess.Popen([str(ROOT / "apocalypse.exe"), "--turbo", "--log", "host", "--chapter", str(a.chapter)],
+        subprocess.Popen([str(ROOT / "repocalypse.exe"), "--turbo", "--log", "host", "--chapter", str(a.chapter)],
                          cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
     print(f"started chapter {a.chapter}; send the first step")
 
@@ -105,7 +105,7 @@ def stop(_):
                 break
             time.sleep(0.1)
         else:
-            subprocess.run(["taskkill", "/IM", "apocalypse.exe", "/F"], capture_output=True)
+            subprocess.run(["taskkill", "/IM", "repocalypse.exe", "/F"], capture_output=True)
             time.sleep(1)
     if SNAP.exists():
         robocopy(SNAP / "saves", ROOT / "saves")

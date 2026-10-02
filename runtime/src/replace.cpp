@@ -54,6 +54,11 @@ bool g_scanned = false;
 bool g_check[2] = {};
 bool g_replaced[2] = {};  // the buffer shows a replacement (a copy of it carries it along)
 bool g_title[2] = {};     // the buffer holds the title picture (replaced or not)
+// The buffer holds a full-screen picture the game uploaded (title, loading screen, logo), not a
+// rendered scene: a few polygons on it (PRESS START, a loading bar) keep it, a 3D scene does not.
+bool g_picture[2] = {};
+int g_picture_polys[2] = {};
+constexpr int kScenePolys = 200;
 
 int buffer_of(int x, int y, int w, int h) {  // the frame buffer a rectangle touches, -1 = none
     for (int b = 0; b < 2; b++)
@@ -217,14 +222,17 @@ bool replace_load_image(const std::string& path, std::vector<uint32_t>& rgba, in
     return load_image(std::wstring(path.begin(), path.end()), rgba, w, h);
 }
 
-void replace_note_upload(int x, int y, int w, int h) {
+void note_upload(int x, int y, int w, int h, bool picture) {
     for (int b = 0; b < 2; b++)
         if (x < 512 && x + w > 0 && y < b * 256 + 240 && y + h > b * 256) {
             g_check[b] = true;
             g_replaced[b] = false;
             g_title[b] = false;
+            g_picture[b] = picture;
+            g_picture_polys[b] = 0;
         }
 }
+void replace_note_upload(int x, int y, int w, int h) { note_upload(x, y, w, h, h >= 200); }
 
 // A VRAM copy: a whole replaced buffer copied onto the other keeps the replacement (and what
 // the game then draws on it, PRESS START, must stay); other copies count as uploads.
@@ -238,9 +246,10 @@ void replace_note_copy(int sx, int sy, int dx, int dy, int w, int h) {
         g_replaced[to] = true;
         g_check[to] = false;
         g_title[to] = title;
+        g_picture[to] = g_picture[from], g_picture_polys[to] = g_picture_polys[from];
         return;
     }
-    replace_note_upload(dx, dy, w, h);
+    note_upload(dx, dy, w, h, from >= 0 && from != to && g_picture[from]);
     g_title[to] = title;
 }
 
@@ -248,10 +257,24 @@ void replace_note_vram_reset() {
     g_check[0] = g_check[1] = true;
     g_replaced[0] = g_replaced[1] = false;
     g_title[0] = g_title[1] = false;
+    g_picture[0] = g_picture[1] = false;
 }
 
 // The title screen's picture is in the frame buffer at `display_y` (host_sdl.cpp: the version label).
 bool replace_title_shown(int display_y) { return g_title[(display_y >> 8) & 1]; }
+
+// gpu.cpp: a polygon drawn with the drawing area at `area_y`.
+void replace_note_poly(int area_y) {
+    const int b = (area_y >> 8) & 1;
+    if (g_picture[b] && ++g_picture_polys[b] > kScenePolys) g_picture[b] = false;
+}
+
+// The buffer at `display_y` shows one of the disc's own full-screen pictures (not replaced):
+// it is shown at its own 4:3 shape, not stretched to a wide screen (host_sdl.cpp).
+bool replace_original_picture_shown(int display_y) {
+    const int b = (display_y >> 8) & 1;
+    return g_picture[b] && !g_replaced[b];
+}
 
 // At each VBlank: after an upload into the frame buffers, look for a known picture there.
 void replace_check(const uint16_t* vram) {
@@ -264,6 +287,7 @@ void replace_check(const uint16_t* vram) {
         const int y = b * 256;
         const uint32_t full = content_hash(vram, 0, y, 512, 240);
         if (full == kTitleHash) g_title[b] = true;
+        if (!g_tex_replace) continue;  // Texture replacements off: the disc's own pictures
         if (!g_scanned) scan_pictures();
         for (Picture& p : g_pictures) {
             if ((p.h == 240 ? full : content_hash(vram, 0, y, p.w, p.h)) != p.hash) continue;

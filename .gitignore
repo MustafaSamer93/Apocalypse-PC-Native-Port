@@ -1,7 +1,7 @@
 # Copyrighted game data and anything derived from it never goes in the repo.
 assets/*
 !assets/README.txt
-/apocalypse.exe
+/repocalypse.exe
 extracted/
 generated/
 build/
@@ -14,6 +14,7 @@ __pycache__/
 dist/
 settings.ini
 *.log
-/apocalypse.map
+/repocalypse.map
 debug/
+/repocalypse.old.exe
 /apocalypse.old.exe

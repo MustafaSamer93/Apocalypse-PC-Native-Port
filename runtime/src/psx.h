@@ -188,6 +188,8 @@ void replace_note_copy(int sx, int sy, int dx, int dy, int w, int h);
 void replace_note_vram_reset();
 void replace_check(const uint16_t* vram);
 bool replace_title_shown(int display_y);
+void replace_note_poly(int area_y);
+bool replace_original_picture_shown(int display_y);
 extern uint32_t g_gpu_packet_addr;  // RAM address of the GPU packet being processed (hw.cpp)
 
 void cdrom_init(const std::string& cue_path);

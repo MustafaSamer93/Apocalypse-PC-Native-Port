@@ -52,7 +52,7 @@ uint32_t fnv1a(const uint8_t* p, size_t n) {
 
 void usage() {
     std::printf(
-        "usage: apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--log cats]\n"
+        "usage: repocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--log cats]\n"
         "  --cue PATH         disc image .cue or .bin (default: the image in assets/image)\n"
         "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
         "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
@@ -162,7 +162,7 @@ int main(int argc, char** argv) {
     }
 #ifdef _WIN32
     // Started with no console and nothing redirected (a double-click): log to
-    // debug/apocalypse.log (the report log testers send), with the previous runs' logs kept in
+    // debug/repocalypse.log (the report log testers send), with the previous runs' logs kept in
     // debug/logs (the newest 10, named by when they were written) and crashed runs' as
     // debug/crash_DATE_TIME.log.
     if (HANDLE err = GetStdHandle(STD_ERROR_HANDLE); !GetConsoleWindow() && (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN)) {
@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories("debug", ec);
         // a log that ended in a crash is kept (debug/crash_DATE_TIME.log) instead of being
         // rotated away by the next two runs
-        for (const char* old : {"debug/apocalypse.old.log", "debug/apocalypse.log"}) {
+        for (const char* old : {"debug/repocalypse.old.log", "debug/repocalypse.log"}) {
             std::ifstream in(old);
             std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             in.close();
@@ -181,13 +181,13 @@ int main(int argc, char** argv) {
             std::strftime(name, sizeof name, "debug/crash_%Y%m%d_%H%M%S.log", std::localtime(&t));
             std::filesystem::rename(old, name, ec);
         }
-        if (std::filesystem::exists("debug/apocalypse.log", ec)) {
+        if (std::filesystem::exists("debug/repocalypse.log", ec)) {
             std::filesystem::create_directories("debug/logs", ec);
             struct _stat64 st{};
-            const std::time_t t = _stat64("debug/apocalypse.log", &st) == 0 ? (std::time_t)st.st_mtime : std::time(nullptr);
+            const std::time_t t = _stat64("debug/repocalypse.log", &st) == 0 ? (std::time_t)st.st_mtime : std::time(nullptr);
             char name[64];
-            std::strftime(name, sizeof name, "debug/logs/apocalypse_%Y%m%d_%H%M%S.log", std::localtime(&t));
-            std::filesystem::rename("debug/apocalypse.log", name, ec);
+            std::strftime(name, sizeof name, "debug/logs/repocalypse_%Y%m%d_%H%M%S.log", std::localtime(&t));
+            std::filesystem::rename("debug/repocalypse.log", name, ec);
             std::vector<std::filesystem::path> logs;  // names sort by date: drop all but the newest 10
             for (const auto& e : std::filesystem::directory_iterator("debug/logs", ec))
                 if (e.path().extension() == ".log") logs.push_back(e.path());
@@ -195,7 +195,7 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i + 10 < logs.size(); i++) std::filesystem::remove(logs[i], ec);
         }
         FILE* f;
-        if (freopen_s(&f, "debug/apocalypse.log", "a", stderr) == 0) std::setvbuf(stderr, nullptr, _IONBF, 0);
+        if (freopen_s(&f, "debug/repocalypse.log", "a", stderr) == 0) std::setvbuf(stderr, nullptr, _IONBF, 0);
     }
 #endif
     std::string cue;  // --cue, else find_disc()
@@ -296,10 +296,10 @@ int main(int argc, char** argv) {
     if (cue.empty()) {
         const char* msg =
             "The game disc was not found.\n\nPut your own copy of Apocalypse (USA) in the \"assets\\image\" "
-            "folder next to apocalypse.exe: its .cue and .bin files (any names), or just the .bin files.\n\n"
+            "folder next to repocalypse.exe: its .cue and .bin files (any names), or just the .bin files.\n\n"
             "Everything else in assets (BIOS, replacements) is optional.";
         std::fprintf(stderr, "%s\n", msg);
-        if (!std::getenv("APOC_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Apocalypse", msg, nullptr);
+        if (!std::getenv("APOC_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Repocalypse", msg, nullptr);
         return 1;
     }
 
@@ -312,7 +312,7 @@ int main(int argc, char** argv) {
     memcard(0).load_or_create(card_dir + "/card1.mcr");
     memcard(1).load_or_create(card_dir + "/card2.mcr");
 
-    if (!host_init("Apocalypse", scale)) fatal("could not initialise the window/audio");
+    if (!host_init("Repocalypse", scale)) fatal("could not initialise the window/audio");
     watchdog_start();
     sched_init(&cpu);
     dma_init();

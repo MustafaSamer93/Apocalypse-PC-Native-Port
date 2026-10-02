@@ -124,7 +124,7 @@ void fatal(const char* fmt, ...) {
     std::fprintf(stderr, "FATAL: %s\n", msg);
     // The exe has no console window: show the error, so a double-click never fails
     // silently (scripts set APOC_NO_DIALOGS to get only the log).
-    if (!std::getenv("APOC_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Apocalypse", msg, nullptr);
+    if (!std::getenv("APOC_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Repocalypse", msg, nullptr);
     if (g_cpu) {
         std::fprintf(stderr, "  cycles=%llu ra=%08X sp=%08X\n", (unsigned long long)g_cpu->cycles,
                      g_cpu->r[31], g_cpu->r[29]);

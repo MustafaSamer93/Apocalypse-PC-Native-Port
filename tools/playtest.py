@@ -4,7 +4,7 @@
     python tools/playtest.py [--chapter N] [--seed S] [--frames F] [--every K] [--sim 0|1]
                              [--renderer opengl|vulkan] [--scale X] [--turbo]
 
-One run = one apocalypse.exe process, window in the background, no audio. Afterwards:
+One run = one repocalypse.exe process, window in the background, no audio. Afterwards:
     debug/playtest/<stamp>_chN_sS/  game.log, shot_<frame>.png, sheet.png (all shots tiled), report.json
 Flags: crash (process died early / FATAL / NATIVE CRASH), log errors, black screen, frozen picture.
 The user's saves/ and settings.ini are snapshotted right before the run and restored right after it.
@@ -16,7 +16,7 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageDraw, ImageStat
 
 ROOT = Path(__file__).resolve().parent.parent
-EXE = ROOT / "apocalypse.exe"
+EXE = ROOT / "repocalypse.exe"
 CHAPTERS = len(list((ROOT / "saves" / "chapters").glob("*.state")))
 START = 90  # chapter loads at frame 30; give it a moment
 BAD_LOG = re.compile(r"FATAL|NATIVE CRASH|invalid instruction|broke an object list|slot held a freed|invalid \(gp", re.I)
@@ -98,9 +98,9 @@ def main():
     ap.add_argument("--press", help="explicit --press script instead of random input")
     a = ap.parse_args()
 
-    if b"apocalypse.exe" in subprocess.run(["tasklist", "/FI", "IMAGENAME eq apocalypse.exe"],
+    if b"repocalypse.exe" in subprocess.run(["tasklist", "/FI", "IMAGENAME eq repocalypse.exe"],
                                            capture_output=True).stdout.lower():
-        sys.exit("apocalypse.exe is already running (the user may be playing); not touching saves/")
+        sys.exit("repocalypse.exe is already running (the user may be playing); not touching saves/")
 
     seed = a.seed if a.seed is not None else random.randrange(1 << 31)
     rng = random.Random(seed)

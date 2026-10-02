@@ -113,6 +113,7 @@ float squeeze_2d(float x0, float x1, float* fix) {
         return g_gte_widescreen;
     }
     if (!a) return 1.0f;
+    if (replace_original_picture_shown(S.area_y1)) return 1.0f;  // shown at 4:3 (host_sdl.cpp)
     const bool text = text_packet(a);
     if (!text && (a < g_2d_from || a >= g_2d_to)) return 1.0f;
     const float left = (float)S.area_x1, right = (float)(S.area_x2 + 1), width = right - left;
@@ -402,6 +403,7 @@ void shared_corners(const uint32_t* xyw, int nv, GtePrecise* pr, bool* ok) {
 // Scanline-accurate rasterization would need the exact hardware edge walker; the
 // edge-function rasterizer above follows the same fill convention (top/left inclusive).
 void draw_polygon(const uint32_t* w) {
+    replace_note_poly(S.area_y1);
     uint32_t cmd = w[0] >> 24;
     bool gouraud = cmd & 0x10, quad = cmd & 0x08, textured = cmd & 0x04, semi = cmd & 0x02, raw = cmd & 0x01;
     int nv = quad ? 4 : 3;
