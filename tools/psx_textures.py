@@ -28,13 +28,17 @@ import sys
 import zlib
 
 
-def png(path, w, h, rgba):
+def png_bytes(w, h, rgba):
     def chunk(t, d):
         return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xFFFFFFFF)
     raw = b''.join(b'\0' + bytes(rgba[y * w * 4:(y + 1) * w * 4]) for y in range(h))
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)) +
+            chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
+
+
+def png(path, w, h, rgba):
     with open(path, 'wb') as f:
-        f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)) +
-                chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
+        f.write(png_bytes(w, h, rgba))
 
 
 def rgba_of(c):
@@ -114,20 +118,30 @@ def textures(b):
     return tex, palettes(b, o, set(h[2] for h, _ in tex))
 
 
+def decode(entry, pals, all_pals):
+    """One texture as RGBA bytes (None without its palette)."""
+    (flag, ncol, pid, idx, w, h, size), data = entry
+    pal = pals.get(pid) or all_pals.get(pid)
+    if pal is None or len(pal) != ncol:
+        return None
+    rgba = bytearray(w * h * 4)
+    row = stride(ncol, w)
+    for y in range(h):
+        for x in range(w):
+            v = data[y * row + x] if ncol == 256 else (data[y * row + (x >> 1)] >> (4 * (x & 1))) & 15
+            i = y * w + x
+            rgba[i * 4:i * 4 + 4] = bytes(rgba_of(pal[v]))
+    return rgba
+
+
 def export(tex, pals, all_pals, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     written = 0
-    for (flag, ncol, pid, idx, w, h, size), data in tex:
-        pal = pals.get(pid) or all_pals.get(pid)
-        if pal is None or len(pal) != ncol:
+    for entry in tex:
+        rgba = decode(entry, pals, all_pals)
+        if rgba is None:
             continue
-        rgba = bytearray(w * h * 4)
-        row = stride(ncol, w)
-        for y in range(h):
-            for x in range(w):
-                v = data[y * row + x] if ncol == 256 else (data[y * row + (x >> 1)] >> (4 * (x & 1))) & 15
-                i = y * w + x
-                rgba[i * 4:i * 4 + 4] = bytes(rgba_of(pal[v]))
+        idx, w, h = entry[0][3], entry[0][4], entry[0][5]
         png(os.path.join(out_dir, '%03d.png' % idx), w, h, rgba)
         written += 1
     return written

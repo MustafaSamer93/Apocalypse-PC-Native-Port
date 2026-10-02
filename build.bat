@@ -20,6 +20,7 @@ python tools\discfs.py extract >nul || exit /b 1
 
 echo [2/4] Recompiling MIPS code to C...
 python tools\recomp\main.py --no-ra-check || exit /b 1
+python tools\make_icon.py >nul || exit /b 1
 
 echo [3/4] Configuring...
 cmake -S . -B build-clang -G Ninja -DCMAKE_BUILD_TYPE=Release -DRECOMP_RA_CHECK=OFF ^

@@ -122,6 +122,11 @@ add_executable(apocalypse
 target_include_directories(apocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
 target_compile_definitions(apocalypse PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
 add_dependencies(apocalypse vk_shaders)
+# The exe's icon: the game's lives icon, made from the disc by tools/make_icon.py (build.bat).
+if(WIN32 AND EXISTS ${GEN_DIR}/apocalypse.ico)
+    file(WRITE ${CMAKE_BINARY_DIR}/apocalypse.rc "1 ICON \"${GEN_DIR}/apocalypse.ico\"\n")
+    target_sources(apocalypse PRIVATE ${CMAKE_BINARY_DIR}/apocalypse.rc)
+endif()
 # The game is a single self-contained exe (static SDL and C runtime) in the project folder,
 # next to assets\; a Windows app, so starting it opens no console window.
 set_target_properties(apocalypse PROPERTIES
