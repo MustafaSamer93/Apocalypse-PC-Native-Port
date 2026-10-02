@@ -361,23 +361,24 @@ void gl_present_overlay_end() {
     glDisable(GL_BLEND);
 }
 
-GLuint g_badge_tex = 0;
-int g_badge_w = 0, g_badge_h = 0;
+GLuint g_badge_tex[2] = {};
+int g_badge_w[2] = {}, g_badge_h[2] = {};
 
-void gl_present_badge(const uint32_t* px, int w, int h, int margin, bool changed) {
-    if (!g_badge_tex || w != g_badge_w || h != g_badge_h) {
-        if (g_badge_tex) glDeleteTextures(1, &g_badge_tex);
-        g_badge_tex = make_texture(w, h, GL_LINEAR);
-        g_badge_w = w, g_badge_h = h;
+void gl_present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed) {
+    GLuint& tex = g_badge_tex[slot & 1];
+    if (!tex || w != g_badge_w[slot & 1] || h != g_badge_h[slot & 1]) {
+        if (tex) glDeleteTextures(1, &tex);
+        tex = make_texture(w, h, GL_LINEAR);
+        g_badge_w[slot & 1] = w, g_badge_h[slot & 1] = h;
         changed = true;
     }
-    glBindTexture(GL_TEXTURE_2D, g_badge_tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
     if (changed) {
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(margin, margin, w, h);  // (GL counts from the bottom)
+    glViewport(x, margin, w, h);  // (GL counts from the bottom)
     glEnable(GL_BLEND);
     glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);

@@ -102,44 +102,49 @@ enum : uint16_t {
 std::string g_toast;
 uint64_t g_toast_until = 0;
 
-// FPS counter (Enhancements): the images shown per second, in the window's lower-left corner.
-// Drawn into its own small surface only when the number changes (present_badge keeps it).
+// Badges: a line of white text in a dark box at the bottom of the window, drawn into its own
+// small surface only when the text or the window size changes (present_badge keeps it).
+// Slot 0: the FPS counter, lower left; slot 1: the version, lower right.
+void draw_badge(int slot, const std::string& text, int chars, bool right) {
+    struct Badge { SDL_Surface* surf = nullptr; SDL_Renderer* ren = nullptr; std::string text; int h = 0; };
+    static Badge badges[2];
+    Badge& b = badges[slot];
+    int ww = 0, wh = 0;
+    SDL_GetWindowSizeInPixels(g_window, &ww, &wh);
+    const int size = std::max(12, wh * 26 / 1080), pad = size / 3;  // 26 px at 1080 lines
+    bool changed = false;
+    if (!b.surf || b.h != wh) {  // made for the window's size, `chars` characters wide
+        if (b.ren) ui_text_reset(b.ren), SDL_DestroyRenderer(b.ren);
+        if (b.surf) SDL_DestroySurface(b.surf);
+        b.surf = SDL_CreateSurface(size * chars * 3 / 5 + 2 * pad, size + pad, SDL_PIXELFORMAT_ARGB8888);
+        b.ren = b.surf ? SDL_CreateSoftwareRenderer(b.surf) : nullptr;
+        b.h = wh;
+        b.text.clear();
+    }
+    if (!b.ren) return;
+    if (text != b.text) {
+        b.text = text;
+        changed = true;
+        SDL_SetRenderDrawBlendMode(b.ren, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(b.ren, 0, 0, 0, 150);
+        SDL_RenderClear(b.ren);
+        SDL_SetRenderDrawBlendMode(b.ren, SDL_BLENDMODE_BLEND);
+        const float tw = ui_text_width(b.ren, text.c_str(), (float)size);
+        SDL_SetRenderDrawColor(b.ren, 255, 255, 255, 255);
+        ui_text(b.ren, ((float)b.surf->w - tw) * 0.5f, (float)pad * 0.5f, text.c_str(), (float)size);
+        SDL_RenderPresent(b.ren);
+    }
+    const int margin = size / 2;
+    present_badge(slot, (const uint32_t*)b.surf->pixels, b.surf->w, b.surf->h, right ? ww - margin - b.surf->w : margin,
+                  margin, changed);
+}
+
+// FPS counter (Enhancements): the images shown per second.
 bool g_fps_counter = false;
 double g_fps_shown = 0;  // images per second over the last second (host_present)
 
 void draw_fps_counter() {
-    if (!g_fps_counter) return;
-    static SDL_Surface* surf = nullptr;
-    static SDL_Renderer* ren = nullptr;
-    static int last_value = -1, last_h = 0;
-    int ww = 0, wh = 0;
-    SDL_GetWindowSizeInPixels(g_window, &ww, &wh);
-    const int size = std::max(12, wh * 26 / 1080), pad = size / 3;  // 26 px at 1080 lines
-    const int value = (int)std::lround(g_fps_shown);
-    bool changed = false;
-    if (!surf || last_h != wh) {  // made for the window's size
-        if (ren) ui_text_reset(ren), SDL_DestroyRenderer(ren);
-        if (surf) SDL_DestroySurface(surf);
-        surf = SDL_CreateSurface(size * 4 + 2 * pad, size + pad, SDL_PIXELFORMAT_ARGB8888);
-        ren = surf ? SDL_CreateSoftwareRenderer(surf) : nullptr;
-        last_h = wh;
-        last_value = -1;
-    }
-    if (!ren) return;
-    if (value != last_value) {
-        last_value = value;
-        changed = true;
-        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);
-        SDL_RenderClear(ren);
-        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-        const std::string text = std::to_string(value) + " FPS";
-        const float tw = ui_text_width(ren, text.c_str(), (float)size);
-        SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
-        ui_text(ren, ((float)surf->w - tw) * 0.5f, (float)pad * 0.5f, text.c_str(), (float)size);
-        SDL_RenderPresent(ren);
-    }
-    present_badge((const uint32_t*)surf->pixels, surf->w, surf->h, size / 2, changed);
+    if (g_fps_counter) draw_badge(0, std::to_string((int)std::lround(g_fps_shown)) + " FPS", 7, false);
 }
 
 void draw_toast() {
@@ -155,15 +160,9 @@ void draw_toast() {
     present_overlay_end();
 }
 
-// The version in the lower-right corner of the title screen and the game's menus.
+// The version, on the title screen and while the game's menus are up.
 void draw_version() {
-    if (!gpu_title_screen()) return;
-    SDL_Renderer* r = present_overlay_begin();
-    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    constexpr float kSize = 18.0f;
-    SDL_SetRenderDrawColor(r, 200, 200, 200, 220);
-    ui_text(r, 640.0f - ui_text_width(r, kVersion, kSize) - 14.0f, 480.0f - kSize - 12.0f, kVersion, kSize);
-    present_overlay_end();
+    if (gpu_title_screen()) draw_badge(1, kVersion, (int)std::strlen(kVersion) + 1, true);
 }
 
 PresentOptions present_options() {

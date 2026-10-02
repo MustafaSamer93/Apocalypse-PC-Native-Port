@@ -48,7 +48,7 @@ VkPipeline g_plain_aa = VK_NULL_HANDLE;  // plain, into the FXAA intermediate im
 VkImg g_aa;       // the scaled image, for the FXAA pass
 VkImg g_sw;       // the software renderer's picture
 VkImg g_ov_img;   // the overlay (present_overlay_size)
-VkImg g_badge;    // present_badge's image
+VkImg g_badge[2];  // present_badge's images
 SDL_Surface* g_ov_surf = nullptr;
 SDL_Renderer* g_ov_ren = nullptr;
 
@@ -303,7 +303,7 @@ void vk_present_shutdown() {
     vkDeviceWaitIdle(vkc::device);
     vk_renderer_destroy();
     destroy_swapchain();
-    for (VkImg* im : {&g_aa, &g_sw, &g_ov_img, &g_badge}) vkc::destroy_image(*im);
+    for (VkImg* im : {&g_aa, &g_sw, &g_ov_img, &g_badge[0], &g_badge[1]}) vkc::destroy_image(*im);
     for (VkPipeline* p : {&g_plain, &g_crt, &g_fxaa, &g_overlay, &g_plain_aa})
         if (*p) vkDestroyPipeline(vkc::device, *p, nullptr), *p = VK_NULL_HANDLE;
     for (VkPipelineLayout* l : {&g_layout, &g_fxaa_layout})
@@ -411,30 +411,31 @@ void vk_present_overlay_end() {
     draw_quad(g_overlay, g_layout, g_ov_img, nullptr, 0);
 }
 
-void vk_present_badge(const uint32_t* px, int w, int h, int margin, bool changed) {
+void vk_present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed) {
+    VkImg& badge = g_badge[slot & 1];
     VkImg* target = frame();
     if (!target) return;
     vkc::end_rendering();
-    if (g_badge.w != w || g_badge.h != h) {
-        vkc::destroy_image(g_badge);
-        vkc::create_image(g_badge, w, h, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (badge.w != w || badge.h != h) {
+        vkc::destroy_image(badge);
+        vkc::create_image(badge, w, h, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         target = frame();
         changed = true;
     }
     if (changed) {
         vkc::Staging st = vkc::stage((VkDeviceSize)w * h * 4);
         std::memcpy(st.ptr, px, (size_t)w * h * 4);
-        vkc::transition(g_badge, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkc::transition(badge, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy bic{};
         bic.bufferOffset = st.offset;
         bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         bic.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
-        vkCmdCopyBufferToImage(cb(), st.buffer, g_badge.image, g_badge.layout, 1, &bic);
+        vkCmdCopyBufferToImage(cb(), st.buffer, badge.image, badge.layout, 1, &bic);
     }
-    vkc::transition(g_badge, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkc::transition(badge, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     vkc::begin_rendering(*target);
-    viewport((float)margin, (float)(target->h - margin - h), (float)w, (float)h);
-    draw_quad(g_overlay, g_layout, g_badge, nullptr, 0);
+    viewport((float)x, (float)(target->h - margin - h), (float)w, (float)h);
+    draw_quad(g_overlay, g_layout, badge, nullptr, 0);
 }
 
 void vk_present_swap() {

@@ -55,8 +55,8 @@
     X(void, present_redraw, (const PresentOptions& o), (o))                                                    \
     X(SDL_Renderer*, present_overlay_begin, (), ())                                                            \
     X(void, present_overlay_end, (), ())                                                                       \
-    X(void, present_badge, (const uint32_t* px, int w, int h, int margin, bool changed),                       \
-      (px, w, h, margin, changed))                                                                             \
+    X(void, present_badge, (int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed),     \
+      (slot, px, w, h, x, margin, changed))                                                                    \
     X(void, present_swap, (), ())                                                                              \
     X(void, present_save_bmp, (const char* path), (path))                                                      \
     X(bool, present_window_to_game, (float wx, float wy, float* x, float* y), (wx, wy, x, y))
