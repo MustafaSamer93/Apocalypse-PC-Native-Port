@@ -1,14 +1,14 @@
 // Subtitles for the voice lines (APOC.XA): when the first sector of a clip plays, its line from
-// subtitles.txt (next to the exe) is shown at the next frame, on a random side of the screen
-// in the game's font, tilted (game_menu.cpp game_subtitle). The file is read again whenever it
-// changes, so lines can be written while the game runs.
+// runtime/data/subtitles.txt (built into the exe) is shown at the next frame, on a random side of
+// the screen in the game's font, tilted (game_menu.cpp game_subtitle).
 //
 // The clip table is in the EXE (see tools/extract_voice.py): 22 block starts at 0x800A5F80 (in
 // sectors of one channel) and 22 x 16 clip lengths at 0x800A5FD8 (-1 = none); clip "bBB_cCC"
 // starts at APOC.XA sector start * 16 + channel.
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
+#include <cctype>
+#include <cstring>
 #include <map>
 #include <string>
 
@@ -21,7 +21,9 @@ namespace {
 constexpr uint32_t kXaLba = 15704;  // APOC.XA on the (USA) disc
 constexpr uint32_t kPosTable = 0x800A5F80, kLenTable = 0x800A5FD8;
 constexpr int kBlocks = 22, kChannels = 16;
-constexpr const char* kFile = "subtitles.txt";
+const char* const kText =
+#include "subtitles.txt.h"
+    ;
 
 // Clips that are the same recording (byte-identical audio on the USA disc): the first one's
 // line is used for the others when they have none of their own.
@@ -44,7 +46,7 @@ std::string same_recording(const std::string& key) {
 }
 
 std::map<std::string, std::string> g_lines;  // "b14_c08" -> text
-std::filesystem::file_time_type g_file_time{};
+bool g_loaded = false;
 int g_pending_block = -1, g_pending_chan = -1;
 
 uint32_t ram32(uint32_t a) {
@@ -52,17 +54,13 @@ uint32_t ram32(uint32_t a) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-void reload_if_changed() {
-    std::error_code ec;
-    const auto t = std::filesystem::last_write_time(kFile, ec);
-    if (ec || t == g_file_time) return;
-    g_file_time = t;
-    g_lines.clear();
-    FILE* f = std::fopen(kFile, "r");
-    if (!f) return;
-    char buf[512];
-    while (std::fgets(buf, sizeof buf, f)) {
-        std::string line = buf;
+void load_lines() {
+    if (g_loaded) return;
+    g_loaded = true;
+    for (const char* p = kText; *p;) {
+        const char* e = std::strchr(p, '\n');
+        std::string line(p, e ? (size_t)(e - p) : std::strlen(p));
+        p = e ? e + 1 : p + line.size();
         while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
         if (line.empty() || line[0] == '#') continue;
         const size_t eq = line.find('=');
@@ -72,10 +70,20 @@ void reload_if_changed() {
             return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
         };
         std::string key = trim(line.substr(0, eq)), text = trim(line.substr(eq + 1));
+        // The game's font (char map 800E6908) has letters, digits, space and ! % + - . ' only;
+        // anything else draws as its empty box. Commas and '?' are left out ("?!" -> "!", a lone
+        // "?" -> "!"), '#' (censoring) becomes '-', and the rest goes.
+        std::string shown;
+        for (size_t i = 0; i < text.size(); i++) {
+            const char ch = text[i];
+            if (std::isalnum((unsigned char)ch) || std::strchr(" !%+-.'", ch)) shown += ch;
+            else if (ch == '#') shown += '-';
+            else if (ch == '?' && (i + 1 >= text.size() || text[i + 1] != '!')) shown += '!';
+        }
+        text = trim(shown);
         if (!key.empty() && !text.empty()) g_lines[key] = text;
     }
-    std::fclose(f);
-    log_msg(LogCat::Host, "subtitles: %zu lines from %s", g_lines.size(), kFile);
+    log_msg(LogCat::Host, "subtitles: %zu lines", g_lines.size());
 }
 
 }  // namespace
@@ -117,7 +125,7 @@ void subtitle_poll(R3000* c) {
     g_pending_block = g_pending_chan = -1;
     LOG(Host, "voice clip b%02d_c%02d at frame %llu", b, ch, (unsigned long long)host_frame_count());
     if (!g_subtitles) return;
-    reload_if_changed();
+    load_lines();
     char key[16];
     std::snprintf(key, sizeof key, "b%02d_c%02d", b, ch);
     auto it = g_lines.find(key);

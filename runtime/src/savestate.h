@@ -32,6 +32,7 @@ extern uint64_t g_level_render_frame;  // the last frame the level render ran (s
 
 // Auto-save triggers (see savestate.cpp).
 void state_note_level_start();
+void state_note_main_menu();  // the front end built its main menu (game over start point forgotten)
 void state_note_file_loaded(const std::string& name);
 
 // Performs a pending load (and never returns if it succeeds). Called once per frame.

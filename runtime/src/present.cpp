@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "gl_api.h"
@@ -78,51 +79,26 @@ void main() {
 }
 )";
 
-// CRT: gentle curvature, gaussian scanlines at the PS1 line rate, aperture-grille mask.
-const char* kCrtFS = R"(#version 330 core
+// The CRT filter: runtime/shaders/crt_body.glsl (shared with Vulkan's crt.frag).
+const char* kCrtHead = R"(#version 330 core
 uniform sampler2D u_tex;
 uniform vec2 u_tex_size;
 uniform vec4 u_rect;
 uniform vec2 u_out_size;
-uniform float u_lines;       // PS1 lines in the image (240 or 480)
+uniform float u_lines, u_time;
 in vec2 v_uv;
 out vec4 o_color;
-vec3 lin(vec3 c) { return c * c; }
-void main() {
-    vec2 uv = v_uv * 2.0 - 1.0;
-    uv *= 1.0 + vec2(uv.y * uv.y, uv.x * uv.x) * vec2(0.035, 0.045);
-    vec2 pos = uv * 0.5 + 0.5;
-    if (pos.x < 0.0 || pos.x > 1.0 || pos.y < 0.0 || pos.y > 1.0) { o_color = vec4(0.0, 0.0, 0.0, 1.0); return; }
-
-    float lines = u_lines > 300.0 ? u_lines * 0.5 : u_lines;
-    float line_pos = pos.y * lines;
-    float center = floor(line_pos) + 0.5;
-    vec3 acc = vec3(0.0);
-    float wsum = 0.0;
-    for (int i = -1; i <= 1; i++) {
-        float ly = center + float(i);
-        vec2 t = u_rect.xy + vec2(pos.x, ly / lines) * u_rect.zw;
-        vec3 c = lin(texture(u_tex, t / u_tex_size).rgb);
-        float lum = dot(c, vec3(0.3, 0.6, 0.1));
-        float width = mix(0.28, 0.46, lum);          // bright lines bloom wider
-        float d = (line_pos - ly) / width;
-        float w = exp(-0.5 * d * d);
-        acc += c * w;
-        wsum += w;
-    }
-    vec3 col = acc / max(wsum, 0.0001) * 1.0;
-    float beam = clamp(wsum, 0.0, 1.0);
-    col *= mix(0.55, 1.0, beam);
-
-    int m = int(mod(gl_FragCoord.x, 3.0));
-    vec3 mask = m == 0 ? vec3(1.0, 0.72, 0.72) : m == 1 ? vec3(0.72, 1.0, 0.72) : vec3(0.72, 0.72, 1.0);
-    col *= mask * 1.35;
-
-    float vig = 1.0 - 0.18 * dot(uv * vec2(0.8, 0.9), uv * vec2(0.8, 0.9));
-    col *= vig;
-    o_color = vec4(sqrt(clamp(col, 0.0, 1.0)), 1.0);
-}
+#define SRC u_tex
+#define RECT u_rect
+#define TEX_SIZE u_tex_size
+#define OUT_SIZE u_out_size
+#define LINES u_lines
+#define TIME u_time
 )";
+const char* kCrtBody =
+#include "crt_body.glsl.h"
+    ;
+const std::string kCrtFS = std::string(kCrtHead) + kCrtBody + "void main() { o_color = crt(v_uv, gl_FragCoord.x); }\n";
 
 const char* kOverlayFS = R"(#version 330 core
 uniform sampler2D u_tex;
@@ -233,7 +209,10 @@ void draw_image(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, 
     glUniform2f(glGetUniformLocation(prog, "u_tex_size"), (float)tex_w, (float)tex_h);
     glUniform4f(glGetUniformLocation(prog, "u_rect"), (float)x, (float)y, (float)w, (float)h);
     glUniform2f(glGetUniformLocation(prog, "u_out_size"), cw, ch);
-    if (o.crt) glUniform1f(glGetUniformLocation(prog, "u_lines"), (float)native_h);
+    if (o.crt) {
+        glUniform1f(glGetUniformLocation(prog, "u_lines"), (float)crt_lines(native_h));
+        glUniform1f(glGetUniformLocation(prog, "u_time"), crt_time());
+    }
     draw_quad();
     if (fxaa) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -259,7 +238,7 @@ bool gl_present_init(SDL_Window* window) {
     if (!gl_load()) return false;
     log_msg(LogCat::Host, "OpenGL: %s / %s", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
     g_prog_plain = gl_program(kVS, kPlainFS);
-    g_prog_crt = gl_program(kVS, kCrtFS);
+    g_prog_crt = gl_program(kVS, kCrtFS.c_str());
     g_prog_fxaa = gl_program(kVS, kFxaaFS);
     g_prog_overlay = gl_program(kVS, kOverlayFS);
     if (!g_prog_plain || !g_prog_crt || !g_prog_fxaa || !g_prog_overlay) return false;

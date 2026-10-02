@@ -1590,6 +1590,16 @@ extern "C" void psx_hook_glow_sort(R3000* c) {
     static const char* env = std::getenv("APOC_GLOW_SORT");
     static const int bias = env ? std::atoi(env) : 768;  // depth units (0 = the original order)
     if (bias <= 0 || MEM_R32(c, g + kEffectClass) != kLightClass) return;
+    // Lights on the player itself (the gun's muzzle flash, the hit glow) keep the original order:
+    // brought forward they were drawn over the player's body when it faces away from the camera.
+    // ponytail: a fixed radius around the player's origin (muzzle ~530k away); an explosion right
+    // at the player keeps the original cut edges
+    if (const uint32_t p = MEM_R32(c, kPlayerList); valid_ptr(p)) {
+        int64_t d = 0;
+        for (int i = 0; i < 3; i++)
+            d = std::max<int64_t>(d, std::abs((int64_t)(int32_t)MEM_R32(c, g + kEffectPos + 4 * i) - (int32_t)MEM_R32(c, p + 4 + 4 * i)));
+        if (d < 1500000) return;
+    }
     c->r[2] = (uint32_t)(z - std::min(bias, z / 2)) & 0x3FFC;
 }
 extern "C" void psx_hook_glow_end(R3000* c) { gpu_glow_end(MEM_R32(c, 0x800FF668) & 0x1FFFFC); }

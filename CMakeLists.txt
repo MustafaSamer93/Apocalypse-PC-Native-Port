@@ -56,11 +56,21 @@ foreach(src ${VK_SHADERS})
     add_custom_command(OUTPUT ${out}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
         COMMAND glslang-standalone -V --target-env vulkan1.2 --vn kSpv_${var} -o ${out} ${src}
-        DEPENDS ${src} glslang-standalone
+        DEPENDS ${src} ${CMAKE_SOURCE_DIR}/runtime/shaders/crt_body.glsl glslang-standalone
         COMMENT "SPIR-V ${name}")
     list(APPEND VK_SHADER_HEADERS ${out})
 endforeach()
 add_custom_target(vk_shaders DEPENDS ${VK_SHADER_HEADERS})
+# The CRT filters' shared GLSL as a C++ raw string for the OpenGL presenter (present.cpp).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/shaders/crt_body.glsl)
+file(READ ${CMAKE_SOURCE_DIR}/runtime/shaders/crt_body.glsl CRT_BODY)
+file(CONFIGURE OUTPUT ${SHADER_OUT}/crt_body.glsl.h CONTENT "R\"GLSL(@CRT_BODY@)GLSL\"
+" @ONLY)
+# The voice-line subtitles (runtime/data/subtitles.txt) are built into the exe the same way.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/data/subtitles.txt)
+file(READ ${CMAKE_SOURCE_DIR}/runtime/data/subtitles.txt SUBTITLES_TXT)
+file(CONFIGURE OUTPUT ${SHADER_OUT}/subtitles.txt.h CONTENT "R\"SUBS(@SUBTITLES_TXT@)SUBS\"
+" @ONLY)
 
 # ---------------------------------------------------------------- generated code
 # Produced by tools/recomp/main.py from the user's own disc; never committed.

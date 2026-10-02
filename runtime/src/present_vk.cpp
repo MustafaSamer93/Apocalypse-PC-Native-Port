@@ -57,6 +57,7 @@ struct ImagePush {
     float tex_size[2];
     float out_size[2];
     float lines;
+    float time;  // the CRT filter's (crt.frag)
 };
 
 // last game image, for redraws (menus draw it under the overlay)
@@ -240,7 +241,7 @@ void draw_image(VkImg& tex, int tex_w, int tex_h, int x, int y, int w, int h, in
     g_cy = ((float)wh - ch) * 0.5f;
     g_cw = cw;
     g_ch = ch;
-    ImagePush pc{{(float)x, (float)y, (float)w, (float)h}, {(float)tex_w, (float)tex_h}, {cw, ch}, (float)native_h};
+    ImagePush pc{{(float)x, (float)y, (float)w, (float)h}, {(float)tex_w, (float)tex_h}, {cw, ch}, (float)crt_lines(native_h), crt_time()};
     // the source is sampled: make sure it is readable (it is outside any rendering then)
     vkc::end_rendering();
     vkc::transition(tex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

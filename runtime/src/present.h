@@ -11,9 +11,14 @@ enum class Aspect { A4_3, A16_9, A16_10, Stretch };
 
 struct PresentOptions {
     Aspect aspect = Aspect::A4_3;
-    bool crt = false;
+    bool crt = false;  // CRT filter (crt_body.glsl)
     bool fxaa = false;  // edge-smoothing pass (not with the CRT filter)
 };
+
+// CRT filter inputs: beam lines for the PS1 line count (interlaced 480 -> 240), and seconds
+// for the animated parts (wrapped so floats keep their precision).
+inline int crt_lines(int native_h) { return native_h > 300 ? native_h / 2 : native_h; }
+inline float crt_time() { return (float)(SDL_GetTicks() % 600000) / 1000.0f; }
 
 bool present_init(SDL_Window* window);
 void present_shutdown();

@@ -61,6 +61,9 @@ int g_after_load_lives = -1;  // set the lives to this after the next state load
 bool g_boss_reloaded = false;  // the checkpoint was just loaded: the same fight goes on
 std::string g_start_level;  // the level of the first progress point seen in it, and its record
 uint8_t g_start_record[136];
+uint8_t g_restart_record[136];  // the record a game over goes back to (state_poll_restart)
+uint64_t g_restart_at = 0;    // frame to load it at (0 = none)
+constexpr uint32_t kDifficulty = 0x800FF384, kStartLives = 0x800EC522;  // 0 easy 1 normal 2 hard; the game's starting lives
 constexpr uint32_t kLives = 0x800FF874, kRecordLives = 0x6C;  // (the death state keeps lives at record +0x6C)
 uint64_t g_progress_frame = 0;
 std::string g_saved_level, g_saved_restart;  // the point of the last auto-save (or the start)
@@ -213,6 +216,17 @@ bool record_ok(const uint8_t* r) {
     return w[0] == x && r[4] != 0;  // (a level name)
 }
 
+void record_fix(uint8_t* r) {  // word 0 = XOR of words 1..33
+    uint32_t w[kSaveRecordSize / 4], x = 0;
+    std::memcpy(w, r, sizeof w);
+    for (size_t i = 1; i < std::size(w); i++) x ^= w[i];
+    std::memcpy(r, &x, 4);
+}
+void record_name(uint8_t* r, uint32_t addr, size_t n, const char* s) {  // a name field (RAM address)
+    std::memset(r + (addr - kSaveRecord), 0, n);
+    std::memcpy(r + (addr - kSaveRecord), s, std::min(n - 1, std::strlen(s)));
+}
+
 // The auto-save: the save record the game has just made for its progress point.
 bool save_record(R3000* c) {
     uint8_t r[kSaveRecordSize];
@@ -300,6 +314,8 @@ void state_poll_load(R3000* c) {
 }
 
 // Called at the entry of VSync (see SAFEPOINT_FUNCS in tools/recomp/emit.py).
+void state_poll_restart(R3000* c);
+
 extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
     // VSync can also be reached from an interrupt callback; the interrupted context then
     // lives in native frames a state cannot capture, so wait for the main loop's VSync
@@ -307,6 +323,7 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
     uint64_t frame = host_frame_count();
 
     state_poll_load(c);
+    state_poll_restart(c);
     if (g_autoload_request) {  // F1 -> Load auto-save
         g_autoload_request = false;
         if (frame < g_level_render_frame + 30) load_record_in_level(c);
@@ -392,6 +409,16 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             for (uint32_t i = 0; i < 9; i++) MEM_W8(c, kProgressLevel + i, i < std::strlen(lv) ? (uint8_t)lv[i] : 0);
             for (uint32_t i = 0; i < 24; i++) MEM_W8(c, kProgressRestart + i, i < std::strlen(rs) ? (uint8_t)rs[i] : 0);
             MEM_W32(c, 0x800FEEBC + 0x430, 3);
+        }
+    }
+    {  // Debug: APOC_TEST_POKE=FRAME:ADDR:VALUE writes a RAM word (hex address; e.g. 800FF384 = difficulty)
+        static const char* t = std::getenv("APOC_TEST_POKE");
+        static bool done = false;
+        unsigned long long tf = 0;
+        unsigned addr = 0, v = 0;
+        if (t && !done && std::sscanf(t, "%llu:%x:%u", &tf, &addr, &v) == 3 && frame >= tf) {
+            done = true;
+            MEM_W32(c, addr, v);
         }
     }
     {  // Debug: APOC_TEST_TELEPORT=FRAME:X:Y:Z puts the player at X Y Z (e.g. on a trigger)
@@ -565,16 +592,74 @@ extern "C" void psx_hook_game_over(R3000* c) {
         log_msg(LogCat::Core, "death in the boss fight: back to its checkpoint with %u lives", c->r[3]);
         return;
     }
-    if (c->r[3] != 0 || g_start_level.empty() || core_in_ghost() || !record_ok(g_start_record)) return;
-    for (uint32_t i = 0; i < kSaveRecordSize; i++) MEM_W8(c, kSaveRecord + i, g_start_record[i]);
-    uint32_t lives = 0;
-    std::memcpy(&lives, g_start_record + kRecordLives, 4);
-    lives = std::clamp(lives, 1u, 99u);
-    MEM_W32(c, kLives, lives);
-    c->r[3] = lives;
+    if (c->r[3] != 0) return;
+    // Game over: the player respawns here as for a death with a life left, then
+    // state_poll_restart loads a level start through the game's continue path (level state 3, as
+    // F1 -> Load auto-save; the respawn itself only goes to the current checkpoint).
+    uint8_t rec[kSaveRecordSize];
+    uint32_t lives;
+    if (MEM_R32(c, kDifficulty) == 2) {
+        // Hard: the start of the game with a new game's loadout; the current record for the
+        // options it also holds
+        for (uint32_t i = 0; i < kSaveRecordSize; i++) rec[i] = (uint8_t)MEM_R8(c, kSaveRecord + i);
+        record_name(rec, kProgressLevel, 9, "prsn_t");
+        record_name(rec, kProgressRestart, 24, "Re_Start_Prsn");
+        lives = std::clamp<uint32_t>((uint32_t)(int16_t)MEM_R16(c, kStartLives), 1, 99);
+        // a new game's (chapter 1 state): the gun only (1000 rounds), health 100, 3 smart bombs
+        rec[66] = 1;
+        rec[67] = 0;
+        const uint32_t words[][2] = {{68, 1000}, {72, 0}, {76, 0}, {80, 0}, {84, 0}, {88, 0}, {92, 0}, {96, 0},
+                                     {100, 100}, {104, 3}, {108, lives}};
+        for (const auto& w : words) std::memcpy(rec + w[0], &w[1], 4);
+    } else {
+        // Easy / normal: this level's start with what the player had when it began
+        if (g_start_level.empty()) {  // no point recorded since a save state was loaded: the current record
+            std::string restart;
+            read_progress(&g_start_level, &restart);
+            for (uint32_t i = 0; i < kSaveRecordSize; i++) g_start_record[i] = (uint8_t)MEM_R8(c, kSaveRecord + i);
+        }
+        if (g_start_level.empty() || !record_ok(g_start_record)) return;
+        std::memcpy(rec, g_start_record, sizeof rec);
+        static const char* const kStarts[][2] = {
+            {"prsn_t", "Re_Start_Prsn"}, {"sewr_t", "Re_Start_Sewer"}, {"city_t", "Re_Start_City"},
+            {"death_t", "Re_Start_Death"}, {"roof_t", "Re_Roof_Start"}, {"grav_t", "Re_Grav_Start"},
+            {"pest_t", "Re_Start_Pest"}, {"tube_t", "Re_Start_Tube"}, {"war_t", "Re_Start_War"},
+            {"wh_t", "Re_WH_Start"}, {"bst_t", "Re_Bst_Start"}};
+        for (const auto& st : kStarts)
+            if (g_start_level == st[0]) record_name(rec, kProgressRestart, 24, st[1]);
+        std::memcpy(&lives, rec + kRecordLives, 4);
+        lives = std::clamp(lives, 1u, 99u);
+    }
+    record_fix(rec);
+    std::memcpy(g_restart_record, rec, sizeof rec);
+    g_restart_at = host_frame_count() + 30;
+    MEM_W32(c, kLives, 1);
+    c->r[3] = 1;
     g_progress_pending = false;
-    log_msg(LogCat::Core, "game over: %s starts again with %u lives", g_start_level.c_str(), lives);
+    log_msg(LogCat::Core, "game over: %s with %u lives", MEM_R32(c, kDifficulty) == 2 ? "hard, back to the start of the game"
+                                                                                     : ("back to the start of " + g_start_level).c_str(), lives);
 }
+
+// Game over, a moment later: the restart record becomes the progress point and the level loop's
+// state 3 loads its level (the game's continue picture waits for X first).
+void state_poll_restart(R3000* c) {
+    // once the respawn has finished (its section loaded, the level drawing, the player alive):
+    // a state set while it runs is lost
+    const uint64_t frame = host_frame_count();
+    const uint32_t player = MEM_R32(c, 0x800FF5A0);
+    if (!g_restart_at || frame < g_restart_at || core_in_ghost() || frame > g_level_render_frame + 2 || !player ||
+        (int16_t)MEM_R16(c, player + 0xDA) <= 0)
+        return;
+    g_restart_at = 0;
+    log_msg(LogCat::Core, "game over: loading %s %s", (const char*)g_restart_record + 4, (const char*)g_restart_record + 0xD);
+    for (uint32_t i = 0; i < kSaveRecordSize; i++) MEM_W8(c, kSaveRecord + i, g_restart_record[i]);
+    MEM_W32(c, 0x800FEEBC + 0x430, 3);
+    g_progress_pending = false;
+    g_start_level.clear();  // the level records its start point again when it loads
+}
+
+// Back at the main menu: the next level played (new game, load, level select) records its own start.
+void state_note_main_menu() { g_start_level.clear(); }
 
 extern "C" void psx_hook_progress(R3000* c) {
     if (core_in_ghost()) return;

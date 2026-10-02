@@ -24,7 +24,7 @@ executable from your disc image, and the program reads everything else from it a
 | Memory card (`saves/card1.mcr`, emulator-compatible) | working |
 | Save states (5 slots) and auto-save (at each checkpoint and when a level is finished) | working |
 | Frame rate 30 / 60 / 90 / 120 / 150 fps, or Auto (match the display); setting "Frame rate" | working; the game still simulates at 30 Hz |
-| 60 Hz simulation in level 1: player and camera update 60 times a second, everything moves every frame (setting "Simulation") | working in level 1; other levels: optional, untested |
+| 60 Hz simulation in levels 1-4: player and camera update 60 times a second, everything moves every frame (setting "Simulation") | working in levels 1 to 4; other levels: optional, untested |
 | HD texture packs | not implemented |
 | Linux | deferred (the code is portable; build scripts are Windows-only for now) |
 
@@ -34,7 +34,9 @@ Requirements: Visual Studio 2022+ with the C++ workload and the **C++ Clang tool
 Python 3.10+, Git (CMake fetches SDL3, the Vulkan headers, volk and glslang; no Vulkan SDK is
 needed, the Vulkan shaders are compiled during the build).
 
-1. Put `Apocalypse (USA).cue` and its two `.bin` tracks in `assets\`.
+1. Put `Apocalypse (USA).cue` and its two `.bin` tracks in `assets\game disks\`. Optional:
+   a US PlayStation BIOS in `assets\bios\` (plays the boot sequence), HD textures in
+   `assets\replacements\textures\`.
 2. Run `build.bat`.
 3. Run `apocalypse.exe`, which the build puts in the project folder. It needs nothing else
    installed: SDL and the C runtime are built in. It finds `assets\` next to itself, and
@@ -61,8 +63,9 @@ cmake --build build-clang
 
 F1 (or Select+Start held) = settings: save/load states, renderer, resolution, anti-aliasing, aspect ratio, CRT
 filter, texture smoothing, frame rate (original 30 fps or smooth), simulation (60 Hz in
-level 1 by default), controller choice and button remapping.
-F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = quit.
+levels 1-4 by default), chapters (restart points reached so far), controller choice and button
+remapping.
+F2 = chapter list (load any restart point reached so far), F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = quit.
 
 ## Command line
 
@@ -75,7 +78,9 @@ lines, at most 8x), with SSAA + FXAA anti-aliasing, in a 1080-line window, or fu
 screen. `--scale N` asks for a window 240*N lines high instead. `--renderer` overrides the
 saved renderer for this run.
 
-`--sim60` turns the 60 Hz simulation on in every level (default: level 1 only).
+`--sim60` turns the 60 Hz simulation on in every level (default: levels 1-4 only).
+`--chapter N` starts at chapter N, a state kept in `saves/chapters` the first time each restart
+point is reached (the F1 menu lists them).
 `--smooth K` forces K images per game step (1 = the original 30 fps) and `--refresh HZ`
 overrides the detected display refresh rate. A frame rate above the display's refresh is
 presented on a timer with vsync off (the counter in the window title shows it).
@@ -109,7 +114,7 @@ runtime/
   src/mdec.cpp         movie decoder
   src/hw.cpp           DMA, root counters, controller port (SIO0)
   src/smooth.cpp       extra frames between the game's 30 Hz steps (smooth frame rate)
-  src/sim60.cpp        60 Hz simulation (player and camera) for level 1
+  src/sim60.cpp        60 Hz simulation (player and camera) for levels 1-4
   src/host_sdl.cpp     window, audio, input, frame pacing (SDL3)
 ```
 
@@ -129,12 +134,15 @@ Things the game does that the tools have to handle:
   two steps (it did so when the PS1 fell behind). `runtime/src/smooth.cpp` runs that render again
   for fractions of a step, outside emulated time and with the machine rolled back afterwards, and
   shows those images between the game's own.
-- **A 60 Hz simulation for level 1.** `runtime/src/sim60.cpp` makes the level loop tick and
+- **A 60 Hz simulation for levels 1 to 4.** `runtime/src/sim60.cpp` makes the level loop tick and
   render every VBlank, updates the player and cameras on the ticks that did nothing, and retimes
   their per-update amounts (half of each update's change for positions and velocities; whole-
   number counters such as animation frames keep their 30 Hz rate). Enemies and shots keep their
   30 Hz logic; the frame after each world update draws the world half way between before and
   after it (positions, rotations, the screen tint, and animation poses, which are blended per
-  vertex by rendering twice), so everything in level 1 moves every frame.
+  vertex by rendering twice; jointed models' joint matrices half way), so everything moves every
+  frame. What other objects do to the player in a world update (level 2's currents and chute,
+  knockback) is kept whole rather than halved, and force zones push the player on every tick at
+  half strength.
 - **The game reads controllers directly over SIO.** Byte and `/ACK` timing are modelled,
   because the driver clears IRQ flags between the reply and the `/ACK`.

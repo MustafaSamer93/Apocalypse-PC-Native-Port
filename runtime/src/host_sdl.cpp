@@ -42,7 +42,7 @@ SDL_AudioStream* g_audio = nullptr;
 struct GfxSettings {
     int scale = 5;          // 0 = software renderer, 1..8 = OpenGL internal resolution (5 = 1200 lines)
     Aspect aspect = Aspect::A16_9;
-    bool crt = false;
+    bool crt = false;       // CRT filter (present.cpp / present_vk.cpp)
     bool texture_filter = false;
     int fps = 0;            // images per second: 0 = match the display, 30 = original, 60..150 (smooth.cpp)
     int aa = 3;             // anti-aliasing: bit 0 = FXAA pass, bit 1 = supersampling (SSAA)
@@ -658,18 +658,24 @@ static void run_settings_menu();
 static void run_chapter_menu();
 static bool g_shot_key = false;  // F12: save the next frame to debug/ (maybe_screenshot)
 
+// The mouse pointer hides after 2 s without mouse use and shows again when it is used.
+// Called with every event (null = no event, just the timer) by both event loops.
+static void mouse_autohide(const SDL_Event* e) {
+    static uint64_t used = SDL_GetTicks();
+    if (e && (e->type == SDL_EVENT_MOUSE_MOTION || e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_WHEEL)) {
+        used = SDL_GetTicks();
+        if (!SDL_CursorVisible()) SDL_ShowCursor();
+    }
+    if (!e && SDL_CursorVisible() && SDL_GetTicks() - used > 2000) SDL_HideCursor();
+}
+
 void host_poll() {
     bool open_menu = false, open_chapters = false;
-    // the mouse pointer hides after 2 s without moving and shows again when it moves
-    static uint64_t mouse_moved = SDL_GetTicks();
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
+        mouse_autohide(&e);
         switch (e.type) {
             case SDL_EVENT_QUIT: g_quit = true; break;
-            case SDL_EVENT_MOUSE_MOTION:
-                mouse_moved = SDL_GetTicks();
-                if (!SDL_CursorVisible()) SDL_ShowCursor();
-                break;
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) g_quit = true;
                 if (e.key.scancode == SDL_SCANCODE_F1 && !e.key.repeat) open_menu = true;
@@ -712,7 +718,7 @@ void host_poll() {
     combo_frames = ((held & B_SELECT) && (held & B_START)) ? combo_frames + 1 : 0;
     if (combo_frames == 90) open_menu = true;
     if (static const char* t = std::getenv("APOC_MENU_AT"); t && g_frame == std::strtoull(t, nullptr, 10)) open_menu = true;  // tests
-    if (SDL_CursorVisible() && SDL_GetTicks() - mouse_moved > 2000) SDL_HideCursor();
+    mouse_autohide(nullptr);
     if (open_menu && g_gl_ok) run_settings_menu();
     else if (open_chapters && g_gl_ok) run_chapter_menu();
 }
@@ -1319,7 +1325,7 @@ const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
                                   "Font scaling", "Renderer", "Screen mode", "Resolution", "Aspect ratio", "Display",
                                   "Autosave", "One-liners", "Anti-aliasing", "Infinite health", "Infinite lives",
-                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "Boot sequence"};
+                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "Boot sequence", "CRT filter"};
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -1346,6 +1352,7 @@ std::string enh_value(int id) {
         case E_AA: return kAaNames[std::clamp(g_gfx.aa, 0, 3)];
         case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
         case E_BOOT: return g_boot_sequence ? "On" : "Off";
+        case E_CRT: return g_gfx.crt ? "On" : "Off";
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
         case E_CHEAT_WEAPONS:
@@ -1390,6 +1397,7 @@ void enh_change(int id, int dir) {
         case E_SUBTITLES: g_subtitles = !g_subtitles; break;  // subtitles.cpp
         case E_AA: g_gfx.aa = (g_gfx.aa + dir + 4) % 4; break;
         case E_FPS_COUNTER: g_fps_counter = !g_fps_counter; break;
+        case E_CRT: g_gfx.crt = !g_gfx.crt; break;  // present.cpp / present_vk.cpp
         case E_BOOT: g_boot_sequence = !g_boot_sequence; break;  // bios.cpp: from the next start
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
@@ -1536,7 +1544,9 @@ MenuResult pump_menu_events(std::vector<SDL_Scancode>& keys) {
                        : k == 'r' ? SDL_SCANCODE_RIGHT : k == 'x' ? SDL_SCANCODE_ESCAPE : SDL_SCANCODE_RETURN);
     }
     SDL_Event e;
+    mouse_autohide(nullptr);
     while (SDL_PollEvent(&e)) {
+        mouse_autohide(&e);
         switch (e.type) {
             case SDL_EVENT_QUIT: return MenuResult::Quit;
             case SDL_EVENT_KEY_DOWN: keys.push_back(e.key.scancode); break;
@@ -1908,7 +1918,7 @@ static void run_settings_menu() {
                 case R_AA: return choice("Anti-aliasing", kAaNames[g_gfx.aa]);
                 case R_MSAA: return choice("AA rate (MSAA)", msaa_label());
                 case R_ASPECT: return choice("Aspect ratio", kAspect[(int)g_gfx.aspect]);
-                case R_CRT: return choice("CRT filter", g_gfx.crt ? "On" : "Off");
+                case R_CRT: return choice(enh_name(E_CRT), enh_value(E_CRT));
                 case R_FILTER: return choice("Smooth textures", g_gfx.texture_filter ? "On" : "Off");
                 case R_DUMP_TEX: return choice("Dump textures", g_tex_dump ? "On (assets/dumps/textures)" : "Off");
                 case R_TEX_REPLACE: return choice("Texture replacements", g_tex_replace ? "[x] On" : "[ ] Off (original)");

@@ -36,7 +36,7 @@ int psx_opt_menu_odd = 0;
 namespace {
 
 constexpr uint32_t kStrings = 0x800A54E4;  // the game's text table
-constexpr int kStrMiscOptions = 65, kStrReturnToMain = 66, kStrReturnToOptions = 48;
+constexpr int kStrMiscOptions = 65, kStrReturnToMain = 66, kStrReturnToOptions = 48, kStrSelectLevel = 38, kStrLoadGame = 60;
 constexpr uint32_t kMenuInit = 0x80015228, kMenuAdd = 0x80015474, kMenuLayout = 0x800152F8,
                    kMenuSelect = 0x80015374, kMenuDraw = 0x800156E0, kMenuKeys = 0x80017364,
                    kAlloc = 0x8002FED8, kFree = 0x8002FF34;
@@ -49,15 +49,16 @@ constexpr uint32_t kButtons = 0x800EC0F8;  // 16 bytes a button: +0 held, +1 pre
 constexpr uint32_t kGpRepeat = 0x800FEEBC + 344, kUpdateCount = 0x800FF2F0;
 
 // Our pages: their settings (host_sdl.cpp enh_*), in order.
-constexpr int kEnhSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_FPS, E_FPS_COUNTER, E_FONT_SCALE,
+constexpr int kEnhSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_CRT, E_FPS, E_FPS_COUNTER, E_FONT_SCALE,
                                 E_AUTOSAVE, E_SUBTITLES, E_BOOT};
 constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT};
 // The game's own options, for the pause menu (the front end has its own pages for them); ids
 // after the enhancement settings. Found in the front end (80011BA0) and 80016014 (options from
 // a save): the volumes are s16 at 800ECC78.., difficulty and vibration words.
-enum GameOpt { G_FX = 1000, G_MUSIC, G_VOICE, G_DIFFICULTY, G_VIBRATION };
+enum GameOpt { G_FX = 1000, G_MUSIC, G_VOICE, G_DIFFICULTY, G_VIBRATION, G_PAD_WEAPON, G_PAD_CROUCH, G_PAD_JUMP, G_PAD_BOMB };
 constexpr int kSoundSettings[] = {G_FX, G_MUSIC, G_VOICE};
 constexpr int kGameSettings[] = {G_DIFFICULTY, G_VIBRATION};
+constexpr int kPadSettings[] = {G_PAD_WEAPON, G_PAD_CROUCH, G_PAD_JUMP, G_PAD_BOMB};
 struct Page {
     const char* label;
     const int* settings;
@@ -67,6 +68,7 @@ struct Page {
 constexpr Page g_pages[] = {
     {"sound", kSoundSettings, (int)std::size(kSoundSettings), true},
     {"game", kGameSettings, (int)std::size(kGameSettings), true},
+    {"controller config", kPadSettings, (int)std::size(kPadSettings), true},
     {"enhancements", kEnhSettings, (int)std::size(kEnhSettings), false},
     {"cheats", kCheatSettings, (int)std::size(kCheatSettings), false},
 };
@@ -160,7 +162,20 @@ constexpr GameOptInfo kGameOpts[] = {
     {"voice level", 0x800ECC7C, 16, 255, false},
     {"difficulty", 0x800FF384, 1, 2, true},  // easy, normal, hard
     {"vibration", 0x800FF2FC, 1, 2, true},   // none, some, full
+    // controller config (front end 800139B8): the shoulder button of each action, one bit each
+    // (1 l2, 2 r2, 4 l1, 8 r1), halfwords in the options block (pad_offset)
+    {"weapon select", 0, 0, 0, false},
+    {"crouch", 0, 0, 0, false},
+    {"jump", 0, 0, 0, false},
+    {"smart bomb", 0, 0, 0, false},
 };
+// The options block's halfword of controller-config action k: the front end edits the digital set
+// for a digital pad (id 0x41 at button table +364), the analog set otherwise.
+constexpr uint32_t kPadOptions = 0x800EC474, kButtonTable = 0x800EC0F8;
+uint32_t pad_offset(R3000* c, int k) {
+    static const uint32_t digital[4] = {6, 0, 2, 4}, analog[4] = {38, 32, 34, 36};
+    return kPadOptions + (MEM_R32(c, kButtonTable + 364) == 0x41 ? digital : analog)[k];
+}
 constexpr uint32_t kSeqSetVol = 0x8008F56C, kGpSeq = 0x800FEEBC + 2032;  // music: (seq, left, right)
 
 int game_opt_get(R3000* c, const GameOptInfo& o) { return o.word ? (int32_t)MEM_R32(c, o.addr) : (int16_t)MEM_R16(c, o.addr); }
@@ -171,6 +186,15 @@ std::string opt_value(R3000* c, int id) {
     if (id < G_FX) return enh_value(id);
     const GameOptInfo& o = kGameOpts[id - G_FX];
     const int v = game_opt_get(c, o);
+    if (id >= G_PAD_WEAPON) {
+        switch (MEM_R16(c, pad_offset(c, id - G_PAD_WEAPON))) {
+            case 1: return "l2";
+            case 2: return "r2";
+            case 4: return "l1";
+            case 8: return "r1";
+        }
+        return "";
+    }
     if (id == G_DIFFICULTY || id == G_VIBRATION) {
         static const char* names[2][3] = {{"easy", "normal", "hard"}, {"none", "some", "full"}};
         return names[id == G_VIBRATION][std::clamp(v, 0, 2)];
@@ -180,6 +204,23 @@ std::string opt_value(R3000* c, int id) {
 
 void opt_change(R3000* c, int id, int dir) {
     if (id < G_FX) return enh_change(id, dir);
+    if (id >= G_PAD_WEAPON) {
+        // next button (l1 r1 l2 r2); the action that had it takes this one's (as the front end's
+        // 80011860), then the button table is rebuilt as the game does after loading options (800710B4)
+        static const uint16_t order[4] = {4, 8, 1, 2};
+        const uint32_t at = pad_offset(c, id - G_PAD_WEAPON);
+        const uint16_t cur = MEM_R16(c, at);
+        int k = 0;
+        while (k < 4 && order[k] != cur) k++;
+        const uint16_t next = order[(k + (dir > 0 ? 1 : 3)) % 4];
+        for (int j = 0; j < 4; j++)
+            if (pad_offset(c, j) != at && MEM_R16(c, pad_offset(c, j)) == next) MEM_W16(c, pad_offset(c, j), cur);
+        MEM_W16(c, at, next);
+        auto h = [c](uint32_t off) { return (uint32_t)(int32_t)(int16_t)MEM_R16(c, kPadOptions + off); };
+        game_call(c, 0x8006FDFC, kButtonTable, h(0), h(2), h(4), {h(6)});
+        game_call(c, 0x8006FE14, kButtonTable, 3, 2, 1, {0, h(32), h(34), h(36), h(38)});
+        return;
+    }
     const GameOptInfo& o = kGameOpts[id - G_FX];
     int v = game_opt_get(c, o) + dir * o.step;
     if (o.word) v = (v + o.max + 1) % (o.max + 1);  // choices go round
@@ -233,6 +274,24 @@ void append_item(R3000* c, uint32_t menu, uint32_t text) {
     if (n >= (int)kMaxItems || (n > 0 && MEM_R32(c, item(menu, n - 1)) == text)) return;
     game_call(c, kMenuAdd, menu, text);
     MEM_W32(c, menu + 16, (uint32_t)((int32_t)MEM_R32(c, menu + 16) - (int32_t)MEM_R32(c, menu + 20) / 2));
+}
+
+// Moves the item with `text` to just after the one with `after` (no change once it is there).
+void move_after(R3000* c, uint32_t menu, uint32_t text, uint32_t after) {
+    const int n = std::min<int>(MEM_R8(c, menu + 10), kMaxItems);
+    int from = -1, to = -1;
+    for (int i = 0; i < n; i++) {
+        if (MEM_R32(c, item(menu, i)) == text) from = i;
+        if (MEM_R32(c, item(menu, i)) == after) to = i + 1;
+    }
+    if (from < 0 || to < 0 || from == to) return;
+    uint8_t moved[kItemSize];
+    for (uint32_t b = 0; b < kItemSize; b++) moved[b] = (uint8_t)MEM_R8(c, item(menu, from) + b);
+    const int step = from < to ? 1 : -1;
+    if (from < to) to--;  // (the items between shift up)
+    for (int i = from; i != to; i += step)
+        for (uint32_t b = 0; b < kItemSize; b++) MEM_W8(c, item(menu, i) + b, MEM_R8(c, item(menu, i + step) + b));
+    for (uint32_t b = 0; b < kItemSize; b++) MEM_W8(c, item(menu, to) + b, moved[b]);
 }
 
 // The menu shown in place of the host's.
@@ -375,8 +434,17 @@ extern "C" void psx_hook_menu_add(R3000* c) {
     if (c->r[31] == kMainMade) {
         g_main = menu;
         g_song_started = false;
-        if (!g_main_text) g_main_text = game_call(c, kAlloc, 16);
+        if (!g_main_text) g_main_text = game_call(c, kAlloc, 32);
         if (g_main_text) write_text(c, g_main_text, "exit to desktop", 16);
+        // The game's own "select level" item (its level-select cheat flag, read only here), named
+        // "level selection": the menu is built from the text table after this and the game knows
+        // the item by that table entry, so the entry points at our text.
+        MEM_W32(c, 0x800FF330, 1);
+        if (g_main_text) {
+            write_text(c, g_main_text + 16, "level selection", 16);
+            MEM_W32(c, kStrings + 4 * kStrSelectLevel, g_main_text + 16);
+        }
+        state_note_main_menu();
         return;
     }
     if (c->r[31] == kPauseMade) {
@@ -493,6 +561,7 @@ extern "C" int psx_hook_menu_draw(R3000* c) {
             }
         }
         if (g_main_text) append_item(c, menu, g_main_text);
+        move_after(c, menu, text_of(c, kStrSelectLevel), text_of(c, kStrLoadGame));
     }
     if (g_pause.menu && menu == g_pause.menu && g_pause_block) append_item(c, menu, pause_text(kPauseExit));
     for (Host* h : {&g_opt, &g_pause}) {
