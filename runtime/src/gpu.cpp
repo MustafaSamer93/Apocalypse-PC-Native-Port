@@ -552,7 +552,10 @@ void draw_polygon(const uint32_t* w) {
     if (hw_active()) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi; p.gouraud = gouraud;
-        p.smooth = textured && g_smooth_font && g_gpu_packet_addr && text_packet(g_gpu_packet_addr);
+        // the game's text (2D, also when tilted on the screen: subtitles, "Auto Saved"): never
+        // precise 3D - its corners would be taken for 3D points projected to the same pixels
+        const bool text = g_gpu_packet_addr && text_packet(g_gpu_packet_addr);
+        p.smooth = textured && g_smooth_font && text;
         p.whiten = textured && !semi && g_gpu_packet_addr && !g_white_packets.empty() && white_packet(g_gpu_packet_addr);
         if (textured) {  // the texels it may use (the shader clamps to them)
             int u0 = v[0].u, u1 = v[0].u, v0 = v[0].v, v1 = v[0].v;
@@ -572,7 +575,8 @@ void draw_polygon(const uint32_t* w) {
             h[i] = hw_vtx(v[i]);
             if (k != 1.0f) h[i].x = cx + (h[i].x - cx) * k;
         }
-        if (const Tilt* t = g_gpu_packet_addr && !g_tilts.empty() ? tilt_of(g_gpu_packet_addr) : nullptr) {
+        const Tilt* tilt = g_gpu_packet_addr && !g_tilts.empty() ? tilt_of(g_gpu_packet_addr) : nullptr;
+        if (const Tilt* t = tilt) {
             // turned on the screen, where a VRAM pixel is 0.625 lines wide (320 x 240 shown as 4:3)
             constexpr float kPixel = 320.0f / 512.0f;
             float px = t->x + (float)S.off_x, py = t->y + (float)S.off_y;
@@ -595,7 +599,7 @@ void draw_polygon(const uint32_t* w) {
             for (int i = 0; i < nv; i++)
                 if (pgxp_uv_find(uva[i], uvw[i], &h[i].u, &h[i].v) && show_uv) p.gouraud = true, h[i].r = h[i].b = 0, h[i].g = 255;
         }
-        if (g_gte_precise && k == 1.0f) {
+        if (g_gte_precise && k == 1.0f && !text && !tilt) {
             // the vertex the word itself came from (PGXP), else one projected to that pixel
             GtePrecise pr[4];
             bool nc[4], shadow_all = true;
