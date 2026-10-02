@@ -45,6 +45,7 @@ Picture g_pictures[] = {
 // on top of it (PRESS START) must stay.
 bool g_check[2] = {};
 bool g_replaced[2] = {};  // the buffer shows a replacement (a copy of it carries it along)
+bool g_title[2] = {};     // the buffer holds the title picture (replaced or not)
 
 int buffer_of(int x, int y, int w, int h) {  // the frame buffer a rectangle touches, -1 = none
     for (int b = 0; b < 2; b++)
@@ -164,6 +165,7 @@ void replace_note_upload(int x, int y, int w, int h) {
         if (x < 512 && x + w > 0 && y < b * 256 + 240 && y + h > b * 256) {
             g_check[b] = true;
             g_replaced[b] = false;
+            g_title[b] = false;
         }
 }
 
@@ -173,19 +175,26 @@ void replace_note_copy(int sx, int sy, int dx, int dy, int w, int h) {
     const int from = buffer_of(sx, sy, w, h), to = buffer_of(dx, dy, w, h);
     // a copy onto itself changes nothing (the title does a 2x1 one after drawing PRESS START)
     if (to < 0 || (sx == dx && sy == dy)) return;
+    const bool title = from >= 0 && from != to && g_title[from] && sx == 0 && dx == 0 && w >= 512 && h >= 240;
     if (from >= 0 && from != to && g_replaced[from] && sx == 0 && dx == 0 && sy % 256 == 0 && dy % 256 == 0 &&
         w >= 512 && h >= 240) {
         g_replaced[to] = true;
         g_check[to] = false;
+        g_title[to] = title;
         return;
     }
     replace_note_upload(dx, dy, w, h);
+    g_title[to] = title;
 }
 
 void replace_note_vram_reset() {
     g_check[0] = g_check[1] = true;
     g_replaced[0] = g_replaced[1] = false;
+    g_title[0] = g_title[1] = false;
 }
+
+// The title screen's picture is in the frame buffer at `display_y` (host_sdl.cpp: the version label).
+bool replace_title_shown(int display_y) { return g_title[(display_y >> 8) & 1]; }
 
 // At each VBlank: after an upload into the frame buffers, look for a known picture there.
 void replace_check(const uint16_t* vram) {
@@ -197,7 +206,9 @@ void replace_check(const uint16_t* vram) {
         g_check[b] = false;
         const int y = b * 256;
         for (Picture& p : g_pictures) {
-            if (content_hash(vram, 0, y, p.w, p.h) != p.hash || !load(p)) continue;
+            if (content_hash(vram, 0, y, p.w, p.h) != p.hash) continue;
+            if (&p == &g_pictures[0]) g_title[b] = true;
+            if (!load(p)) continue;
             fit(p, hw_scale(), aspect);
             hw_draw_picture(0, y, p.w, p.h, p.fitted.data());
             g_replaced[b] = true;

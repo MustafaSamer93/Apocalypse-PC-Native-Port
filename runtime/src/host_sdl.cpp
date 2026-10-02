@@ -162,7 +162,7 @@ void draw_toast() {
 
 // The version, on the title screen and while the game's menus are up.
 void draw_version() {
-    if (gpu_title_screen()) draw_badge(1, kVersion, (int)std::strlen(kVersion) + 1, true);
+    if (gpu_title_screen() || replace_title_shown(gpu_display().y)) draw_badge(1, kVersion, (int)std::strlen(kVersion) + 1, true);
 }
 
 PresentOptions present_options() {
@@ -1083,12 +1083,12 @@ static void draw_game(const GpuDisplay& d, double frac) {
     PresentOptions opt = present_options();
     const int crop = movie_crop(h);
     // A replacement movie (movie.cpp) in place of the game's own movie picture, cropped like it.
-    if (int mw = 0, mh = 0; d.enabled && d.rgb24) {
+    if (int mw = 0, mh = 0; d.enabled && d.rgb24 && gpu_movie_playing()) {
         if (const uint32_t* px = movie_picture(&mw, &mh)) {
             const int mc = (int)((int64_t)crop * mh / h);
             present_game_pixels(px + (size_t)mc * mw, mw, mh - 2 * mc, opt);
-            if (g_last_image != (smooth_flips() << 8 | 1)) g_images++;
-            g_last_image = smooth_flips() << 8 | 1;
+            if (g_last_image != (uint64_t)(uintptr_t)px) g_images++;  // (each new movie frame)
+            g_last_image = (uint64_t)(uintptr_t)px;
             maybe_screenshot();
             draw_toast();
             draw_fps_counter();
@@ -1152,7 +1152,7 @@ static void draw_game(const GpuDisplay& d, double frac) {
     present_game_pixels(g_pixels.data() + (size_t)crop * w, w, h - 2 * crop, opt);
     maybe_screenshot();
     draw_toast();
-    if (!d.rgb24) draw_version();  // (24-bit = a movie)
+    draw_version();  // (the title screen's moving background is a 24-bit movie too)
     draw_fps_counter();
     maybe_screenshot_overlays();
     present_swap();
@@ -1209,7 +1209,7 @@ static void bot_step() {
 void host_present(const GpuDisplay& d) {
     bot_step();
     g_frame++;
-    movie_vblank(d.enabled && d.rgb24);
+    movie_vblank(d.enabled && d.rgb24 && gpu_movie_playing());
     run_state_script();
     state_poll_load(g_cpu);
     if (g_dump_vram_frame && g_frame == g_dump_vram_frame) {

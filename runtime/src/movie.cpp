@@ -130,6 +130,31 @@ template <class T> void release(T*& p) {
     p = nullptr;
 }
 
+// The video frame rate an MKV file's header gives (its video track's DefaultDuration, 23 E3 83,
+// next to its "V_..." codec id), 0 if none. Windows' MKV reader reports half of it for some
+// H.264 files, and its video processor then drops every other frame.
+double mkv_fps(const std::wstring& file) {
+    std::vector<char> b(1 << 20);
+    FILE* f = _wfopen(file.c_str(), L"rb");
+    if (!f) return 0;
+    b.resize(std::fread(b.data(), 1, b.size(), f));
+    std::fclose(f);
+    const std::string s(b.begin(), b.end());
+    for (size_t v = s.find("V_"); v != std::string::npos; v = s.find("V_", v + 2)) {
+        size_t best = std::string::npos;
+        for (size_t d = s.find("\x23\xE3\x83", v > 256 ? v - 256 : 0); d != std::string::npos && d < v + 256;
+             d = s.find("\x23\xE3\x83", d + 3))
+            if (best == std::string::npos || (d > v ? d - v : v - d) < (best > v ? best - v : v - best)) best = d;
+        if (best == std::string::npos || best + 4 >= s.size()) continue;
+        const uint8_t len = (uint8_t)s[best + 3];  // a one-byte EBML size: 0x80 | n
+        if ((len & 0xF8) != 0x80 || (len & 7) == 0 || best + 4 + (len & 7) > s.size()) continue;
+        uint64_t ns = 0;
+        for (int i = 0; i < (len & 7); i++) ns = ns << 8 | (uint8_t)s[best + 4 + i];
+        if (ns) return 1e9 / (double)ns;
+    }
+    return 0;
+}
+
 // The decoder thread: reads the file in order, keeping a few pictures and some sound ahead.
 void decode(std::wstring file, int* out_w, int* out_h, bool* has_audio, std::atomic<bool>* ready) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -144,9 +169,11 @@ void decode(std::wstring file, int* out_w, int* out_h, bool* has_audio, std::ato
     bool audio = false;
     if (SUCCEEDED(hr)) {
         IMFMediaType* native = nullptr;
-        UINT32 nw = 0, nh = 0;
-        if (SUCCEEDED(rd->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &native)))
+        UINT32 nw = 0, nh = 0, rn = 0, rd_ = 0;
+        if (SUCCEEDED(rd->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &native))) {
             MFGetAttributeSize(native, MF_MT_FRAME_SIZE, &nw, &nh);
+            MFGetAttributeRatio(native, MF_MT_FRAME_RATE, &rn, &rd_);
+        }
         release(native);
         if (nh > (UINT32)kMaxLines) nw = (UINT32)((uint64_t)nw * kMaxLines / nh) & ~1u, nh = kMaxLines;
         IMFMediaType* t = nullptr;
@@ -154,6 +181,12 @@ void decode(std::wstring file, int* out_w, int* out_h, bool* has_audio, std::ato
         t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         t->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
         if (nw && nh) MFSetAttributeSize(t, MF_MT_FRAME_SIZE, nw, nh);
+        // the file's own frame rate where Windows reports less (else frames are dropped)
+        const double native_fps = rd_ ? (double)rn / rd_ : 0, header_fps = mkv_fps(file);
+        if (header_fps > native_fps + 0.5)
+            MFSetAttributeRatio(t, MF_MT_FRAME_RATE, (UINT32)std::lround(header_fps * 1000), 1000);
+        log_msg(LogCat::Host, "replacement movie: %.2f fps (Windows reports %.2f)", header_fps > native_fps ? header_fps : native_fps,
+                native_fps);
         hr = rd->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, t);
         release(t);
         IMFMediaType* cur = nullptr;

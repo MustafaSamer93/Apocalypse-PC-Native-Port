@@ -1227,7 +1227,8 @@ extern "C" void psx_hook_2d(R3000* c, int stage) {
 uint64_t g_press_start_seen = 0, g_menu_drawn = 0;
 bool gpu_title_screen() {
     const uint64_t f = host_frame_count();
-    return (g_press_start_seen && f - g_press_start_seen < 90) || (g_menu_drawn && f - g_menu_drawn < 4);
+    // (both are drawn every frame - "Press start" blinks by colour - so a few frames of grace suffice)
+    return (g_press_start_seen && f - g_press_start_seen < 4) || (g_menu_drawn && f - g_menu_drawn < 4);
 }
 
 // Entry hooks on the text routine (8001AA28, a2 = the text) and the icon routines: run the
