@@ -29,6 +29,7 @@
 #include "savestate.h"
 
 int g_menu_zoom = 60;
+extern uint64_t g_menu_drawn;  // gpu.cpp
 int psx_opt_menu60 = 0;
 int psx_opt_menu_odd = 0;
 
@@ -471,6 +472,9 @@ extern "C" int psx_hook_menu_draw(R3000* c) {
     static bool inside = false;
     if (inside) return 0;
     const bool ghost = core_in_ghost();  // a render that is rolled back: our state stays
+    if (!ghost) {
+        g_menu_drawn = host_frame_count();  // gpu.cpp: the version number shows while a menu is up
+    }
     uint32_t menu = c->r[4];
     if (g_load && menu == g_load) {
         sync_load_menu(c);

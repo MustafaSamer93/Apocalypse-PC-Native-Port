@@ -1221,10 +1221,14 @@ extern "C" void psx_hook_2d(R3000* c, int stage) {
     }
 }
 
-// The title screen's blinking "Press start" (str#2 at 800A0818) was drawn this recently: the
-// version number is shown in its corner (host_sdl.cpp draw_version).
-uint64_t g_press_start_seen = 0;
-bool gpu_title_screen() { return g_press_start_seen && host_frame_count() - g_press_start_seen < 90; }
+// The version number is shown in the corner (host_sdl.cpp draw_version) on the title screen
+// (its blinking "Press start", str#2 at 800A0818, was drawn this recently) and while one of the
+// game's menus is drawn (game_menu.cpp: front end, Start's pause menu); not in play or movies.
+uint64_t g_press_start_seen = 0, g_menu_drawn = 0;
+bool gpu_title_screen() {
+    const uint64_t f = host_frame_count();
+    return (g_press_start_seen && f - g_press_start_seen < 90) || (g_menu_drawn && f - g_menu_drawn < 4);
+}
 
 // Entry hooks on the text routine (8001AA28, a2 = the text) and the icon routines: run the
 // routine and note the packets it made.

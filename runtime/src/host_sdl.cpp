@@ -155,7 +155,7 @@ void draw_toast() {
     present_overlay_end();
 }
 
-// The version in the title screen's lower-right corner.
+// The version in the lower-right corner of the title screen and the game's menus.
 void draw_version() {
     if (!gpu_title_screen()) return;
     SDL_Renderer* r = present_overlay_begin();
@@ -1138,7 +1138,7 @@ static void draw_game(const GpuDisplay& d, double frac) {
     present_game_pixels(g_pixels.data() + (size_t)crop * w, w, h - 2 * crop, opt);
     maybe_screenshot();
     draw_toast();
-    draw_version();
+    if (!d.rgb24) draw_version();  // (24-bit = a movie)
     draw_fps_counter();
     maybe_screenshot_overlays();
     present_swap();
