@@ -18,6 +18,9 @@
 #define NOMINMAX
 #include <windows.h>
 #include <wincodec.h>
+#else
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
 #endif
 
 bool g_tex_dump = std::getenv("APOC_TEX_DUMP") != nullptr;  // session only (not saved); APOC_TEX_DUMP=1 for tests
@@ -59,7 +62,12 @@ bool write_png(const std::wstring& path, const std::vector<uint32_t>& bgra, int 
     return ok;
 }
 #else
-bool write_png(const std::wstring&, const std::vector<uint32_t>&, int, int) { return false; }
+bool write_png(const std::wstring& path, const std::vector<uint32_t>& bgra, int w, int h) {
+    std::vector<uint32_t> rgba(bgra.size());
+    for (size_t i = 0; i < bgra.size(); i++)
+        rgba[i] = (bgra[i] & 0xFF00FF00u) | (bgra[i] >> 16 & 0xFF) | (bgra[i] & 0xFF) << 16;
+    return stbi_write_png(std::filesystem::path(path).string().c_str(), w, h, 4, rgba.data(), w * 4) != 0;
+}
 #endif
 
 uint32_t bgra_of(uint16_t c) {

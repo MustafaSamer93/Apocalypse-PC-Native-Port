@@ -23,6 +23,8 @@
 #define NOMINMAX
 #include <windows.h>
 #include <io.h>
+#else
+#include <unistd.h>
 #endif
 
 constexpr const char* kVersion = "v1.0";
@@ -373,6 +375,8 @@ void save_settings() {
     const bool ok = std::fflush(f) == 0 && !std::ferror(f);
 #ifdef _WIN32
     if (ok) _commit(_fileno(f));
+#else
+    if (ok) fsync(fileno(f));
 #endif
     std::fclose(f);
 #ifdef _WIN32
@@ -521,7 +525,7 @@ void remove_device(SDL_JoystickID id) {
 // display adapters next to its AMD GPU; every build closed there without a word). On Windows the
 // crash is caught, but SDL is left broken by it (the game then hung on a black screen), so the
 // renderer setting is switched to Vulkan and the game starts again as a new process.
-static bool g_gl_crashed = false;
+[[maybe_unused]] static bool g_gl_crashed = false;
 static SDL_Window* create_window(const char* title, int w, int h, SDL_WindowFlags flags) {
 #ifdef _WIN32
     __try {
@@ -568,6 +572,8 @@ void report_header() {
     GlobalMemoryStatusEx(&mem);
     log_msg(LogCat::Host, "memory: %llu MB, %llu MB free", (unsigned long long)(mem.ullTotalPhys >> 20),
             (unsigned long long)(mem.ullAvailPhys >> 20));
+#else
+    log_msg(LogCat::Host, "system: %s", SDL_GetPlatform());
 #endif
     log_msg(LogCat::Host, "processor: %d logical cores, %d MB RAM (SDL)", SDL_GetNumLogicalCPUCores(), SDL_GetSystemRAM());
     if (FILE* f = std::fopen(settings_file(), "r")) {  // the settings, as saved
@@ -1061,7 +1067,11 @@ static void maybe_screenshot() {
     std::filesystem::create_directories("debug", ec);
     const std::time_t now = std::time(nullptr);
     std::tm tm{};
+#ifdef _WIN32
     localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
     char stamp[32];
     std::strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm);
     std::string path = std::string("debug/shot_") + stamp + ".bmp";
@@ -1215,7 +1225,8 @@ static void bot_step() {
                 std::fprintf(f, "health %d\npos %d %d %d\n", (int16_t)MEM_R16(g_cpu, p + 0xDA), (int32_t)MEM_R32(g_cpu, p + 4),
                              (int32_t)MEM_R32(g_cpu, p + 8), (int32_t)MEM_R32(g_cpu, p + 12));
             std::fclose(f);
-            MoveFileExA((d + "/state.tmp").c_str(), (d + "/state.txt").c_str(), MOVEFILE_REPLACE_EXISTING);
+            std::error_code ec;  // (replaces state.txt)
+            std::filesystem::rename(d + "/state.tmp", d + "/state.txt", ec);
         }
     }
     const std::string cmd = d + "/cmd.txt";

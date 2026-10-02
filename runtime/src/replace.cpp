@@ -23,6 +23,12 @@
 #define NOMINMAX
 #include <windows.h>
 #include <wincodec.h>
+#else
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_BMP
+#include <stb_image.h>
 #endif
 
 bool texreplace_wad_file(const std::string& name, std::vector<uint8_t>& out);
@@ -108,7 +114,16 @@ bool load_image(const std::wstring& path, std::vector<uint32_t>& out, int& w, in
     return ok;
 }
 #else
-bool load_image(const std::wstring&, std::vector<uint32_t>&, int&, int&) { return false; }
+// PNG, JPEG, BMP through stb_image (no WebP).
+bool load_image(const std::wstring& path, std::vector<uint32_t>& out, int& w, int& h) {
+    int n = 0;
+    stbi_uc* px = stbi_load(std::filesystem::path(path).string().c_str(), &w, &h, &n, 4);
+    if (!px) return false;
+    const bool ok = w > 0 && h > 0 && w <= 16384 && h <= 16384;
+    if (ok) out.assign((const uint32_t*)px, (const uint32_t*)px + (size_t)w * h);
+    stbi_image_free(px);
+    return ok;
+}
 #endif
 
 bool load(Picture& p) {

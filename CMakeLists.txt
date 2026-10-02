@@ -15,10 +15,8 @@ include(FetchContent)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(SDL3
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    GIT_TAG release-3.2.0
-    GIT_SHALLOW TRUE)
+FetchContent_Declare(SDL3  # a release tarball: a shallow git clone fetched every branch (slow, flaky)
+    URL https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.2.0.tar.gz)
 FetchContent_MakeAvailable(SDL3)
 
 # ---------------------------------------------------------------- Vulkan (optional backend)
@@ -38,6 +36,9 @@ set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
 FetchContent_Declare(glslang
     URL https://github.com/KhronosGroup/glslang/archive/refs/tags/14.0.0.tar.gz)
 FetchContent_MakeAvailable(VulkanHeaders glslang volk)
+if(NOT MSVC)  # glslang 14.0.0 uses uint32_t without <cstdint> (newer libstdc++ no longer pulls it in)
+    target_compile_options(SPIRV PRIVATE -include cstdint)
+endif()
 
 # ---------------------------------------------------------------- stb_truetype (menu text)
 FetchContent_Declare(stb  # header only (SOURCE_SUBDIR skips the missing CMake)
@@ -132,7 +133,7 @@ add_executable(repocalypse
     runtime/src/bootfont.cpp
     ${volk_SOURCE_DIR}/volk.c)
 target_include_directories(repocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
-target_compile_definitions(repocalypse PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
+target_compile_definitions(repocalypse PRIVATE VK_NO_PROTOTYPES $<$<BOOL:${WIN32}>:VK_USE_PLATFORM_WIN32_KHR>)
 add_dependencies(repocalypse vk_shaders)
 # The exe's icon: the game's lives icon, made from the disc by tools/make_icon.py (build.bat).
 if(WIN32 AND EXISTS ${GEN_DIR}/apocalypse.ico)
@@ -150,6 +151,21 @@ set_target_properties(repocalypse PROPERTIES
 
 find_package(OpenGL REQUIRED)
 target_link_libraries(repocalypse PRIVATE game_code SDL3::SDL3-static OpenGL::GL Vulkan::Headers)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(repocalypse PRIVATE Threads::Threads ${CMAKE_DL_LIBS})  # volk loads libvulkan with dlopen
+    # replacement movies (movie.cpp) through the system's FFmpeg, if its development files are there
+    find_package(PkgConfig)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(FFMPEG IMPORTED_TARGET libavformat libavcodec libswscale libswresample libavutil)
+    endif()
+    if(FFMPEG_FOUND)
+        target_link_libraries(repocalypse PRIVATE PkgConfig::FFMPEG)
+        target_compile_definitions(repocalypse PRIVATE HAVE_FFMPEG)
+    else()
+        message(WARNING "FFmpeg development files not found: no replacement movies")
+    endif()
+endif()
 if(WIN32)
     target_link_libraries(repocalypse PRIVATE windowscodecs ole32)  # replacement pictures (replace.cpp)
     target_link_libraries(repocalypse PRIVATE mfplat mfreadwrite mfuuid)  # replacement movies (movie.cpp)

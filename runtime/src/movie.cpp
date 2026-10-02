@@ -7,11 +7,12 @@
 //
 // A replacement starts when the game reads the first sectors of a .STR that has one, and stops
 // when the game reads elsewhere on the disc, stops showing movie pictures, or stops reading.
-// Decoding is Windows Media Foundation (H.264 / HEVC / AAC ... as installed) on its own thread,
+// Decoding is Windows Media Foundation (H.264 / HEVC / AAC ... as installed; FFmpeg elsewhere) on its own thread,
 // video scaled to at most 1080 lines; the picture follows the sound that has been played.
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <mutex>
@@ -26,6 +27,13 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#elif defined(HAVE_FFMPEG)
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
+}
 #endif
 
 bool cdrom_read_sector_user(uint32_t lba, uint8_t* out);
@@ -258,6 +266,89 @@ void decode(std::wstring file, int* out_w, int* out_h, bool* has_audio, std::ato
     MFShutdown();
     CoUninitialize();
 }
+#elif defined(HAVE_FFMPEG)
+AVCodecContext* open_codec(AVFormatContext* fc, int index) {
+    if (index < 0) return nullptr;
+    const AVCodecParameters* par = fc->streams[index]->codecpar;
+    const AVCodec* codec = avcodec_find_decoder(par->codec_id);
+    AVCodecContext* cc = codec ? avcodec_alloc_context3(codec) : nullptr;
+    if (cc && (avcodec_parameters_to_context(cc, par) < 0 || avcodec_open2(cc, codec, nullptr) < 0)) avcodec_free_context(&cc);
+    return cc;
+}
+
+// The decoder thread (FFmpeg): reads the file in order, keeping a few pictures and some sound ahead.
+void decode(std::wstring file, int* out_w, int* out_h, bool* has_audio, std::atomic<bool>* ready) {
+    const std::string path = std::filesystem::path(file).string();
+    AVFormatContext* fc = nullptr;
+    AVCodecContext *vc = nullptr, *ac = nullptr;
+    SwsContext* sws = nullptr;
+    SwrContext* swr = nullptr;
+    int vi = -1, ai = -1, w = 0, h = 0;
+    if (avformat_open_input(&fc, path.c_str(), nullptr, nullptr) == 0 && avformat_find_stream_info(fc, nullptr) >= 0) {
+        vi = av_find_best_stream(fc, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        ai = av_find_best_stream(fc, AVMEDIA_TYPE_AUDIO, -1, vi, nullptr, 0);
+        vc = open_codec(fc, vi);
+        ac = open_codec(fc, ai);
+        if (vc && vc->width > 0 && vc->height > 0) {
+            w = vc->width, h = vc->height;
+            if (h > kMaxLines) w = (int)((int64_t)w * kMaxLines / h) & ~1, h = kMaxLines;
+            sws = sws_getContext(vc->width, vc->height, vc->pix_fmt, w, h, AV_PIX_FMT_BGRA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+        }
+        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+        if (ac && (swr_alloc_set_opts2(&swr, &stereo, AV_SAMPLE_FMT_S16, 44100, &ac->ch_layout, ac->sample_fmt,
+                                       ac->sample_rate, 0, nullptr) < 0 || swr_init(swr) < 0))
+            swr_free(&swr);
+    }
+    if (!sws) {
+        log_msg(LogCat::Host, "replacement movie: cannot play %s", path.c_str());
+        w = h = 0;
+    }
+    *out_w = w, *out_h = h, *has_audio = sws && swr;
+    ready->store(true);
+    const AVStream* vs = vi >= 0 ? fc->streams[vi] : nullptr;
+    const int64_t t0 = vs && vs->start_time != AV_NOPTS_VALUE ? vs->start_time : 0;
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* fr = av_frame_alloc();
+    auto drain = [&](AVCodecContext* cc) {
+        while (!g_stop.load() && avcodec_receive_frame(cc, fr) == 0) {
+            if (cc == vc) {
+                const int64_t pts = fr->best_effort_timestamp == AV_NOPTS_VALUE ? t0 : fr->best_effort_timestamp;
+                Frame f{(double)(pts - t0) * av_q2d(vs->time_base), std::vector<uint32_t>((size_t)w * h)};
+                uint8_t* dst[1] = {(uint8_t*)f.px.data()};
+                const int stride[1] = {w * 4};
+                sws_scale(sws, fr->data, fr->linesize, 0, fr->height, dst, stride);
+                std::unique_lock<std::mutex> lk(g_mx);
+                g_cv.wait(lk, [] { return g_frames.size() < kMaxFrames || g_stop.load(); });
+                g_frames.push_back(std::move(f));
+            } else {
+                const int max = swr_get_out_samples(swr, fr->nb_samples);
+                std::vector<int16_t> buf((size_t)std::max(max, 0) * 2);
+                uint8_t* out = (uint8_t*)buf.data();
+                const int n = swr_convert(swr, &out, max, (const uint8_t**)fr->extended_data, fr->nb_samples);
+                std::unique_lock<std::mutex> lk(g_mx);
+                g_cv.wait(lk, [] { return g_audio.size() < kMaxAudio || g_stop.load(); });
+                if (n > 0) g_audio.insert(g_audio.end(), buf.begin(), buf.begin() + (ptrdiff_t)n * 2);
+            }
+            av_frame_unref(fr);
+        }
+    };
+    while (sws && !g_stop.load() && av_read_frame(fc, pkt) >= 0) {
+        AVCodecContext* cc = pkt->stream_index == vi ? vc : pkt->stream_index == ai && swr ? ac : nullptr;
+        if (cc && avcodec_send_packet(cc, pkt) >= 0) drain(cc);
+        av_packet_unref(pkt);
+    }
+    for (AVCodecContext* cc : {vc, swr ? ac : nullptr})  // the frames still in the decoders
+        if (sws && cc && avcodec_send_packet(cc, nullptr) >= 0) drain(cc);
+    av_frame_free(&fr);
+    av_packet_free(&pkt);
+    sws_freeContext(sws);
+    swr_free(&swr);
+    avcodec_free_context(&vc);
+    avcodec_free_context(&ac);
+    avformat_close_input(&fc);
+    std::lock_guard<std::mutex> lk(g_mx);
+    g_eof = true;
+}
 #endif
 
 void stop(const char* why) {
@@ -273,8 +364,14 @@ void stop(const char* why) {
     g_play = Playing{};
 }
 
+// Quitting during a movie (std::exit): the decoder must end before g_thread is destroyed, or a
+// still-running std::thread's destructor aborts the program.
+struct StopAtExit {
+    ~StopAtExit() { stop("quit"); }
+} g_stop_at_exit;
+
 void start(const Str& s) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(HAVE_FFMPEG)
     stop("another movie");
     g_stop.store(false);
     g_eof = false;

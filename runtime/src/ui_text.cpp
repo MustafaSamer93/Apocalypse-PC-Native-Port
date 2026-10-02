@@ -34,7 +34,11 @@ bool load_font() {
         win + "\\Fonts\\seguisb.ttf",  // Segoe UI Semibold
         win + "\\Fonts\\segoeui.ttf",
         win + "\\Fonts\\arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "assets/font.ttf",  // shipped with the Linux build (tools/package_linux.sh)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",     // Debian / Ubuntu
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",  // Fedora
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",                // Arch
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     };
     for (const std::string& p : paths) {
         size_t size = 0;

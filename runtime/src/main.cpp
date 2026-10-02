@@ -19,6 +19,9 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <csignal>
+#include <unistd.h>
 #endif
 
 #include "memcard.h"
@@ -147,11 +150,43 @@ static LONG WINAPI log_native_crash(EXCEPTION_POINTERS* e) {
     std::fflush(stderr);
     return EXCEPTION_CONTINUE_SEARCH;
 }
+#else
+static void log_native_crash(int sig) {
+    char msg[64];
+    const int n = std::snprintf(msg, sizeof msg, "NATIVE CRASH: signal %d\n", sig);
+    if (n > 0) (void)!write(STDERR_FILENO, msg, (size_t)n);
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
 #endif
+
+// When a file was last written (0 = unknown).
+static std::time_t file_mtime(const char* path) {
+#ifdef _WIN32
+    struct _stat64 st{};
+    return _stat64(path, &st) == 0 ? (std::time_t)st.st_mtime : 0;
+#else
+    struct stat st{};
+    return stat(path, &st) == 0 ? st.st_mtime : 0;
+#endif
+}
+
+// Nobody sees stderr (started by a double-click / desktop launcher, nothing redirected).
+static bool stderr_unseen() {
+#ifdef _WIN32
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    return !GetConsoleWindow() && (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN);
+#else
+    struct stat st{};  // a terminal, file or pipe is seen; /dev/null or a journal socket is not
+    return !isatty(STDERR_FILENO) && (fstat(STDERR_FILENO, &st) != 0 || !(S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode)));
+#endif
+}
 
 int main(int argc, char** argv) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(log_native_crash);
+#else
+    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) std::signal(sig, log_native_crash);
 #endif
     attach_console();
     // Everything the game uses sits next to the exe (the assets and saves folders,
@@ -160,12 +195,11 @@ int main(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::current_path(std::filesystem::u8path(base), ec);
     }
-#ifdef _WIN32
     // Started with no console and nothing redirected (a double-click): log to
     // debug/repocalypse.log (the report log testers send), with the previous runs' logs kept in
     // debug/logs (the newest 10, named by when they were written) and crashed runs' as
     // debug/crash_DATE_TIME.log.
-    if (HANDLE err = GetStdHandle(STD_ERROR_HANDLE); !GetConsoleWindow() && (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN)) {
+    if (stderr_unseen()) {
         std::error_code ec;
         std::filesystem::create_directories("debug", ec);
         // a log that ended in a crash is kept (debug/crash_DATE_TIME.log) instead of being
@@ -175,16 +209,16 @@ int main(int argc, char** argv) {
             std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             in.close();
             if (text.find("FATAL") == std::string::npos && text.find("NATIVE CRASH") == std::string::npos) continue;
-            struct _stat64 st{};
-            const std::time_t t = _stat64(old, &st) == 0 ? (std::time_t)st.st_mtime : std::time(nullptr);
+            std::time_t t = file_mtime(old);
+            if (!t) t = std::time(nullptr);
             char name[64];
             std::strftime(name, sizeof name, "debug/crash_%Y%m%d_%H%M%S.log", std::localtime(&t));
             std::filesystem::rename(old, name, ec);
         }
         if (std::filesystem::exists("debug/repocalypse.log", ec)) {
             std::filesystem::create_directories("debug/logs", ec);
-            struct _stat64 st{};
-            const std::time_t t = _stat64("debug/repocalypse.log", &st) == 0 ? (std::time_t)st.st_mtime : std::time(nullptr);
+            std::time_t t = file_mtime("debug/repocalypse.log");
+            if (!t) t = std::time(nullptr);
             char name[64];
             std::strftime(name, sizeof name, "debug/logs/repocalypse_%Y%m%d_%H%M%S.log", std::localtime(&t));
             std::filesystem::rename("debug/repocalypse.log", name, ec);
@@ -194,10 +228,8 @@ int main(int argc, char** argv) {
             std::sort(logs.begin(), logs.end());
             for (size_t i = 0; i + 10 < logs.size(); i++) std::filesystem::remove(logs[i], ec);
         }
-        FILE* f;
-        if (freopen_s(&f, "debug/repocalypse.log", "a", stderr) == 0) std::setvbuf(stderr, nullptr, _IONBF, 0);
+        if (std::freopen("debug/repocalypse.log", "a", stderr)) std::setvbuf(stderr, nullptr, _IONBF, 0);
     }
-#endif
     std::string cue;  // --cue, else find_disc()
     std::string card_dir = "saves";
     int scale = 0;  // window: 0 = 1080 lines or as much as fits

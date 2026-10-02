@@ -84,6 +84,20 @@ void load_bins(const std::filesystem::path& dir) {
     }
 }
 
+// The file a .cue names, matched without case (cue sheets often say "GAME.BIN" for game.bin,
+// which only Windows forgives).
+std::string cue_file(const std::filesystem::path& dir, const std::string& name) {
+    std::error_code ec;
+    if (std::filesystem::exists(dir / name, ec)) return (dir / name).string();
+    auto lower = [](std::string t) {
+        for (char& ch : t) ch = (char)std::tolower((unsigned char)ch);
+        return t;
+    };
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+        if (lower(e.path().filename().string()) == lower(name)) return e.path().string();
+    return (dir / name).string();
+}
+
 void load_cue(const std::string& cue_path) {
     std::string ext = std::filesystem::path(cue_path).extension().string();
     for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
@@ -107,7 +121,7 @@ void load_cue(const std::string& cue_path) {
         line = line.substr(p);
         if (line.rfind("FILE", 0) == 0) {
             auto a = line.find('"'), b = line.rfind('"');
-            cur_file = (dir / line.substr(a + 1, b - a - 1)).string();
+            cur_file = cue_file(dir, line.substr(a + 1, b - a - 1));
             if (!g_tracks.empty()) file_base = g_tracks.back().file_lba + g_tracks.back().sectors;
         } else if (line.rfind("TRACK", 0) == 0) {
             Track t{};

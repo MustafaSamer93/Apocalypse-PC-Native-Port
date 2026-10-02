@@ -18,3 +18,6 @@ settings.ini
 debug/
 /repocalypse.old.exe
 /apocalypse.old.exe
+/repocalypse
+build-linux/
+build-linux-dist/
