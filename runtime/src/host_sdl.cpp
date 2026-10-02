@@ -170,7 +170,6 @@ PresentOptions present_options() {
     o.aspect = g_gfx.aspect;
     o.crt = g_gfx.crt;
     o.fxaa = g_gfx.aa & 1;
-    o.zoom = g_bios_rom ? 0.85f : 1.0f;  // the BIOS boot sequence a little smaller (bios.cpp)
     return o;
 }
 

@@ -13,7 +13,6 @@ struct PresentOptions {
     Aspect aspect = Aspect::A4_3;
     bool crt = false;
     bool fxaa = false;  // edge-smoothing pass (not with the CRT filter)
-    float zoom = 1.0f;  // the picture at this size, centred (the BIOS boot sequence: smaller)
 };
 
 bool present_init(SDL_Window* window);

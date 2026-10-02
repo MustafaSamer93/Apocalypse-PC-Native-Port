@@ -199,7 +199,6 @@ void draw_image(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, 
     float ar = aspect_value(o.aspect, ww, wh);
     float cw = (float)ww, ch = cw / ar;
     if (ch > (float)wh) { ch = (float)wh; cw = ch * ar; }
-    cw *= o.zoom, ch *= o.zoom;
     g_cx = ((float)ww - cw) * 0.5f;
     g_cy = ((float)wh - ch) * 0.5f;
     g_cw = cw;

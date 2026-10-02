@@ -136,7 +136,14 @@ bool g_movie_seen = false;
 // fix + (x - fix) * factor); 1 = leave it.
 float squeeze_2d(float x0, float x1, float* fix) {
     const uint32_t a = g_gpu_packet_addr;
-    if (g_gte_widescreen == 1.0f || !a) return 1.0f;
+    if (g_gte_widescreen == 1.0f) return 1.0f;
+    if (g_bios_rom) {  // the BIOS boot sequence in widescreen: its logos keep their shape, centred
+        const float left = (float)S.area_x1, right = (float)(S.area_x2 + 1);
+        if (x1 - x0 >= 0.9f * (right - left)) return 1.0f;  // (backgrounds fill the screen)
+        *fix = (left + right) * 0.5f;
+        return g_gte_widescreen;
+    }
+    if (!a) return 1.0f;
     const bool text = text_packet(a);
     if (!text && (a < g_2d_from || a >= g_2d_to)) return 1.0f;
     const float left = (float)S.area_x1, right = (float)(S.area_x2 + 1), width = right - left;
