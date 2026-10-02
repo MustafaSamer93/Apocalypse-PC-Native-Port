@@ -50,7 +50,7 @@ constexpr uint32_t kGpRepeat = 0x800FEEBC + 344, kUpdateCount = 0x800FF2F0;
 
 // Our pages: their settings (host_sdl.cpp enh_*), in order.
 constexpr int kEnhSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_FPS, E_FPS_COUNTER, E_FONT_SCALE,
-                                E_AUTOSAVE, E_SUBTITLES};
+                                E_AUTOSAVE, E_SUBTITLES, E_BOOT};
 constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT};
 // The game's own options, for the pause menu (the front end has its own pages for them); ids
 // after the enhancement settings. Found in the front end (80011BA0) and 80016014 (options from

@@ -175,10 +175,10 @@ void fit(Picture& p, int scale, float aspect) {
     p.fit_scale = scale;
     p.fit_aspect = aspect;
     const int ow = p.w * scale, oh = p.h * scale;
-    float sw = (float)p.pw, sh = (float)p.ph;  // the part of the source that is used
-    if (sw / sh > aspect) sw = sh * aspect;
-    else sh = sw / aspect;
-    const float sx0 = ((float)p.pw - sw) * 0.5f, sy0 = ((float)p.ph - sh) * 0.5f;
+    // the whole height of the picture, centred: a narrower one (4:3 on a 16:9 screen) gets black
+    // bars at the sides, a wider one loses its sides
+    const float sh = (float)p.ph, sw = sh * aspect;  // the part of the source that is shown
+    const float sx0 = ((float)p.pw - sw) * 0.5f, sy0 = 0.0f;
     const float fx = sw / (float)ow, fy = sh / (float)oh;  // source pixels per output pixel
     const int nx = std::max(1, (int)std::ceil(fx)), ny = std::max(1, (int)std::ceil(fy));
     p.fitted.assign((size_t)ow * oh, 0);
@@ -194,6 +194,7 @@ void fit(Picture& p, int scale, float aspect) {
                 for (int a = 0; a < nx; a++) {
                     // sample position in the source (pixel centres), then bilinear
                     float x = sx0 + ((float)i + ((float)a + 0.5f) / (float)nx) * fx - 0.5f;
+                    if (x < -0.5f || x > (float)p.pw - 0.5f) continue;  // a side bar: black
                     float y = sy0 + ((float)j + ((float)b + 0.5f) / (float)ny) * fy - 0.5f;
                     int x0 = (int)std::floor(x), y0 = (int)std::floor(y);
                     float tx = x - (float)x0, ty = y - (float)y0;

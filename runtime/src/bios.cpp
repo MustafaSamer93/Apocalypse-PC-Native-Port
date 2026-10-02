@@ -651,6 +651,7 @@ void bios_state(StateIO& s) {
 // ---------------------------------------------------------------- boot sequence (real BIOS)
 
 const uint8_t* g_bios_rom = nullptr;
+bool g_boot_sequence = true;  // setting (settings.ini "bootseq")
 
 std::vector<uint8_t> state_capture(R3000* c, uint32_t pc);
 void state_restore(const std::vector<uint8_t>& data, R3000* c);
@@ -689,8 +690,16 @@ void bios_boot_sequence(R3000* c, uint32_t entry) {
     c->cop0[15] = 2;
     c->cycles = cycles, c->next_event = next;
     g_bios_rom = rom.data();
-    const bool done = interp_run_machine(c, 0xBFC00000u, entry, PSX_CPU_HZ * 40,
-                                         [] { return (host_pad(0).buttons & 0x0008) == 0; });  // Start
+    auto start_pressed = [] { return (host_pad(0).buttons & 0x0008) == 0; };
+    bool done = interp_run_machine(c, 0xBFC00000u, entry, PSX_CPU_HZ * 40, start_pressed);
+    // The BIOS is done in about 10 s here (the disc reads faster than a real drive): the last
+    // picture (the PlayStation logo) stays up until the sequence has lasted 16 s.
+    const uint64_t hold_until = cycles + PSX_CPU_HZ * 16;
+    for (uint32_t n = 0; done && c->cycles < hold_until; n++) {
+        c->cycles = std::max(c->cycles, c->next_event);
+        psx_run_events(c);  // (the screen keeps refreshing; no BIOS code runs)
+        if (n % 64 == 63 && start_pressed()) done = false;
+    }
     g_bios_rom = nullptr;
     log_msg(LogCat::Bios, "boot sequence %s", done ? "finished" : "skipped");
     state_restore(ready, c);

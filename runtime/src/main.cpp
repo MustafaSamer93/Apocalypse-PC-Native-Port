@@ -313,7 +313,7 @@ int main(int argc, char** argv) {
     cpu.r[30] = cpu.r[29];
     cpu.r[31] = 0;
     sched_add(&cpu, Ev::Scanline, CYCLES_PER_SCANLINE_NTSC);
-    if (bios_intro) bios_boot_sequence(&cpu, entry);
+    if (bios_intro && (argc > 1 || g_boot_sequence)) bios_boot_sequence(&cpu, entry);  // (--bios-intro: always)
 
     // Loading a save state longjmps back here (from the VSync safe point) with the machine
     // restored; the game then continues from VSync's entry: VSync itself runs recompiled,

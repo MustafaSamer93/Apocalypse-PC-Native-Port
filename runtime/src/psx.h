@@ -128,7 +128,8 @@ extern int g_menu_zoom;     // setting: the game's menus at this percent of thei
 // Enhancement settings, shared by F1 and the game's Options -> Enhancements (host_sdl.cpp).
 enum EnhSetting { E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_RES, E_ASPECT, E_DISPLAY, E_AUTOSAVE, E_SUBTITLES, E_AA,
                    E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT,
-                   E_FPS_COUNTER };
+                   E_FPS_COUNTER, E_BOOT };
+extern bool g_boot_sequence;  // setting: the BIOS boot sequence at start (bios.cpp; assets/bios)
 const char* enh_name(int id);
 std::string enh_value(int id);
 void enh_change(int id, int dir);

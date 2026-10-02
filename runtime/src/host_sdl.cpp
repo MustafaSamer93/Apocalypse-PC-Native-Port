@@ -170,6 +170,7 @@ PresentOptions present_options() {
     o.aspect = g_gfx.aspect;
     o.crt = g_gfx.crt;
     o.fxaa = g_gfx.aa & 1;
+    o.zoom = g_bios_rom ? 0.85f : 1.0f;  // the BIOS boot sequence a little smaller (bios.cpp)
     return o;
 }
 
@@ -340,6 +341,7 @@ void save_settings() {
     std::fprintf(f, "autosave %d\n", g_autosave ? 1 : 0);
     std::fprintf(f, "subtitles %d\n", g_subtitles ? 1 : 0);
     std::fprintf(f, "fpscounter %d\n", g_fps_counter ? 1 : 0);
+    std::fprintf(f, "bootseq %d\n", g_boot_sequence ? 1 : 0);
     std::fprintf(f, "texreplace %d\n", g_tex_replace ? 1 : 0);
     std::fprintf(f, "fullscreen %d\n", g_fullscreen ? 1 : 0);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
@@ -411,6 +413,10 @@ void load_settings() {
             continue;
         }
         if (int tr; std::sscanf(line, "texreplace %d", &tr) == 1) g_tex_replace = tr != 0;
+        if (int bs; std::sscanf(line, "bootseq %d", &bs) == 1) {
+            g_boot_sequence = bs != 0;
+            continue;
+        }
         if (int fc; std::sscanf(line, "fpscounter %d", &fc) == 1) {
             g_fps_counter = fc != 0;
             continue;
@@ -1304,7 +1310,7 @@ const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
                                   "Font scaling", "Renderer", "Screen mode", "Resolution", "Aspect ratio", "Display",
                                   "Autosave", "One-liners", "Anti-aliasing", "Infinite health", "Infinite lives",
-                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter"};
+                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "Boot sequence"};
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -1330,6 +1336,7 @@ std::string enh_value(int id) {
         case E_SUBTITLES: return g_subtitles ? "On" : "Off";
         case E_AA: return kAaNames[std::clamp(g_gfx.aa, 0, 3)];
         case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
+        case E_BOOT: return g_boot_sequence ? "On" : "Off";
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
         case E_CHEAT_WEAPONS:
@@ -1374,6 +1381,7 @@ void enh_change(int id, int dir) {
         case E_SUBTITLES: g_subtitles = !g_subtitles; break;  // subtitles.cpp
         case E_AA: g_gfx.aa = (g_gfx.aa + dir + 4) % 4; break;
         case E_FPS_COUNTER: g_fps_counter = !g_fps_counter; break;
+        case E_BOOT: g_boot_sequence = !g_boot_sequence; break;  // bios.cpp: from the next start
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
         case E_CHEAT_WEAPONS:
@@ -1698,11 +1706,11 @@ static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
     enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
                R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
-               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
+               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_BOOT, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
     // the main page, and the Enhancements page (what goes beyond the original game)
     static const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA,
                                                R_ASPECT, R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
-    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_ENH_BACK};
+    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_BOOT, R_ENH_BACK};
     bool enh_page = false;
     static int slot = 1;
     int& chapter = g_chapter_sel;
@@ -1786,6 +1794,10 @@ static void run_settings_menu() {
                     case R_FONT:
                     case R_MENU_SIZE:
                         enh_change(row - R_FPS, step);
+                        gfx_changed = true;
+                        break;
+                    case R_BOOT:
+                        enh_change(E_BOOT, step);
                         gfx_changed = true;
                         break;
                     case R_FPS_COUNTER:
@@ -1903,6 +1915,7 @@ static void run_settings_menu() {
                 case R_FONT:
                 case R_MENU_SIZE: return choice(enh_name(r - R_FPS), enh_value(r - R_FPS));
                 case R_FPS_COUNTER: return choice(enh_name(E_FPS_COUNTER), enh_value(E_FPS_COUNTER));
+                case R_BOOT: return choice(enh_name(E_BOOT), enh_value(E_BOOT));
                 case R_ENH_BACK: return "Back";
             }
             return "";
