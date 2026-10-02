@@ -68,7 +68,11 @@ void sim60_apply() {
         log_msg(LogCat::Host, "60 Hz simulation %s (level \"%s\"%s)", on ? "on" : "off", g_sim60_level.c_str(),
                 g_sim60_demo ? ", demo" : "");
     psx_opt_sim60 = on ? 1 : 0;
-    psx_cpi_q = on ? 1 : 4 * PSX_CYCLES_PER_INSN;  // 8x CPU: an update and a render per VBlank
+    // 8x CPU in levels: an update and a render per VBlank at 60 Hz, and at 30 Hz no more of the
+    // PS1's slowdowns (busy rooms fell to 20 fps); the game's steps stay fixed, so nothing speeds
+    // up. (Not in the attract demo, whose recorded presses need the original timing.)
+    const bool level = !g_sim60_level.empty() && !g_sim60_demo;
+    psx_cpi_q = on || level ? 1 : 4 * PSX_CYCLES_PER_INSN;
 }
 
 // Every file the game loads (bios.cpp): a level starts with its "<name>_t.trg".
