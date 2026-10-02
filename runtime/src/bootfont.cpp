@@ -22,7 +22,7 @@ struct Tex {
     int x, y, w, h;  // in VRAM words (4-bit: 4 texels each)
     uint32_t hash;
     std::vector<uint8_t> idx;  // palette index of each texel
-    int bg;                    // the background's index (0: see-through)
+    int bg;                    // the background's index (its colour 0: see-through)
     std::vector<int> inks;     // the ink's indices, most used first (5% or more of the ink)
 };
 std::vector<Tex> g_tex;
@@ -57,20 +57,23 @@ int dist(uint16_t a, uint16_t b) {
 uint32_t shade(const Item& it, const Tex& t, const uint16_t* vram, float cov[16]) {
     const uint16_t* row = vram + (it.clut_y & 511) * 1024;
     auto at = [&](int i) { return row[(it.clut_x + i) & 1023]; };
+    // a background of colour 0 is see-through (whichever palette entry holds it)
+    const bool solid = at(t.bg) != 0;
     // the ink: its most used colour, or on a solid background the one that stands out most
     uint16_t ink = at(t.inks.empty() ? 1 : t.inks[0]);
-    if (t.bg != 0)
+    if (solid)
         for (int i : t.inks)
             if (dist(at(i), at(t.bg)) > dist(ink, at(t.bg))) ink = at(i);
     for (int i = 0; i < 16; i++) cov[i] = 0.0f;
-    if (t.bg != 0) {  // coverage: the way from the background's colour to the ink's
+    if (solid) {  // coverage: the way from the background's colour to the ink's
         const float full = (float)std::max(1, dist(ink, at(t.bg)));
         for (int i = 0; i < 16; i++)
             if (i != t.bg) cov[i] = std::min(1.0f, (float)dist(at(i), at(t.bg)) / full);
     } else {  // see-through: the edge shades are the ones farthest from the ink
         int far = 1;
         for (int i : t.inks) far = std::max(far, dist(at(i), ink));
-        for (int i = 1; i < 16; i++) cov[i] = std::clamp(1.0f - (float)dist(at(i), ink) / (1.4f * (float)far), 0.0f, 1.0f);
+        for (int i = 0; i < 16; i++)
+            if (i != t.bg && at(i) != 0) cov[i] = std::clamp(1.0f - (float)dist(at(i), ink) / (1.4f * (float)far), 0.0f, 1.0f);
     }
     int r = (ink & 31) << 3, g = ((ink >> 5) & 31) << 3, b = ((ink >> 10) & 31) << 3;
     if (it.r >= 0) r = std::min(255, r * it.r / 128), g = std::min(255, g * it.g / 128), b = std::min(255, b * it.b / 128);
