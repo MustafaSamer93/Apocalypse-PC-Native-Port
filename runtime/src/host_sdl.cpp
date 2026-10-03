@@ -2013,21 +2013,29 @@ static void run_settings_menu() {
     g_next_frame_ns = SDL_GetTicksNS();  // don't try to "catch up" the paused time
 }
 
+static uint64_t g_prof_sleep_ns = 0;  // pacing sleeps (APOC_FRAME_TIMES)
+static void sleep_ns(uint64_t ns) {
+    const uint64_t t0 = SDL_GetTicksNS();
+    SDL_DelayPrecise(ns);
+    g_prof_sleep_ns += SDL_GetTicksNS() - t0;
+}
+
 void host_throttle_frame() {
     if (static const bool on = std::getenv("APOC_FRAME_TIMES") != nullptr; on) {  // debug: frames over N ms (default 20)
         // with where the time went: waiting for the display (acquire/present), waiting for the
         // GPU (fences), GPU work (Vulkan timestamps); the rest is the game's code and ours
         extern uint64_t g_prof_fence_ns, g_prof_present_ns, g_prof_gpu_ns;
-        static uint64_t last = 0, p0 = 0, f0 = 0, g0 = 0;
+        static uint64_t last = 0, p0 = 0, f0 = 0, g0 = 0, s0 = 0;
         const uint64_t now = SDL_GetTicksNS();
         auto d = [](uint64_t v, uint64_t v0) { return v >= v0 ? (double)(v - v0) / 1e6 : 0.0; };  // (reset by APOC_PROFILE)
         static const uint64_t limit = (uint64_t)(std::max(0.0, std::atof(std::getenv("APOC_FRAME_TIMES"))) * 1e6) ?: 20000000ull;
         if (last && now - last > limit) {
             const double total = (double)(now - last) / 1e6, pr = d(g_prof_present_ns, p0), fe = d(g_prof_fence_ns, f0);
-            std::fprintf(stderr, "SLOW frame %llu: %.1f ms (display %.1f, GPU wait %.1f, GPU work %.1f, CPU %.1f)\n",
-                         (unsigned long long)g_frame, total, pr, fe, d(g_prof_gpu_ns, g0), total - pr - fe);
+            const double sl = d(g_prof_sleep_ns, s0);
+            std::fprintf(stderr, "SLOW frame %llu: %.1f ms (display %.1f, GPU wait %.1f, GPU work %.1f, sleep %.1f, CPU %.1f)\n",
+                         (unsigned long long)g_frame, total, pr, fe, d(g_prof_gpu_ns, g0), sl, total - pr - fe - sl);
         }
-        last = now, p0 = g_prof_present_ns, f0 = g_prof_fence_ns, g0 = g_prof_gpu_ns;
+        last = now, p0 = g_prof_present_ns, f0 = g_prof_fence_ns, g0 = g_prof_gpu_ns, s0 = g_prof_sleep_ns;
     }
     bool multi = g_multi_present && !g_turbo && g_gl_ok;
     bool want_vsync = (multi ? g_present_vsync : g_vsync_pacing) && !g_turbo;
@@ -2064,7 +2072,7 @@ void host_throttle_frame() {
                 g_next_present_ns = start;  // (re)start in step with emulated time
             while (g_next_present_ns < g_next_frame_ns) {
                 now = SDL_GetTicksNS();
-                if (g_next_present_ns > now) SDL_DelayPrecise(g_next_present_ns - now);
+                if (g_next_present_ns > now) sleep_ns(g_next_present_ns - now);
                 draw_game(g_last_display, frac_at(g_next_present_ns));
                 g_next_present_ns += period;
             }
@@ -2072,7 +2080,7 @@ void host_throttle_frame() {
         now = SDL_GetTicksNS();
     }
     if (g_next_frame_ns > now) {
-        SDL_DelayPrecise(g_next_frame_ns - now);
+        sleep_ns(g_next_frame_ns - now);
     } else if (now - g_next_frame_ns > FRAME_NS * 4) {
         g_next_frame_ns = now;  // fell far behind (debugger, window drag): resync
     }

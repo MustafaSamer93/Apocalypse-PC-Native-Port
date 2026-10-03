@@ -14,12 +14,18 @@
 // still line up. A polygon is drawn from it (HwPrim::hd; the shader samples it with the polygon's
 // own texture coordinates and window) when every texel it may use is covered by regions.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -58,10 +64,20 @@ std::vector<Tex> g_tex;
 std::unordered_multimap<uint64_t, int> g_keys;  // first non-zero window -> texture
 // textures under 4 words wide (font letters, small icons): the first non-zero 4-row column instead
 std::unordered_multimap<uint64_t, int> g_keys_v;
+// a quick "no texture has this key" for the scans (most VRAM positions): one bit per key hash
+std::vector<uint64_t> g_key_bits(1 << 12);  // 2^18 bits
+uint32_t key_bit(uint64_t k) { return (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 46); }
+bool maybe_key(uint64_t k) { const uint32_t b = key_bit(k); return g_key_bits[b >> 6] >> (b & 63) & 1; }
+void add_key_bit(uint64_t k) { const uint32_t b = key_bit(k); g_key_bits[b >> 6] |= 1ull << (b & 63); }
 std::vector<Region> g_regions;
 std::vector<int> g_cells[16][32];            // 32 x 32-word cells -> regions overlapping them
 std::vector<Region> g_placed;  // what the HD copy holds now (a later one may have overwritten part of an earlier one)
 bool g_dirty = true;
+// the part of VRAM changed since the last scan (words, exclusive max): only there can regions
+// have come or gone (a level animating a texture uploads every other frame; a whole-VRAM scan
+// each time cost ~20 ms a frame on a Steam Deck)
+int g_ch_x0 = 0, g_ch_y0 = 0, g_ch_x1 = 1024, g_ch_y1 = 512;
+int g_max_hw = 0, g_max_h = 0;  // the largest texture: how far from a change one may start
 
 uint32_t rd32(const std::vector<uint8_t>& b, size_t o) {
     uint32_t v = 0;
@@ -160,15 +176,18 @@ void parse(const std::vector<uint8_t>& b, const std::string& dir) {
             for (int x = 0; x + 4 <= t.hw && !found; x++) {
                 uint64_t k = 0;
                 for (int j = 0; j < 4; j++) k = k << 16 | t.data[(size_t)y * t.hw + x + j];
-                if (k) t.key_dx = x, t.key_dy = y, found = true, g_keys.emplace(k, (int)g_tex.size());
+                if (k) t.key_dx = x, t.key_dy = y, found = true, g_keys.emplace(k, (int)g_tex.size()), add_key_bit(k);
             }
         for (int x = 0; x < t.hw && !found; x++)
             for (int y = 0; y + 4 <= t.h && !found; y++) {
                 uint64_t k = 0;
                 for (int j = 0; j < 4; j++) k = k << 16 | t.data[(size_t)(y + j) * t.hw + x];
-                if (k) t.key_dx = x, t.key_dy = y, found = true, g_keys_v.emplace(k, (int)g_tex.size());
+                if (k) t.key_dx = x, t.key_dy = y, found = true, g_keys_v.emplace(k, (int)g_tex.size()), add_key_bit(k);
             }
-        if (found) g_tex.push_back(std::move(t));
+        if (found) {
+            g_max_hw = std::max(g_max_hw, t.hw), g_max_h = std::max(g_max_h, t.h);
+            g_tex.push_back(std::move(t));
+        }
     }
 }
 
@@ -223,15 +242,12 @@ void make_mip(Tex& t, int l, int w, int h) {
 }
 
 // The replacement scaled to its texels x kScale (bilinear), and its mip levels.
-bool load_hd(Tex& t) {
-    if (t.tried) return !t.hd[0].empty();
-    t.tried = true;
+// The replacement read and fitted (t.hd: the HD texels and their mips); false = unreadable. Runs on
+// the decoder threads or the main thread, one texture at a time each (see load_hd).
+bool decode_hd(Tex& t) {
     std::vector<uint32_t> src;
     int sw = 0, sh = 0;
-    if (!replace_load_image(t.png, src, sw, sh) || sw <= 0 || sh <= 0) {
-        log_msg(LogCat::Host, "texture replacements: cannot read %s", t.png.c_str());
-        return false;
-    }
+    if (!replace_load_image(t.png, src, sw, sh) || sw <= 0 || sh <= 0) return false;
     // pure magenta is the game's see-through colour (its palettes hold 7C1F where VRAM gets 0000):
     // exports and their upscales have it opaque; near-magenta too (an upscaler's soft edges)
     for (uint32_t& px : src) {
@@ -266,43 +282,217 @@ bool load_hd(Tex& t) {
     return mips();
 }
 
+// Decoding a level's replacements (PNG reading, fitting, mips: ~4 ms each here, ~10 on a Steam Deck)
+// when it first drew them cost 50-200 ms frames on a Deck: they are decoded on these threads as
+// soon as a scan finds them in VRAM, so they are usually ready when the game draws them.
+enum : uint8_t { kIdle, kQueued, kDecoding, kDone };
+std::vector<uint8_t> g_state;  // per texture (under g_pool_mx)
+std::vector<uint8_t> g_ok;     // decode_hd's result (kDone)
+std::deque<int> g_queue;
+std::mutex g_pool_mx;
+std::condition_variable g_pool_cv, g_done_cv;
+std::vector<std::thread> g_workers;
+bool g_pool_quit = false;
+
+void decoder() {
+    for (;;) {
+        int id;
+        {
+            std::unique_lock<std::mutex> lk(g_pool_mx);
+            g_pool_cv.wait(lk, [] { return g_pool_quit || !g_queue.empty(); });
+            if (g_pool_quit) return;
+            id = g_queue.front();
+            g_queue.pop_front();
+            g_state[id] = kDecoding;
+        }
+        const bool ok = decode_hd(g_tex[id]);
+        {
+            std::lock_guard<std::mutex> lk(g_pool_mx);
+            g_ok[id] = ok;
+            g_state[id] = kDone;
+        }
+        g_done_cv.notify_all();
+    }
+}
+
+// Quitting (std::exit): the decoders finish their texture and end before g_tex goes.
+struct StopDecoders {
+    ~StopDecoders() {
+        {
+            std::lock_guard<std::mutex> lk(g_pool_mx);
+            g_pool_quit = true;
+        }
+        g_pool_cv.notify_all();
+        for (std::thread& w : g_workers) w.join();
+    }
+} g_stop_decoders;
+
+// Textures to decode ahead (the regions a scan found).
+void queue_decode(const std::vector<int>& ids) {
+    {
+        std::lock_guard<std::mutex> lk(g_pool_mx);
+        if (g_state.size() != g_tex.size()) g_state.assign(g_tex.size(), kIdle), g_ok.assign(g_tex.size(), 0);
+        for (int id : ids)
+            if (g_state[id] == kIdle && !g_tex[id].tried) g_state[id] = kQueued, g_queue.push_back(id);
+        if (g_workers.empty() && !g_queue.empty()) {
+            const unsigned n = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 4u);  // (the game needs the rest)
+            for (unsigned i = 0; i < n; i++) g_workers.emplace_back(decoder);
+        }
+    }
+    g_pool_cv.notify_all();
+}
+
+// The replacement's HD texels, decoded by now: by a decoder thread (waiting for it if it is at it),
+// else here.
+bool load_hd(Tex& t) {
+    if (t.tried) return !t.hd[0].empty();
+    t.tried = true;
+    const int id = (int)(&t - g_tex.data());
+    bool ok = false, here = true;
+    {
+        std::unique_lock<std::mutex> lk(g_pool_mx);
+        if (id < (int)g_state.size() && g_state[id] != kIdle) {
+            if (g_state[id] == kQueued) {  // not started: take it
+                g_queue.erase(std::find(g_queue.begin(), g_queue.end(), id));
+                g_state[id] = kDecoding;
+            } else {
+                g_done_cv.wait(lk, [&] { return g_state[id] == kDone; });
+                ok = g_ok[id], here = false;
+            }
+        }
+    }
+    if (here) {
+        ok = decode_hd(t);
+        std::lock_guard<std::mutex> lk(g_pool_mx);
+        if (id < (int)g_state.size()) g_state[id] = kDone, g_ok[id] = ok;
+    }
+    if (!ok) {
+        log_msg(LogCat::Host, "texture replacements: cannot read %s", t.png.c_str());
+        t.hd[0].clear();
+    }
+    return ok;
+}
+
+// texreplace_find's answers (a polygon's page, palette, texels and window -> drawn from the HD copy or
+// not): a level draws the same textures over and over each frame, and finding the regions under
+// every sampled texel (comparing palettes) cost ~15% of the CPU on a Steam Deck. They hold until
+// their palette is written over, the regions change or the HD copy does.
+struct FindKey {
+    int v[13];
+    bool operator==(const FindKey& o) const { return std::equal(v, v + 13, o.v); }
+};
+struct FindKeyHash {
+    size_t operator()(const FindKey& k) const {
+        uint64_t h = 0xCBF29CE484222325ull;
+        for (int x : k.v) h = (h ^ (uint32_t)x) * 0x100000001B3ull;
+        return (size_t)h;
+    }
+};
+std::unordered_map<FindKey, bool, FindKeyHash> g_found;
+
+// Partial scans' results while only a few areas keep changing (animated textures: the game uploads
+// their frames every other frame, in turns): (the changed area, the contents of all those areas) ->
+// the regions found that overlap the change. Any other change starts over.
+struct Rect {
+    int x0, y0, x1, y1;
+    bool operator==(const Rect& o) const { return x0 == o.x0 && y0 == o.y0 && x1 == o.x1 && y1 == o.y1; }
+};
+std::vector<Rect> g_memo_rects;  // (at most 4)
+std::unordered_map<uint64_t, std::vector<Region>> g_memo;
+
 void scan(const uint16_t* vram) {
     g_dirty = false;
-    g_regions.clear();
-    for (auto& row : g_cells)
-        for (auto& c : row) c.clear();
+    const auto t0 = std::chrono::steady_clock::now();
+    const int cx0 = std::max(g_ch_x0, 512), cy0 = std::max(g_ch_y0, 0), cx1 = std::min(g_ch_x1, 1024),
+              cy1 = std::min(g_ch_y1, 512);
+    auto changed = [&](int x, int y, int w, int h) { return x < cx1 && x + w > cx0 && y < cy1 && y + h > cy0; };
+    // regions the change touched go (found again below if still there); the others stay
+    const auto keep = std::stable_partition(g_regions.begin(), g_regions.end(), [&](const Region& r) {
+        return !changed(r.x, r.y, g_tex[r.tex].hw, g_tex[r.tex].h);
+    });
+    std::vector<Region> removed(keep, g_regions.end());
+    g_regions.erase(keep, g_regions.end());
     if (g_keys.empty() && g_keys_v.empty()) return;
-    // every texture whose key is at (x, y) and whose texels all match there becomes a region
+    // every texture whose key is at (x, y), whose texels all match there and that overlaps the
+    // change becomes a region
+    std::vector<Region> found;
     auto try_keys = [&](const std::unordered_multimap<uint64_t, int>& keys, uint64_t k, int x, int y) {
         auto range = keys.equal_range(k);
         for (auto it = range.first; it != range.second; ++it) {
             const Tex& t = g_tex[it->second];
             const int ox = x - t.key_dx, oy = y - t.key_dy;
             if (ox < 512 || oy < 0 || ox + t.hw > 1024 || oy + t.h > 512) continue;
+            if (!changed(ox, oy, t.hw, t.h)) continue;  // (kept above if it was there)
             bool same = true;
             for (int r = 0; r < t.h && same; r++)
                 same = std::memcmp(vram + (oy + r) * 1024 + ox, t.data.data() + (size_t)r * t.hw, t.hw * 2) == 0;
             if (!same) continue;
-            const int id = (int)g_regions.size();
-            g_regions.push_back({ox, oy, it->second});
-            for (int cy = oy / 32; cy <= (oy + t.h - 1) / 32; cy++)
-                for (int cx = ox / 32; cx <= (ox + t.hw - 1) / 32; cx++) g_cells[cy][cx].push_back(id);
+            found.push_back({ox, oy, it->second});
         }
     };
-    for (int y = 0; y < 512; y++)
-        for (int x = 512; x < 1024; x++) {
-            uint64_t k = 0;
-            if (x + 4 <= 1024 && !g_keys.empty()) {
-                for (int i = 0; i < 4; i++) k = k << 16 | vram[y * 1024 + x + i];
-                if (k) try_keys(g_keys, k, x, y);
+    const bool whole = cx0 == 512 && cy0 == 0 && cx1 == 1024 && cy1 == 512;
+    const Rect rect{cx0, cy0, cx1, cy1};
+    if (std::find(g_memo_rects.begin(), g_memo_rects.end(), rect) == g_memo_rects.end()) {
+        if (g_memo_rects.size() >= 4 || whole) g_memo_rects.clear();
+        if (!whole) g_memo_rects.push_back(rect);
+        g_memo.clear();  // (its keys did not cover this area's contents)
+    }
+    if (g_memo.size() > 256) g_memo.clear();
+    uint64_t hash = 0xCBF29CE484222325ull;  // FNV-1a of the change and every tracked area's contents
+    for (int v : {cx0, cy0, cx1, cy1}) hash = (hash ^ (uint32_t)v) * 0x100000001B3ull;
+    if (!whole)
+        for (const Rect& r : g_memo_rects)
+            for (int y = r.y0; y < r.y1; y++)
+                for (int x = r.x0; x < r.x1; x++) hash = (hash ^ vram[y * 1024 + x]) * 0x100000001B3ull;
+    if (auto m = g_memo.find(hash); !whole && m != g_memo.end()) {
+        found = m->second;
+    } else {
+        // a key lies inside its texture: within the largest texture's size of the change
+        for (int y = std::max(cy0 - g_max_h, 0); y < std::min(cy1 + g_max_h, 512); y++)
+            for (int x = std::max(cx0 - g_max_hw, 512); x < std::min(cx1 + g_max_hw, 1024); x++) {
+                uint64_t k = 0;
+                if (x + 4 <= 1024 && !g_keys.empty()) {
+                    for (int i = 0; i < 4; i++) k = k << 16 | vram[y * 1024 + x + i];
+                    if (k && maybe_key(k)) try_keys(g_keys, k, x, y);
+                }
+                if (y + 4 <= 512 && !g_keys_v.empty()) {
+                    k = 0;
+                    for (int i = 0; i < 4; i++) k = k << 16 | vram[(y + i) * 1024 + x];
+                    if (k && maybe_key(k)) try_keys(g_keys_v, k, x, y);
+                }
             }
-            if (y + 4 <= 512 && !g_keys_v.empty()) {
-                k = 0;
-                for (int i = 0; i < 4; i++) k = k << 16 | vram[(y + i) * 1024 + x];
-                if (k) try_keys(g_keys_v, k, x, y);
-            }
+        if (!whole) g_memo[hash] = found;
+    }
+    // in the order a scan of all of VRAM finds them (by key position, rows first; a 4-word key before
+    // a 4-row one): which of two overlapping regions counts must not depend on what changed when
+    auto order = [](const Region& r) {
+        const Tex& t = g_tex[r.tex];
+        return std::make_tuple(r.y + t.key_dy, r.x + t.key_dx, t.hw < 4, r.tex);
+    };
+    auto before = [&](const Region& a, const Region& b) { return order(a) < order(b); };
+    std::sort(found.begin(), found.end(), before);
+    auto same_region = [](const Region& a, const Region& b) { return a.x == b.x && a.y == b.y && a.tex == b.tex; };
+    if (!std::equal(found.begin(), found.end(), removed.begin(), removed.end(), same_region)) {
+        std::vector<int> ids;
+        for (const Region& r : found) ids.push_back(r.tex);
+        g_regions.insert(g_regions.end(), found.begin(), found.end());
+        std::sort(g_regions.begin(), g_regions.end(), before);
+        for (auto& row : g_cells)
+            for (auto& c : row) c.clear();
+        for (int id = 0; id < (int)g_regions.size(); id++) {
+            const Region& r = g_regions[id];
+            const Tex& t = g_tex[r.tex];
+            for (int cy = r.y / 32; cy <= (r.y + t.h - 1) / 32; cy++)
+                for (int cx = r.x / 32; cx <= (r.x + t.hw - 1) / 32; cx++) g_cells[cy][cx].push_back(id);
         }
-    LOG(Host, "texture replacements: %zu found in VRAM", g_regions.size());
+        queue_decode(ids);
+        g_found.clear();
+    } else {
+        g_regions.insert(g_regions.end(), removed.begin(), removed.end());  // (as they were: same order, same ids)
+        std::inplace_merge(g_regions.begin(), g_regions.end() - (ptrdiff_t)removed.size(), g_regions.end(), before);
+    }
+    LOG(Host, "texture replacements: %zu found in VRAM (change %d,%d-%d,%d; %.2f ms)", g_regions.size(), cx0, cy0, cx1, cy1,
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
 // The region of `depth` covering VRAM word (wx, wy) whose own palette is the one in use (the same
@@ -344,6 +534,7 @@ bool place(int id) {
         return o.depth == t.depth && p.x < r.x + t.hw && r.x < p.x + o.hw && p.y < r.y + t.h && r.y < p.y + o.h;
     }), g_placed.end());
     g_placed.push_back(r);
+    g_found.clear();
     return true;
 }
 
@@ -378,15 +569,34 @@ bool texreplace_wad_file(const std::string& name, std::vector<uint8_t>& out) {
     return false;
 }
 
-void texreplace_vram_changed() { g_dirty = true; }
+void texreplace_vram_changed(int x, int y, int w, int h) {
+    if (x + w > 1024 || y + h > 512) x = 0, y = 0, w = 1024, h = 512;  // (wrapped round: all of it)
+    if (!g_dirty) g_ch_x0 = x, g_ch_y0 = y, g_ch_x1 = x + w, g_ch_y1 = y + h;
+    else g_ch_x0 = std::min(g_ch_x0, x), g_ch_y0 = std::min(g_ch_y0, y), g_ch_x1 = std::max(g_ch_x1, x + w), g_ch_y1 = std::max(g_ch_y1, y + h);
+    g_dirty = true;
+}
 
 // gpu_hw.cpp / gpu_vk.cpp: the renderer was shut down (its HD copy went with it): place again.
-void texreplace_atlas_lost() { g_placed.clear(); }
+void texreplace_atlas_lost() { g_placed.clear(), g_found.clear(); }
+
+void texreplace_vram_written(int x, int y, int w, int h) {
+    if (g_found.empty()) return;
+    if (x + w > 1024 || y + h > 512) return g_found.clear();  // (wrapped round)
+    // only answers whose palette was written over can change (textures: through the regions)
+    for (auto it = g_found.begin(); it != g_found.end();) {
+        const int depth = it->first.v[2], cx = it->first.v[3] & 1023, cy = it->first.v[4] & 511;
+        const bool hit = cy >= y && cy < y + h && cx < x + w && cx + (depth == 0 ? 16 : 256) > x;
+        it = hit ? g_found.erase(it) : std::next(it);
+    }
+}
 
 // gpu.cpp: a textured polygon or sprite of page (page_x, page_y, depth 0/1/2) and palette at
 // (clut_x, clut_y) uses texels [u0, u1] x [v0, v1] of the page through the texture window tw
 // (mask x, mask y, offset x, offset y): true if every texel it may use has a replacement (then it
 // is drawn from the HD copy).
+static bool find_uncached(int page_x, int page_y, int depth, int per, const uint16_t* clut, float u0, float v0,
+                          float u1, float v1, const int tw[4]);
+
 bool texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
                      float v1, const int tw[4], const uint16_t* vram) {
     if (!g_tex_replace || depth > 1) return false;
@@ -396,6 +606,17 @@ bool texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, 
     const int per = depth == 0 ? 4 : 2;
     if ((clut_x & 1023) + (depth == 0 ? 16 : 256) > 1024) return false;
     const uint16_t* clut = vram + (clut_y & 511) * 1024 + (clut_x & 1023);
+    const FindKey key{{page_x, page_y, depth, clut_x, clut_y, (int)std::floor(u0), (int)std::ceil(u1), (int)std::floor(v0),
+                       (int)std::ceil(v1), tw[0], tw[1], tw[2], tw[3]}};
+    if (auto it = g_found.find(key); it != g_found.end()) return it->second;
+    if (g_found.size() > 8192) g_found.clear();
+    const bool hd = find_uncached(page_x, page_y, depth, per, clut, u0, v0, u1, v1, tw);
+    g_found[key] = hd;  // (after: placing may have cleared the cache)
+    return hd;
+}
+
+static bool find_uncached(int page_x, int page_y, int depth, int per, const uint16_t* clut, float u0, float v0,
+                          float u1, float v1, const int tw[4]) {
     // the texels to check: both ends and every 16th one between, through the window (the mask
     // bits of a coordinate take the offset's: a block of the page repeats)
     auto points = [](float a, float b, int mask, int off, std::vector<int>& out) {

@@ -245,6 +245,11 @@ void psx_hook_game_over(R3000* c);  // no lives left: restart the level (savesta
 void psx_hook_enemy_damage(R3000* c);  // one hit kill cheat (cheats.cpp)
 int psx_hook_player_use(R3000* c);   // a switch the player used fires: skip on the odd tick (sim60.cpp)
 void psx_hook_zone(R3000* c);  // a force zone pushes a list, a0 = zone, a1 = list head (sim60.cpp)
+// A loop that only waits for an interrupt (reads memory an event handler changes): emulated time
+// jumps to the next event, which the loop's CHECK_EVENTS then runs, as spinning to it would.
+RECOMP_INLINE void psx_idle_until_event(R3000* c) {
+    if (c->cycles < c->next_event) c->cycles = c->next_event;
+}
 void psx_hook_glow_sort(R3000* c);  // glow renderer: v0 = ordering-table slot, a1 = depth, s4 = glow (sim60.cpp)
 void psx_hook_strip_corner(R3000* c);  // level transform: a strip corner is stored (gte.cpp)
 void psx_hook_camera(R3000* c);        // render camera: smoothed view (gte.cpp)

@@ -762,7 +762,8 @@ void execute(const std::vector<uint32_t>& w) {
         if (hw_active()) hw_copy(sx, sy, dx, dy, ww, hh);
         replace_note_copy(sx, sy, dx, dy, ww, hh);
         texdump_vram_changed(dx, dy, ww, hh);
-        if (dx + ww > 512) texreplace_vram_changed();
+        if (dx + ww > 512) texreplace_vram_changed(dx, dy, ww, hh);
+        texreplace_vram_written(dx, dy, ww, hh);
         return;
     }
     if (cmd >= 0xA0 && cmd < 0xC0) {  // CPU -> VRAM: data words follow
@@ -844,7 +845,8 @@ void upload_word(uint32_t v) {
                 if (hw_active()) hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
                 if (g_bios_rom) bootfont_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
                 texdump_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
-                if (g_upload.x + g_upload.w > 512 && g_upload.h > 1) texreplace_vram_changed();
+                if (g_upload.x + g_upload.w > 512 && g_upload.h > 1) texreplace_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
+                texreplace_vram_written(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (static const char* dir = std::getenv("APOC_UPLOAD_DUMP"); dir) {  // raw uploads (tools/extract_textures.py)
                     char name[512];
                     static int seq = 0;

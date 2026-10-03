@@ -90,6 +90,10 @@ INSN_HOOKS = {
     0x800312A0: "psx_hook_game_over(c);",  # lives left (v1) after a death: 0 restarts the level (savestate.cpp)
     0x800776B4: "psx_hook_camera(c);",  # the render camera: smoothed view (gte.cpp)
     0x8005CDA0: "psx_hook_aim(c);",  # player fire vector +471/+472 set: exact stick/mouse angle (host_sdl.cpp)
+    # 800664FC: the VBlank wait's loop (800664E4: until the VBlank callback has counted a0 more):
+    # straight to the next event instead of running the loop through the idle cycles (with the
+    # 8x CPU of 60 Hz mode that was ~10% of the host's time)
+    0x800664FC: "psx_idle_until_event(c);",
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.

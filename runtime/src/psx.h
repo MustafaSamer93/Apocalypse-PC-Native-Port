@@ -176,8 +176,9 @@ void texdump_note(int page_x, int page_y, int depth, int clut_x, int clut_y, con
 void texdump_vram_changed(int x, int y, int w, int h);
 // texture replacements (texreplace.cpp; F1 -> Texture replacements, assets/replacements/textures)
 extern bool g_tex_replace;
-void texreplace_vram_changed();
+void texreplace_vram_changed(int x = 0, int y = 0, int w = 1024, int h = 512);  // (default: all of it)
 void texreplace_atlas_lost();  // the renderer's atlas is gone (shut down)
+void texreplace_vram_written(int x, int y, int w, int h);  // any upload or copy: palettes texreplace_find read may change
 bool texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
                      float v1, const int tw[4], const uint16_t* vram);  // the title screen (PRESS START) is up
 extern uint32_t g_gpu_ot_z;  // depth of the ordering-table slot being sent (hw.cpp; 0: none)
