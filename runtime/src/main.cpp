@@ -64,7 +64,7 @@ void usage() {
         "  --refresh HZ       display refresh rate to assume (if the detected one is wrong)\n"
         "  --sim60            60 Hz simulation in every level (default: levels 1-4 only; F1 menu)\n"
         "  --chapter N        start at chapter N (saves/chapters; F2 or F1 -> Chapter lists them)\n"
-        "  --renderer R       opengl or vulkan (default: the F1 setting, OpenGL at first)\n"
+        "  --renderer R       opengl or vulkan (default: the F1 setting; at first OpenGL, Vulkan on Linux)\n"
         "  --bios-intro       play the BIOS boot sequence (assets/bios) even with other options\n"
         "keys: arrows, Z=Cross X=Circle A=Square S=Triangle Q/W=L1/R1 1/2=L2/R2\n"
         "      Enter=Start Backspace=Select Tab=fast-forward F2=chapters F11=fullscreen Esc=quit\n");
@@ -177,8 +177,8 @@ static bool stderr_unseen() {
     HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
     return !GetConsoleWindow() && (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN);
 #else
-    struct stat st{};  // a terminal, file or pipe is seen; /dev/null or a journal socket is not
-    return !isatty(STDERR_FILENO) && (fstat(STDERR_FILENO, &st) != 0 || !(S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode)));
+    struct stat st{};  // a terminal or file is seen; /dev/null, a journal or Steam's pipe is not
+    return !isatty(STDERR_FILENO) && (fstat(STDERR_FILENO, &st) != 0 || !S_ISREG(st.st_mode));
 #endif
 }
 

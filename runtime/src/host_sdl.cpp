@@ -42,14 +42,26 @@ SDL_AudioStream* g_audio = nullptr;
 
 // Graphics settings (settings screen, saved in settings.ini).
 struct GfxSettings {
+#ifdef _WIN32
     int scale = 5;          // 0 = software renderer, 1..8 = OpenGL internal resolution (5 = 1200 lines)
+#else
+    int scale = 4;          // (Linux: what holds 60 fps on the Steam Deck, with FXAA and Vulkan)
+#endif
     Aspect aspect = Aspect::A16_9;
     bool crt = false;       // CRT filter (present.cpp / present_vk.cpp)
     bool texture_filter = false;
     int fps = 0;            // images per second: 0 = match the display, 30 = original, 60..150 (smooth.cpp)
+#ifdef _WIN32
     int aa = 3;             // anti-aliasing: bit 0 = FXAA pass, bit 1 = supersampling (SSAA)
+#else
+    int aa = 1;             // (Linux: FXAA only; SSAA rendered the Steam Deck at 7x, 20-30 fps)
+#endif
     int msaa = 1;           // multisample anti-aliasing: samples per pixel (1, 2, 4, 8)
+#ifdef _WIN32
     bool vulkan = false;    // renderer: Vulkan instead of OpenGL (applies at the next start)
+#else
+    bool vulkan = true;     // (Linux: Mesa's OpenGL ran the Steam Deck at 20-50 fps where Vulkan holds 60)
+#endif
 };
 int g_active_msaa = 1;      // MSAA samples the renderer was created with
 const char* const kAaNames[] = {"Off", "FXAA", "SSAA", "SSAA + FXAA"};
