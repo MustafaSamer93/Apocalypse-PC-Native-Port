@@ -166,7 +166,24 @@ void main() {
             // see-through. There the game's colour shows; the replacement keeps its own soft edges.
             bool game_transparent;
             vec4 g = texel(ivec2(floor(v_uv)), vec2(0.0), game_transparent);
-            if (transparent && !game_transparent) { tc.rgb = g.rgb; transparent = false; }
+            if (((v_info.x >> 28) & 1u) != 0u) {
+                // a letter in the game font (texreplace.cpp): its shape, coloured like the game's
+                // letter on that row (the nearest row with any), in the palette it is drawn with
+                int lo = int(v_box & 255u), hi = int((v_box >> 16) & 255u), y = int(floor(v_uv.y));
+                vec3 sum = vec3(0.0);
+                float n = 0.0;
+                for (int d = 0; d < 8 && n == 0.0; d++)
+                    for (int s = -1; s <= 1; s += 2) {
+                        int row = y + d * s;
+                        if (n > 0.0 || (d == 0 && s > 0)) continue;
+                        for (int x = lo; x <= hi && x < lo + 64; x++) {
+                            bool tr;
+                            vec4 c = texel(ivec2(x, row), vec2(0.0), tr);
+                            if (!tr) { sum += c.rgb; n += 1.0; }
+                        }
+                    }
+                if (n > 0.0) tc.rgb = sum / n;
+            } else if (transparent && !game_transparent) { tc.rgb = g.rgb; transparent = false; }
             tc.a = g.a;
         } else if (((v_info.x >> 24) & 1u) != 0u) {  // game text
             tc = text_texel(uv, transparent);

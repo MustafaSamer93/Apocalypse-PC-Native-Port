@@ -7,7 +7,19 @@
 #include <algorithm>
 #include <cstdint>
 
-enum class Aspect { A4_3, A16_9, A16_10, Stretch };
+enum class Aspect { A4_3, A16_9, A16_10, Stretch, A21_9, A32_9 };
+
+// Width / height of an aspect ratio; 0 for Stretch (the window's own).
+inline float aspect_ratio(Aspect a) {
+    switch (a) {
+        case Aspect::A4_3: return 4.0f / 3.0f;
+        case Aspect::A16_9: return 16.0f / 9.0f;
+        case Aspect::A16_10: return 16.0f / 10.0f;
+        case Aspect::A21_9: return 21.0f / 9.0f;
+        case Aspect::A32_9: return 32.0f / 9.0f;
+        default: return 0.0f;
+    }
+}
 
 struct PresentOptions {
     Aspect aspect = Aspect::A4_3;

@@ -31,10 +31,12 @@
 
 #include "gpu_hw.h"
 #include "psx.h"
+#include "stb_truetype.h"  // (its code is in ui_text.cpp)
 
 bool replace_load_image(const std::string& path, std::vector<uint32_t>& rgba, int& w, int& h);  // replace.cpp
 
 bool g_tex_replace = true;  // setting (settings.ini "texreplace"; on: whatever is in the folder is used)
+bool g_game_font = true;    // setting (settings.ini "gamefont"): the game's letters in assets/fonts' font
 
 namespace {
 
@@ -52,7 +54,94 @@ struct Tex {
     int key_dx = 0, key_dy = 0;  // where its first non-zero 4-word window is (the scan key)
     std::vector<uint32_t> hd[3];  // the replacement at kScale, kScale/2, 1 (mip levels; loaded when first used)
     bool tried = false;
+    uint32_t glyph = 0;  // a letter of the game's fonts (bits.psx): its character, drawn in assets/fonts' font
 };
+
+// ---- the game's fonts in a TrueType font (Enhancements -> Font)
+// Both fonts are textures in bits.psx, one per letter, cut to the letter's ink: the big bronze one
+// (menus, titles) and the small white one (HUD, messages). Each letter is drawn again in the font
+// from assets/fonts (the first .ttf/.otf there) to fill the same box, coloured row by row like the
+// game's letter, and goes in as that texture's replacement: the game still places, spaces, tints and
+// fades its letters itself.
+uint32_t font_glyph(int idx) {
+    static const char* const kBig = "-+%\xC4\xD6\xDC" "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789?\xC0!\xC9\xC8\xD4',-\xCA\xCC";  // 97..149
+    static const char* const kSmall = "ABCDEFGHIJKLMNOPQRSTUVWXYZ.'?!-0123456789";                         // 13..53
+    if (idx >= 97 && idx <= 149) return (uint8_t)kBig[idx - 97];
+    if (idx >= 13 && idx <= 53) return (uint8_t)kSmall[idx - 13];
+    return 0;
+}
+
+stbtt_fontinfo g_ttf;
+std::vector<uint8_t> g_ttf_data;
+std::string g_ttf_name;  // the font file's name without extension ("" = none found)
+
+bool font_loaded() {
+    static bool tried = false;
+    if (tried) return !g_ttf_name.empty();
+    tried = true;
+    std::error_code ec;
+    std::vector<std::filesystem::path> found;
+    for (const auto& e : std::filesystem::directory_iterator("assets/fonts", ec)) {
+        std::string x = e.path().extension().string();
+        for (char& ch : x) ch = (char)std::tolower((unsigned char)ch);
+        if (x == ".ttf" || x == ".otf") found.push_back(e.path());
+    }
+    if (found.empty()) return false;
+    std::sort(found.begin(), found.end());
+    FILE* f = std::fopen(found[0].string().c_str(), "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    g_ttf_data.resize((size_t)std::max(0L, std::ftell(f)));
+    std::fseek(f, 0, SEEK_SET);
+    const bool read = std::fread(g_ttf_data.data(), 1, g_ttf_data.size(), f) == g_ttf_data.size();
+    std::fclose(f);
+    if (!read || !stbtt_InitFont(&g_ttf, g_ttf_data.data(), stbtt_GetFontOffsetForIndex(g_ttf_data.data(), 0))) return false;
+    g_ttf_name = found[0].stem().string();
+    log_msg(LogCat::Host, "game font: %s", found[0].string().c_str());
+    return true;
+}
+
+// Drawn in the TrueType font now (setting on, the font has the character).
+bool glyph_on(const Tex& t) {
+    return t.glyph && g_game_font && font_loaded() && stbtt_FindGlyphIndex(&g_ttf, (int)t.glyph) != 0;
+}
+
+// The letter at kScale (t.hd[0]): the font's glyph scaled to the height of the game letter's ink
+// (narrowed if wider than it), centred in it. Only its shape counts: the shaders
+// colour it from the game letter's own texels, in whatever palette the game draws it with.
+bool render_glyph(Tex& t) {
+    const int per = t.depth == 0 ? 4 : 2, dw = t.texels_w * kScale, dh = t.h * kScale;
+    int x0 = t.texels_w, x1 = -1, y0 = t.h, y1 = -1;
+    for (int y = 0; y < t.h; y++)
+        for (int x = 0; x < t.texels_w; x++) {
+            const uint16_t w = t.data[(size_t)y * t.hw + x / per];
+            const int i = t.depth == 0 ? (w >> (x % 4 * 4)) & 15 : (w >> (x % 2 * 8)) & 255;
+            const uint16_t c = i < (int)t.pal.size() ? t.pal[i] & 0x7FFF : 0;
+            if (c && c != 0x7C1F)  // (0 and magenta: see-through)
+                x0 = std::min(x0, x), x1 = std::max(x1, x), y0 = std::min(y0, y), y1 = std::max(y1, y);
+        }
+    if (x1 < 0) return false;
+    const int bw = (x1 - x0 + 1) * kScale, bh = (y1 - y0 + 1) * kScale;
+    int gx0, gy0, gx1, gy1;
+    stbtt_GetCodepointBitmapBox(&g_ttf, (int)t.glyph, 1, 1, &gx0, &gy0, &gx1, &gy1);
+    if (gx1 <= gx0 || gy1 <= gy0) return false;
+    const float sy = (float)bh / (float)(gy1 - gy0), sx = std::min(sy, (float)bw / (float)(gx1 - gx0));
+    int ix0, iy0, ix1, iy1;
+    stbtt_GetCodepointBitmapBox(&g_ttf, (int)t.glyph, sx, sy, &ix0, &iy0, &ix1, &iy1);
+    const int gw = ix1 - ix0, gh = iy1 - iy0;
+    if (gw <= 0 || gh <= 0) return false;
+    std::vector<uint8_t> cov((size_t)gw * gh);
+    stbtt_MakeCodepointBitmap(&g_ttf, cov.data(), gw, gh, gw, sx, sy, (int)t.glyph);
+    const int ox = x0 * kScale + (bw - gw) / 2, oy = y0 * kScale + (bh - gh) / 2;
+    t.hd[0].assign((size_t)dw * dh, 0);
+    for (int y = 0; y < gh; y++)
+        for (int x = 0; x < gw; x++) {
+            const int px = ox + x, py = oy + y;
+            const uint8_t a = cov[(size_t)y * gw + x];
+            if (a && px >= 0 && py >= 0 && px < dw && py < dh) t.hd[0][(size_t)py * dw + px] = 0x00FFFFFFu | (uint32_t)a << 24;
+        }
+    return true;
+}
 
 struct Region {
     int x, y;  // VRAM words
@@ -112,7 +201,7 @@ bool header(const std::vector<uint8_t>& b, size_t o, Hdr* hd) {
 }
 
 // The textures of one .psx file whose replacement exists.
-void parse(const std::vector<uint8_t>& b, const std::string& dir) {
+void parse(const std::vector<uint8_t>& b, const std::string& dir, bool fonts) {
     // the texture table: a count, then offsets that all point at valid headers
     size_t table = 0;
     uint32_t n = 0;
@@ -159,9 +248,12 @@ void parse(const std::vector<uint8_t>& b, const std::string& dir) {
         std::snprintf(name, sizeof name, "/%03u.png", hd.idx);
         const std::string png = dir + name;
         std::error_code ec;
-        if (!std::filesystem::exists(png, ec)) continue;
+        const bool have = !dir.empty() && std::filesystem::exists(png, ec);
+        const uint32_t glyph = fonts ? font_glyph((int)hd.idx) : 0;
+        if (!have && !glyph) continue;
         Tex t;
-        t.png = png;
+        t.png = have ? png : "";
+        t.glyph = glyph;
         t.hw = hd.stride / 2;
         t.h = hd.h;
         t.texels_w = hd.w;
@@ -194,7 +286,6 @@ void parse(const std::vector<uint8_t>& b, const std::string& dir) {
 void load_index() {
     g_loaded = true;
     std::error_code ec;
-    if (!std::filesystem::is_directory(kDir, ec)) return;
     std::vector<uint8_t> hed, wad;
     if (!read_disc_file("CD.HED", hed) || !read_disc_file("CD.WAD", wad)) return;
     // CD.HED: {name\0 padded to 4 bytes, u32 offset, u32 size}... ended by 0xFF
@@ -207,15 +298,24 @@ void load_index() {
         files[name] = {rd32(hed, p), rd32(hed, p + 4)};
         p += 8;
     }
+    auto file = [&](const std::string& base, std::vector<uint8_t>& b) {
+        auto it = files.find(base + ".psx");
+        if (it == files.end() || (size_t)it->second.first + it->second.second > wad.size()) return false;
+        b.assign(wad.begin() + it->second.first, wad.begin() + it->second.first + it->second.second);
+        return true;
+    };
+    bool bits = false;  // (the game's fonts: also without a folder of replacements for bits.psx)
     for (const auto& e : std::filesystem::directory_iterator(kDir, ec)) {
         if (!e.is_directory()) continue;
         std::string base = e.path().filename().string();
         for (char& ch : base) ch = (char)std::tolower((unsigned char)ch);
-        auto it = files.find(base + ".psx");
-        if (it == files.end() || (size_t)it->second.first + it->second.second > wad.size()) continue;
-        std::vector<uint8_t> b(wad.begin() + it->second.first, wad.begin() + it->second.first + it->second.second);
-        parse(b, std::string(kDir) + "/" + e.path().filename().string());
+        std::vector<uint8_t> b;
+        if (!file(base, b)) continue;
+        parse(b, std::string(kDir) + "/" + e.path().filename().string(), base == "bits");
+        bits |= base == "bits";
     }
+    if (std::vector<uint8_t> b; !bits && file("bits", b)) parse(b, "", true);
+    font_loaded();  // (here, before the decoder threads ask)
     log_msg(LogCat::Host, "texture replacements: %zu textures", g_tex.size());
 }
 
@@ -245,6 +345,9 @@ void make_mip(Tex& t, int l, int w, int h) {
 // The replacement read and fitted (t.hd: the HD texels and their mips); false = unreadable. Runs on
 // the decoder threads or the main thread, one texture at a time each (see load_hd).
 bool decode_hd(Tex& t) {
+    if (glyph_on(t)) return render_glyph(t) && (make_mip(t, 1, t.texels_w * kScale, t.h * kScale),
+                                                 make_mip(t, 2, t.texels_w * kScale / 2, t.h * kScale / 2), true);
+    if (t.png.empty()) return false;
     std::vector<uint32_t> src;
     int sw = 0, sh = 0;
     if (!replace_load_image(t.png, src, sw, sh) || sw <= 0 || sh <= 0) return false;
@@ -367,7 +470,7 @@ bool load_hd(Tex& t) {
         if (id < (int)g_state.size()) g_state[id] = kDone, g_ok[id] = ok;
     }
     if (!ok) {
-        log_msg(LogCat::Host, "texture replacements: cannot read %s", t.png.c_str());
+        if (!t.png.empty()) log_msg(LogCat::Host, "texture replacements: cannot read %s", t.png.c_str());
         t.hd[0].clear();
     }
     return ok;
@@ -388,7 +491,7 @@ struct FindKeyHash {
         return (size_t)h;
     }
 };
-std::unordered_map<FindKey, bool, FindKeyHash> g_found;
+std::unordered_map<FindKey, int, FindKeyHash> g_found;
 
 // Partial scans' results while only a few areas keep changing (animated textures: the game uploads
 // their frames every other frame, in turns): (the changed area, the contents of all those areas) ->
@@ -505,6 +608,8 @@ int region_at(int wx, int wy, int depth, const uint16_t* clut) {
         const Region& r = g_regions[id];
         const Tex& t = g_tex[r.tex];
         if (t.depth != depth || wx < r.x || wy < r.y || wx >= r.x + t.hw || wy >= r.y + t.h) continue;
+        if (!g_tex_replace && !glyph_on(t)) continue;  // (Texture replacements off: only the font)
+        if (glyph_on(t)) return id;
         bool own = !t.pal.empty();
         for (size_t i = 0; i < t.pal.size() && own; i++) {
             // uploaded palettes get bit 15 set, and magenta (7C1F, the see-through colour) becomes 0
@@ -594,29 +699,29 @@ void texreplace_vram_written(int x, int y, int w, int h) {
 // (clut_x, clut_y) uses texels [u0, u1] x [v0, v1] of the page through the texture window tw
 // (mask x, mask y, offset x, offset y): true if every texel it may use has a replacement (then it
 // is drawn from the HD copy).
-static bool find_uncached(int page_x, int page_y, int depth, int per, const uint16_t* clut, float u0, float v0,
-                          float u1, float v1, const int tw[4]);
+static int find_uncached(int page_x, int page_y, int depth, int per, const uint16_t* clut, float u0, float v0,
+                         float u1, float v1, const int tw[4]);
 
-bool texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
-                     float v1, const int tw[4], const uint16_t* vram) {
-    if (!g_tex_replace || depth > 1) return false;
+int texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
+                    float v1, const int tw[4], const uint16_t* vram) {
+    if ((!g_tex_replace && !g_game_font) || depth > 1) return 0;
     if (!g_loaded) load_index();
-    if (g_tex.empty()) return false;
+    if (g_tex.empty()) return 0;
     if (g_dirty) scan(vram);
     const int per = depth == 0 ? 4 : 2;
-    if ((clut_x & 1023) + (depth == 0 ? 16 : 256) > 1024) return false;
+    if ((clut_x & 1023) + (depth == 0 ? 16 : 256) > 1024) return 0;
     const uint16_t* clut = vram + (clut_y & 511) * 1024 + (clut_x & 1023);
     const FindKey key{{page_x, page_y, depth, clut_x, clut_y, (int)std::floor(u0), (int)std::ceil(u1), (int)std::floor(v0),
                        (int)std::ceil(v1), tw[0], tw[1], tw[2], tw[3]}};
     if (auto it = g_found.find(key); it != g_found.end()) return it->second;
     if (g_found.size() > 8192) g_found.clear();
-    const bool hd = find_uncached(page_x, page_y, depth, per, clut, u0, v0, u1, v1, tw);
+    const int hd = find_uncached(page_x, page_y, depth, per, clut, u0, v0, u1, v1, tw);
     g_found[key] = hd;  // (after: placing may have cleared the cache)
     return hd;
 }
 
-static bool find_uncached(int page_x, int page_y, int depth, int per, const uint16_t* clut, float u0, float v0,
-                          float u1, float v1, const int tw[4]) {
+static int find_uncached(int page_x, int page_y, int depth, int per, const uint16_t* clut, float u0, float v0,
+                         float u1, float v1, const int tw[4]) {
     // the texels to check: both ends and every 16th one between, through the window (the mask
     // bits of a coordinate take the offset's: a block of the page repeats)
     auto points = [](float a, float b, int mask, int off, std::vector<int>& out) {
@@ -635,10 +740,31 @@ static bool find_uncached(int page_x, int page_y, int depth, int per, const uint
     for (int v : vs)
         for (int u : us) {
             const int id = region_at(page_x + u / per, page_y + v, depth, clut);
-            if (id < 0) return false;
+            if (id < 0) return 0;
             if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
         }
-    for (int id : ids)
-        if (!place(id)) return false;
-    return true;
+    bool glyph = false;
+    for (int id : ids) {
+        if (!place(id)) return 0;
+        glyph |= glyph_on(g_tex[g_regions[id].tex]);
+    }
+    return glyph ? 2 : 1;
 }
+
+// The Font setting changed: the letters are made again (or their replacement images read), and placed.
+void texreplace_font_changed() {
+    {
+        std::lock_guard<std::mutex> lk(g_pool_mx);
+        for (size_t id = 0; id < g_tex.size(); id++) {
+            Tex& t = g_tex[id];
+            if (!t.glyph || (id < g_state.size() && (g_state[id] == kQueued || g_state[id] == kDecoding))) continue;
+            t.tried = false;
+            for (auto& l : t.hd) l.clear();
+            if (id < g_state.size()) g_state[id] = kIdle;
+        }
+    }
+    g_placed.clear();
+    g_found.clear();
+}
+
+std::string texreplace_font_name() { return font_loaded() ? g_ttf_name : ""; }

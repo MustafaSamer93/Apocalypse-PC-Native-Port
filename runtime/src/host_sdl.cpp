@@ -184,6 +184,8 @@ PresentOptions present_options() {
     // the disc's own full-screen pictures keep their 4:3 (replacements are fitted to the screen)
     if (o.aspect != Aspect::A4_3 && !gpu_movie_playing() && replace_original_picture_shown(gpu_display().y))
         o.aspect = Aspect::A4_3;
+    // movies on ultra-wide screens: shaped as in 16:9, with bars at the sides
+    if ((o.aspect == Aspect::A21_9 || o.aspect == Aspect::A32_9) && gpu_movie_playing()) o.aspect = Aspect::A16_9;
     o.crt = g_gfx.crt;
     o.fxaa = g_gfx.aa & 1;
     return o;
@@ -247,7 +249,7 @@ int render_scale() {
     if (g_gfx.scale == 0 || !(g_gfx.aa & 2) || !g_window) return g_gfx.scale;
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(g_window, &w, &h);
-    return std::clamp((2 * h + 239) / 240, g_gfx.scale, 8);
+    return std::clamp((2 * h + 239) / 240, g_gfx.scale, std::max(g_gfx.scale, 8));
 }
 
 void apply_graphics() {
@@ -277,11 +279,8 @@ void apply_graphics() {
     // for the display, so no tearing).
     const float beat = g_refresh_hz / 60.0f;
     g_present_timed = g_present_vsync && std::abs(beat - std::round(beat)) * 60.0f > 2.0f;
-    switch (g_gfx.aspect) {
-        case Aspect::A16_9: g_gte_widescreen = 0.75f; break;       // (4/3) / (16/9)
-        case Aspect::A16_10: g_gte_widescreen = 5.0f / 6.0f; break; // (4/3) / (16/10)
-        default: g_gte_widescreen = 1.0f; break;
-    }
+    const float ratio = aspect_ratio(g_gfx.aspect);  // (4/3) / ratio: 16:9 = 0.75, 32:9 = 0.375
+    g_gte_widescreen = ratio > 0 ? (4.0f / 3.0f) / ratio : 1.0f;
 }
 
 // ---------------------------------------------------------------- custom button layouts
@@ -305,6 +304,10 @@ const char* settings_file() {
 // Remapped keyboard: one key per PS1 button (bit number), used when g_key_custom.
 SDL_Scancode g_keys[16] = {};
 bool g_key_custom = false;
+// Player 1's input (like PSXRecomp's per-player source): "" = keyboard and every controller,
+// "keyboard" = keyboard & mouse only, else one controller's GUID. A chosen controller that is not
+// connected falls back to all, so a missing pad never leaves the game without input.
+std::string g_input;
 bool g_fullscreen = true;  // start in fullscreen (F11 switches; saved as "fullscreen N")
 
 // Order the settings screen asks for buttons in.
@@ -356,6 +359,8 @@ void save_settings() {
                  g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
     std::fprintf(f, "sim %d\n", g_sim60_setting);
     std::fprintf(f, "drawdist %d\n", g_draw_distance);
+    std::fprintf(f, "fov %d\n", g_fov);
+    std::fprintf(f, "gamefont %d\n", g_game_font ? 1 : 0);
     std::fprintf(f, "precise %d\n", g_gte_precise ? 1 : 0);
     std::fprintf(f, "font %d\n", g_smooth_font ? 1 : 0);
     std::fprintf(f, "menuzoom %d\n", g_menu_zoom);
@@ -368,6 +373,7 @@ void save_settings() {
     std::fprintf(f, "aa %d\n", g_gfx.aa);
     std::fprintf(f, "msaa %d\n", g_gfx.msaa);
     std::fprintf(f, "renderer %s\n", g_gfx.vulkan ? "vulkan" : "opengl");
+    if (!g_input.empty()) std::fprintf(f, "input %s\n", g_input.c_str());
     if (g_key_custom) {
         std::fprintf(f, "keys");
         for (int i = 0; i < 16; i++)
@@ -406,11 +412,11 @@ void load_settings() {
         int sc, as, crt, filt, fps, smooth;
         int got = std::sscanf(line, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d", &sc, &as, &crt, &filt, &fps);
         if (got >= 4) {
-            g_gfx.scale = std::clamp(sc, 0, 8);
-            g_gfx.aspect = (Aspect)std::clamp(as, 0, 3);
+            g_gfx.scale = std::clamp(sc, 0, 9);
+            g_gfx.aspect = (Aspect)std::clamp(as, 0, 5);
             g_gfx.crt = crt != 0;
             g_gfx.texture_filter = filt != 0;
-            if (got == 5) g_gfx.fps = fps == 0 ? 0 : std::clamp(fps / 30 * 30, 30, 60);  // (75-150 were offered once)
+            if (got == 5) g_gfx.fps = fps == 0 ? 0 : std::clamp(fps, 30, 144);
             else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
                 g_gfx.fps = smooth ? 0 : 30;  // older settings file
             continue;
@@ -460,12 +466,24 @@ void load_settings() {
             g_gte_precise = pr != 0;
             continue;
         }
+        if (int gf; std::sscanf(line, "gamefont %d", &gf) == 1) {
+            g_game_font = gf != 0;
+            continue;
+        }
+        if (int fv; std::sscanf(line, "fov %d", &fv) == 1) {
+            g_fov = fv == 0 ? 0 : std::clamp(fv, 30, 120);
+            continue;
+        }
         if (int dd; std::sscanf(line, "drawdist %d", &dd) == 1) {
             g_draw_distance = std::clamp(dd, 100, 400);
             continue;
         }
         if (int sim; std::sscanf(line, "sim %d", &sim) == 1) {
             g_sim60_setting = std::clamp(sim, 0, 2);
+            continue;
+        }
+        if (char in[64]; std::sscanf(line, "input %63s", in) == 1) {
+            g_input = in;
             continue;
         }
         if (std::strncmp(line, "keys", 4) == 0) {
@@ -612,7 +630,7 @@ bool host_init(const char* title, int scale) {
     // Fullscreen (on the desktop's own mode) unless the player chose a window with F11. The
     // window, for then: shaped like the picture; `scale` N asks for 240*N lines; 0 (the
     // default) asks for 1080: a 1080p window if the desktop has room, else the largest that fits.
-    const float ratio = g_gfx.aspect == Aspect::A16_9 ? 16.0f / 9 : g_gfx.aspect == Aspect::A16_10 ? 16.0f / 10 : 4.0f / 3;
+    const float ratio = aspect_ratio(g_gfx.aspect) > 0 ? aspect_ratio(g_gfx.aspect) : 4.0f / 3;
     int win_h = scale > 0 ? 240 * scale : 1080;
     const bool fullscreen = g_fullscreen;
     SDL_DisplayID display = SDL_GetPrimaryDisplay();
@@ -933,10 +951,20 @@ extern "C" void psx_hook_aim(R3000* c) {
     MEM_W8(c, p + 472, (uint8_t)(int8_t)std::lround(std::cos(t) * 127));
 }
 
+// Whether every device drives player 1 (the "All" choice, or the chosen controller is unplugged).
+static bool input_all() {
+    if (g_input.empty()) return true;
+    if (g_input == "keyboard") return false;
+    for (auto& d : g_devices)
+        if (device_guid(d) == g_input) return false;
+    return true;
+}
+
 PadState host_pad(int port, bool analog) {
     uint16_t pressed = 0;
     PadState s;
-    if (port == 0) {
+    const bool all = input_all();
+    if (port == 0 && (all || g_input == "keyboard")) {
         const bool* k = SDL_GetKeyboardState(nullptr);
         if (g_key_custom) {
             for (int i = 0; i < 16; i++)
@@ -946,6 +974,8 @@ PadState host_pad(int port, bool analog) {
                 if (k[m.sc]) pressed |= m.bit;
         }
         pressed |= mouse_buttons();
+    }
+    if (port == 0) {
         // Debug: APOC_PAD_SCRIPT=FRAME:BUTTON[:FRAMES],... presses a button (start, select, x, o,
         // t = triangle, sq = square, up, down, left, right, lone/rone/ltwo/rtwo = L1/R1/L2/R2) from
         // each FRAME, for FRAMES frames (6 if not given).
@@ -967,6 +997,7 @@ PadState host_pad(int port, bool analog) {
     }
     for (auto& dev : g_devices) {
         if (port != 0) break;
+        if (!all && device_guid(dev) != g_input) continue;
         if (auto it = g_layouts.find(device_guid(dev)); it != g_layouts.end()) {
             SDL_Joystick* j = device_joystick(dev);
             for (int i = 0; i < 16; i++)
@@ -1128,8 +1159,8 @@ uint64_t g_last_image = ~0ull;
 // movie (made for 4:3, with black bands in the picture) is enlarged to the full width, keeping
 // its proportions, and loses what no longer fits (1/8 at each edge for 16:9).
 static int movie_crop(int h) {
-    if ((g_gfx.aspect != Aspect::A16_9 && g_gfx.aspect != Aspect::A16_10) || !gpu_movie_playing()) return 0;
-    return (int)((float)h * (1.0f - g_gte_widescreen) * 0.5f);
+    if (g_gfx.aspect == Aspect::A4_3 || g_gfx.aspect == Aspect::Stretch || !gpu_movie_playing()) return 0;
+    return (int)((float)h * (1.0f - std::max(g_gte_widescreen, 0.75f)) * 0.5f);  // (ultra-wide: as 16:9)
 }
 
 // Draws the game image for `frac` of the way into the current emulated vblank, then swaps.
@@ -1345,11 +1376,11 @@ void host_present(const GpuDisplay& d) {
 // Font scaling of the game's menus (percent, game_menu.cpp).
 constexpr int kFontScaleChoices[] = {30, 40, 50, 60, 70, 80};
 // Frame rates offered in the menus (30 = the original).
-constexpr int kMenuFpsChoices[] = {30, 60};
+constexpr int kMenuFpsChoices[] = {30, 60, 75, 90, 120, 144};
 // Resolution choices: render scale (lines = 240 x scale, the first at or above the named lines;
 // the renderer works in whole multiples of the PS1's 240) and name.
-constexpr int kResChoices[] = {1, 3, 4, 5};
-const char* const kResNames[] = {"Original", "720", "800", "1080"};
+constexpr int kResChoices[] = {1, 3, 4, 5, 6, 9};
+const char* const kResNames[] = {"Original", "720", "800", "1080", "1440", "2160 (4K)"};
 
 // The Resolution choice for the current setting: the highest at or below it (a scale set in F1
 // between choices, e.g. 8x = 1920 lines on a 1080p screen, shows as 1080).
@@ -1358,6 +1389,10 @@ const struct { const char* name; int scale; Aspect aspect; } kDisplays[] = {
     {"320x240 (Original)", 1, Aspect::A4_3},     {"960x720", 3, Aspect::A4_3},
     {"1280x720 (Widescreen)", 3, Aspect::A16_9}, {"1280x800 (Steam Deck)", 4, Aspect::A16_10},
     {"1440x1080", 5, Aspect::A4_3},              {"1920x1080 (Widescreen)", 5, Aspect::A16_9},
+    {"2560x1080 (Ultra-wide)", 5, Aspect::A21_9}, {"3840x1080 (Super ultra-wide)", 5, Aspect::A32_9},
+    {"2560x1440 (Widescreen)", 6, Aspect::A16_9}, {"3440x1440 (Ultra-wide)", 6, Aspect::A21_9},
+    {"5120x1440 (Super ultra-wide)", 6, Aspect::A32_9}, {"2880x2160", 9, Aspect::A4_3},
+    {"3840x2160 (4K)", 9, Aspect::A16_9},
 };
 
 // The Display choice for the current settings: same aspect ratio (16:10 for Stretch), the highest
@@ -1381,7 +1416,7 @@ const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
                                   "Font scaling", "Renderer", "Screen mode", "Resolution", "Aspect ratio", "Display",
                                   "Autosave", "One-liners", "Anti-aliasing", "Infinite health", "Infinite lives",
-                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "Boot sequence", "CRT filter"};
+                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "Boot sequence", "CRT filter", "Field of view", "Font"};
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -1398,8 +1433,9 @@ std::string enh_value(int id) {
                    ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)");
         case E_SCREEN: return g_fullscreen ? "Full" : "Window";
         case E_ASPECT: {
-            static const char* names[] = {"Original", "Widescreen", "Widescreen (Steam Deck)", "Stretch"};  // 4:3, 16:9, 16:10
-            return names[std::clamp((int)g_gfx.aspect, 0, 3)];
+            static const char* names[] = {"Original", "Widescreen", "Widescreen (Steam Deck)", "Stretch",
+                                          "Ultra-wide 21:9", "Super ultra-wide 32:9"};
+            return names[std::clamp((int)g_gfx.aspect, 0, 5)];
         }
         case E_RES: return kResNames[res_choice()];
         case E_DISPLAY: return kDisplays[display_choice()].name;
@@ -1408,6 +1444,14 @@ std::string enh_value(int id) {
         case E_AA: return kAaNames[std::clamp(g_gfx.aa, 0, 3)];
         case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
         case E_BOOT: return g_boot_sequence ? "On" : "Off";
+        case E_GAME_FONT: {
+            const std::string name = texreplace_font_name();
+            if (name.empty()) return "Original (no font in assets/fonts)";
+            return g_game_font ? name : "Original";
+        }
+        case E_FOV:
+            if (g_fov == 0) return g_fov_base > 0 ? "Original (" + std::to_string(std::lround(g_fov_base)) + ")" : "Original";
+            return std::to_string(g_fov);
         case E_CRT: return g_gfx.crt ? "On" : "Off";
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
@@ -1444,9 +1488,10 @@ void enh_change(int id, int dir) {
             g_fullscreen = !g_fullscreen;
             if (g_window) SDL_SetWindowFullscreen(g_window, g_fullscreen);
             break;
-        case E_ASPECT: {  // 4:3, 16:9, 16:10 (Stretch, from F1, goes to the next end)
-            static const int order[] = {(int)Aspect::A4_3, (int)Aspect::A16_9, (int)Aspect::A16_10};
-            g_gfx.aspect = (Aspect)cycle(order, 3, (int)g_gfx.aspect);
+        case E_ASPECT: {  // 4:3 .. 32:9 (Stretch, from F1, goes to the next end)
+            static const int order[] = {(int)Aspect::A4_3, (int)Aspect::A16_9, (int)Aspect::A16_10,
+                                        (int)Aspect::A21_9, (int)Aspect::A32_9};
+            g_gfx.aspect = (Aspect)cycle(order, 5, (int)g_gfx.aspect);
             break;
         }
         case E_AUTOSAVE: g_autosave = !g_autosave; break;  // savestate.cpp
@@ -1455,6 +1500,16 @@ void enh_change(int id, int dir) {
         case E_FPS_COUNTER: g_fps_counter = !g_fps_counter; break;
         case E_CRT: g_gfx.crt = !g_gfx.crt; break;  // present.cpp / present_vk.cpp
         case E_BOOT: g_boot_sequence = !g_boot_sequence; break;  // bios.cpp: from the next start
+        case E_GAME_FONT:  // texreplace.cpp
+            g_game_font = !g_game_font;
+            texreplace_font_changed();
+            break;
+        case E_FOV: {  // drawdist.cpp: Original, then 5-degree steps above the game's own up to 120
+            const int first = ((int)(g_fov_base > 0 ? g_fov_base : 60) / 5 + 1) * 5;
+            if (dir > 0) g_fov = g_fov == 0 ? first : g_fov >= 120 ? 0 : g_fov + 5;
+            else g_fov = g_fov == 0 ? 120 : g_fov <= first ? 0 : g_fov - 5;
+            break;
+        }
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
         case E_CHEAT_WEAPONS:
@@ -1782,23 +1837,26 @@ static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
     enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
                R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
-               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_BOOT, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
+               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_BOOT, R_FOV, R_GAME_FONT, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
     // the main page, and the Enhancements page (what goes beyond the original game)
     static const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA,
                                                R_ASPECT, R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
-    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_BOOT, R_ENH_BACK};
+    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_FOV, R_PRECISE, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_BOOT, R_ENH_BACK};
     bool enh_page = false;
     static int slot = 1;
     int& chapter = g_chapter_sel;
     const std::vector<std::string> chapters = state_chapter_names();
     if (chapter >= (int)chapters.size()) chapter = 0;
-    size_t dev_index = 0;
+    size_t dev_index = 0;  // the Controls row: 0 = all, 1 = keyboard & mouse, 2.. = controllers
+    if (g_input == "keyboard") dev_index = 1;
+    for (size_t i = 0; i < g_devices.size(); i++)
+        if (!g_input.empty() && device_guid(g_devices[i]) == g_input) dev_index = 2 + i;
     int sel = 0;
     std::string status;
     // buttons held when the menu opens (e.g. SELECT+START) must not count as presses
     uint16_t prev_pad = host_pad(0).buttons;
     bool quit = false;
-    static const char* kAspect[] = {"4:3", "16:9", "16:10", "Stretch"};
+    static const char* kAspect[] = {"4:3", "16:9", "16:10", "Stretch", "21:9", "32:9"};
     for (bool open = true; open && !quit;) {
         std::vector<SDL_Scancode> keys;
         if (pump_menu_events(keys) == MenuResult::Quit) { quit = true; break; }
@@ -1812,10 +1870,9 @@ static void run_settings_menu() {
         if (pressed & (B_CROSS | B_START)) push_pad_key(keys, SDL_SCANCODE_RETURN);
         if (pressed & B_CIRCLE) push_pad_key(keys, SDL_SCANCODE_ESCAPE);
 
-        // controls device: entry 0 is the keyboard, entries 1.. are the connected controllers
-        const size_t entries = 1 + g_devices.size();
+        const size_t entries = 2 + g_devices.size();
         if (dev_index >= entries) dev_index = 0;
-        const bool is_keyboard = dev_index == 0;
+        const bool is_all = dev_index == 0, is_keyboard = dev_index == 1;
         bool gfx_changed = false;
         auto open_page = [&](bool enh) {  // back to the main page lands on "Enhancements"
             sel = enh ? 0 : (int)(std::find(kMainRows.begin(), kMainRows.end(), R_ENHANCE) - kMainRows.begin());
@@ -1839,7 +1896,7 @@ static void run_settings_menu() {
             if (dir || enter) {
                 int step = dir ? dir : 1;
                 switch (row) {
-                    case R_RES: g_gfx.scale = (g_gfx.scale + step + 9) % 9; gfx_changed = true; break;
+                    case R_RES: g_gfx.scale = (g_gfx.scale + step + 10) % 10; gfx_changed = true; break;
                     case R_AA: g_gfx.aa = (g_gfx.aa + step + 4) % 4; gfx_changed = true; break;
                     case R_RENDERER:  // saved; takes effect when the game is started again
                         g_gfx.vulkan = !g_gfx.vulkan;
@@ -1854,7 +1911,14 @@ static void run_settings_menu() {
                         gfx_changed = true;
                         break;
                     }
-                    case R_ASPECT: g_gfx.aspect = (Aspect)(((int)g_gfx.aspect + step + 4) % 4); gfx_changed = true; break;
+                    case R_ASPECT: {  // 4:3, 16:9, 16:10, 21:9, 32:9, Stretch
+                        static const int order[] = {0, 1, 2, 4, 5, 3};
+                        int i = 0;
+                        while (order[i] != (int)g_gfx.aspect) i++;
+                        g_gfx.aspect = (Aspect)order[(i + step + 6) % 6];
+                        gfx_changed = true;
+                        break;
+                    }
                     case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
                     case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
                     case R_DUMP_TEX: g_tex_dump = !g_tex_dump; break;  // texdump.cpp (not saved)
@@ -1872,6 +1936,13 @@ static void run_settings_menu() {
                         enh_change(row - R_FPS, step);
                         gfx_changed = true;
                         break;
+                    case R_GAME_FONT:
+                        enh_change(E_GAME_FONT, step);
+                        break;
+                    case R_FOV:
+                        enh_change(E_FOV, step);
+                        gfx_changed = true;
+                        break;
                     case R_BOOT:
                         enh_change(E_BOOT, step);
                         gfx_changed = true;
@@ -1883,7 +1954,11 @@ static void run_settings_menu() {
                     case R_CHAPTER:
                         if (dir && !chapters.empty()) chapter = (chapter + step + (int)chapters.size()) % (int)chapters.size();
                         break;
-                    case R_DEVICE: dev_index = (dev_index + entries + step) % entries; break;
+                    case R_DEVICE:
+                        dev_index = (dev_index + entries + step) % entries;
+                        g_input = dev_index == 0 ? "" : dev_index == 1 ? "keyboard" : device_guid(g_devices[dev_index - 2]);
+                        save_settings();
+                        break;
                     case R_SAVE:
                     case R_LOAD:
                         if (dir) slot = (slot - 1 + step + kStateSlots) % kStateSlots + 1;
@@ -1915,6 +1990,8 @@ static void run_settings_menu() {
                     open = false;
                 }
                 prev_pad = host_pad(0).buttons;
+            } else if ((row == R_REMAP || row == R_RESET) && is_all) {
+                status = "Pick the keyboard or a controller first.";
             } else if (row == R_REMAP && is_keyboard) {
                 SDL_Scancode keys_new[16];
                 if (remap_keyboard(keys_new, &quit)) {
@@ -1927,7 +2004,7 @@ static void run_settings_menu() {
                 }
                 prev_pad = host_pad(0).buttons;
             } else if (row == R_REMAP) {
-                InputDevice dev = g_devices[dev_index - 1];
+                InputDevice dev = g_devices[dev_index - 2];
                 Layout lay;
                 if (remap_device(dev, &lay, &quit)) {
                     g_layouts[device_guid(dev)] = lay;
@@ -1939,7 +2016,7 @@ static void run_settings_menu() {
                 prev_pad = host_pad(0).buttons;
             } else if (row == R_RESET) {
                 if (is_keyboard) g_key_custom = false;
-                else g_layouts.erase(device_guid(g_devices[dev_index - 1]));
+                else g_layouts.erase(device_guid(g_devices[dev_index - 2]));
                 save_settings();
                 status = "Restored the default layout.";
             }
@@ -1957,9 +2034,10 @@ static void run_settings_menu() {
                                                  " lines)";
         if (g_gfx.scale > 0 && g_active_scale > g_gfx.scale)
             res = std::to_string(g_gfx.scale) + "x, SSAA: " + std::to_string(g_active_scale) + "x";
-        std::string dev_line = is_keyboard ? std::string("Keyboard & mouse")
-                                           : std::string(device_name(g_devices[dev_index - 1])).substr(0, 22);
-        bool custom = is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 1])) > 0;
+        std::string dev_line = is_all        ? std::string("All (keyboard + controllers)")
+                               : is_keyboard ? std::string("Keyboard & mouse")
+                                             : std::string(device_name(g_devices[dev_index - 2])).substr(0, 22);
+        bool custom = is_all ? false : is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 2])) > 0;
         auto choice = [](const char* label, const std::string& value) { return std::string(label) + "\t< " + value + " >"; };
         std::string slot_line = std::to_string(slot) + ": " + state_slot_label(slot);
         auto line = [&](Row r) -> std::string {
@@ -1981,7 +2059,7 @@ static void run_settings_menu() {
                 case R_TEX_REPLACE: return choice("Texture replacements", g_tex_replace ? "[x] On" : "[ ] Off (original)");
                 case R_ENHANCE: return "Enhancements\t>";
                 case R_DEVICE: return choice("Controls", dev_line);
-                case R_REMAP: return std::string("Set up buttons\t") + (custom ? "(custom)" : "(default)");
+                case R_REMAP: return std::string("Set up buttons\t") + (is_all ? "" : custom ? "(custom)" : "(default)");
                 case R_RESET: return "Reset buttons to default";
                 case R_BACK: return "Back to game";
                 case R_FPS:
@@ -1992,6 +2070,8 @@ static void run_settings_menu() {
                 case R_MENU_SIZE: return choice(enh_name(r - R_FPS), enh_value(r - R_FPS));
                 case R_FPS_COUNTER: return choice(enh_name(E_FPS_COUNTER), enh_value(E_FPS_COUNTER));
                 case R_BOOT: return choice(enh_name(E_BOOT), enh_value(E_BOOT));
+                case R_FOV: return choice(enh_name(E_FOV), enh_value(E_FOV));
+                case R_GAME_FONT: return choice(enh_name(E_GAME_FONT), enh_value(E_GAME_FONT));
                 case R_ENH_BACK: return "Back";
             }
             return "";

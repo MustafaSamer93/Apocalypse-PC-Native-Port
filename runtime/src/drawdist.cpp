@@ -94,10 +94,29 @@ void put_plane(int i, int32_t x, int32_t z) {
 
 }  // namespace
 
+// Field of view: the same call also gives the GTE its projection distance (SetGeomScreen with
+// view +10), so a shorter distance there widens the picture, and the culling planes built from
+// it widen with it. The view keeps the game's own distance (put back after the call).
+int g_fov = 0;
+float g_fov_base = 0;
+
 extern "C" int psx_hook_frustum(R3000* c) {
     static bool inside = false;
-    if (inside || g_gte_widescreen >= 1.0f) return 0;
+    if (inside) return 0;
     const uint32_t camera = c->r[4], view = c->r[5];
+    uint16_t right, left, cx, h, game_h;
+    std::memcpy(&left, ram_ptr(view + 0x4), 2);
+    std::memcpy(&cx, ram_ptr(view + 0xC), 2);
+    std::memcpy(&game_h, ram_ptr(view + 0x10), 2);
+    if (game_h && left < cx) {
+        const double half = std::atan((double)(cx - left) / game_h);
+        g_fov_base = (float)(half * 360 / 3.141592653589793);
+        if (g_fov > g_fov_base) {
+            h = (uint16_t)std::max(1L, std::lround((cx - left) / std::tan(g_fov * 3.141592653589793 / 360)));
+            std::memcpy(ram_ptr(view + 0x10), &h, 2);
+        }
+    }
+    if (g_gte_widescreen >= 1.0f && g_fov <= g_fov_base) return 0;
     const uint32_t ra = c->r[31], sp = c->r[29];
     inside = true;
     call_indirect(c, 0x8007E63Cu);
@@ -105,11 +124,10 @@ extern "C" int psx_hook_frustum(R3000* c) {
     c->r[31] = ra;
     c->r[29] = sp;
 
-    uint16_t right, left, cx, h;
     std::memcpy(&right, ram_ptr(view + 0x0), 2);
-    std::memcpy(&left, ram_ptr(view + 0x4), 2);
-    std::memcpy(&cx, ram_ptr(view + 0xC), 2);
     std::memcpy(&h, ram_ptr(view + 0x10), 2);
+    std::memcpy(ram_ptr(view + 0x10), &game_h, 2);
+    if (g_gte_widescreen >= 1.0f) return 1;
     if (left > cx || right < cx || !h) return 1;
     const int64_t dl = std::lround((cx - left) / g_gte_widescreen), dr = std::lround((right - cx) / g_gte_widescreen);
     const int64_t H = h;

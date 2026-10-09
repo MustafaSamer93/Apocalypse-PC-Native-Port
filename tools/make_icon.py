@@ -1,5 +1,6 @@
 """Makes the exe's icon from the game's own lives icon (Bruce's portrait, texture 68 in bits.psx,
 32 x 23) - read from the disc at build time, so no game art is kept in the repository.
+assets/icon.png (a PNG up to 256 x 256), when present, is used instead.
 
   python tools/make_icon.py [WAD_DIR] [OUT.ico]      (default: extracted/wad generated/apocalypse.ico)
 
@@ -44,6 +45,19 @@ def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     wad = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, 'extracted', 'wad')
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(root, 'generated', 'apocalypse.ico')
+    custom = os.path.join(root, 'assets', 'icon.png')
+    if os.path.exists(custom):
+        # ponytail: one 256 x 256 PNG entry, Windows scales it down for the small sizes
+        png = open(custom, 'rb').read()
+        w, h = struct.unpack('>II', png[16:24])
+        if png[:8] != b'\x89PNG\r\n\x1a\n' or w > 256 or h > 256:
+            sys.exit('assets/icon.png: must be a PNG of at most 256 x 256')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, 'wb') as f:
+            f.write(struct.pack('<HHHBBBBHHII', 0, 1, 1, w % 256, h % 256, 0, 0, 1, 32, len(png), 22)
+                    + png)
+        print('icon: %s (from assets/icon.png)' % out)
+        return
     tex, pals = textures(open(os.path.join(wad, 'bits.psx'), 'rb').read())
     entry = next(e for e in tex if e[0][3] == TEXTURE)
     w, h = entry[0][4], entry[0][5]

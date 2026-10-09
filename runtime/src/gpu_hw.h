@@ -26,6 +26,7 @@ struct HwPrim {
     int depth = 0;                 // 0 = 4bpp, 1 = 8bpp, 2 = 15bpp
     int clut_x = 0, clut_y = 0;
     bool hd = false;               // a replacement texture (texreplace.cpp): u, v are atlas pixels
+    bool glyph = false;            // hd with letters drawn in the game font: the game's own texels never show
     int ztest = 0;                 // Z-buffer: 0 off (2D, glows), 1 test and write (opaque 3D), 2 test only
                                    // (semi-transparent 3D); depth = HwVtx::z (view units, hw_depth_reset clears)
 };

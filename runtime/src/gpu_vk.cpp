@@ -214,7 +214,7 @@ void begin_prim(const HwPrim& p, const HwState& s) {
 uint32_t info0(const HwPrim& p) {
     return (uint32_t)(p.page_x & 1023) | (uint32_t)(p.page_y & 511) << 10 | (uint32_t)p.depth << 20 |
            (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24 |
-           (uint32_t)p.hd << 27;
+           (uint32_t)p.hd << 27 | (uint32_t)p.glyph << 28;
 }
 uint32_t info1(const HwPrim& p) { return (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10; }
 
@@ -339,7 +339,7 @@ bool vk_hw_init(int scale) {
                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     }
     vk_hw_shutdown();
-    S = std::clamp(scale, 1, 8);
+    S = std::clamp(scale, 1, 9);
     const int W = 1024 * S, H = 512 * S;
     if (!vkc::create_image(g_read, W, H, VK_FORMAT_R8G8B8A8_UNORM,
                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {

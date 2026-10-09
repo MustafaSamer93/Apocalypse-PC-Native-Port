@@ -121,8 +121,12 @@ float squeeze_2d(float x0, float x1, float* fix) {
     const float mid = (x0 + x1) * 0.5f;
     // HUD text and icons too; the boss bar (from g_2d_bar) spans the middle: one piece, centred
     const bool hud = a >= g_2d_from && a < g_2d_mid && a < g_2d_bar;
-    if (hud && mid < left + width / 3) *fix = left;         // HUD, left side
-    else if (hud && mid > right - width / 3) *fix = right;  // HUD, right side
+    // Ultra-wide: the screen edge goes to the edge of a centred 16:9 area, so the HUD stays where
+    // it is in 16:9 (the point that stays put is then where fix + (edge - fix) * k = that edge).
+    const float k = g_gte_widescreen, centre = (left + right) * 0.5f;
+    const float edge = width * 0.5f * std::min(1.0f, k / 0.75f);
+    if (hud && mid < left + width / 3) *fix = (centre - edge - left * k) / (1 - k);          // HUD, left side
+    else if (hud && mid > right - width / 3) *fix = (centre + edge - right * k) / (1 - k);  // HUD, right side
     else *fix = (left + right) * 0.5f;
     return g_gte_widescreen;
 }
@@ -156,8 +160,6 @@ inline uint16_t blend(uint16_t back, uint16_t front, int mode) {
     return (uint16_t)(r | g << 5 | b << 10 | (front & 0x8000));
 }
 
-const int8_t kDither[4][4] = {{-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2}};
-
 inline void plot(int x, int y, uint16_t color, bool semi) {
     if (x < S.area_x1 || x > S.area_x2 || y < S.area_y1 || y > S.area_y2) return;
     uint16_t& dst = vram(x, y);
@@ -170,15 +172,9 @@ inline uint16_t rgb24_to_15(int r, int g, int b) {
     return (uint16_t)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10));
 }
 
-inline uint16_t shade(int r, int g, int b, int x, int y, bool dither) {
-    if (dither) {
-        int d = kDither[y & 3][x & 3];
-        r = std::clamp(r + d, 0, 255);
-        g = std::clamp(g + d, 0, 255);
-        b = std::clamp(b + d, 0, 255);
-    }
-    return rgb24_to_15(r, g, b);
-}
+// No dithering (the game's dither bit, S.dither, is only reported back in GPUSTAT): shading is
+// plain truncation to 15 bits here; the hardware renderers keep full 24-bit colour.
+inline uint16_t shade(int r, int g, int b) { return rgb24_to_15(r, g, b); }
 
 struct TexCtx {
     int page_x, page_y, depth;
@@ -206,10 +202,10 @@ inline uint16_t texel(const TexCtx& t, int u, int v) {
 }
 
 // Texel * vertex colour / 128 (0x80 = unmodulated)
-inline uint16_t modulate(uint16_t tx, int r, int g, int b, int x, int y, bool dither) {
+inline uint16_t modulate(uint16_t tx, int r, int g, int b) {
     int tr = (tx & 31) << 3, tg = ((tx >> 5) & 31) << 3, tb = ((tx >> 10) & 31) << 3;
     int orr = (tr * r) >> 7, og = (tg * g) >> 7, ob = (tb * b) >> 7;
-    uint16_t c = shade(std::min(orr, 255), std::min(og, 255), std::min(ob, 255), x, y, dither);
+    uint16_t c = shade(std::min(orr, 255), std::min(og, 255), std::min(ob, 255));
     return c | (tx & 0x8000);
 }
 
@@ -270,7 +266,6 @@ void draw_triangle(const Vtx* v0, const Vtx* v1, const Vtx* v2, bool gouraud, bo
     auto interp_round = [&](int64_t w0, int64_t w1, int64_t w2, int a0, int a1, int a2) {
         return (int)((w0 * a0 + w1 * a1 + w2 * a2 + area / 2) / area);
     };
-    bool dither = S.dither && (gouraud || (textured && !raw));
     int fr = v0->r, fg = v0->g, fb = v0->b;
     for (int y = miny; y < maxy; y++) {
         for (int x = minx; x < maxx; x++) {
@@ -290,9 +285,9 @@ void draw_triangle(const Vtx* v0, const Vtx* v1, const Vtx* v2, bool gouraud, bo
                 uint16_t t = texel(tex, u, vv);
                 if (t == 0) continue;
                 px_semi = semi && (t & 0x8000);
-                out = raw ? t : modulate(t, r, g, b, x, y, dither);
+                out = raw ? t : modulate(t, r, g, b);
             } else {
-                out = shade(r, g, b, x, y, dither);
+                out = shade(r, g, b);
             }
             plot(x, y, out, px_semi);
         }
@@ -529,7 +524,8 @@ void draw_polygon(const uint32_t* w) {
             for (int i = 1; i < nv; i++)
                 u0 = std::min(u0, h[i].u), u1 = std::max(u1, h[i].u), v0 = std::min(v0, h[i].v), v1 = std::max(v1, h[i].v);
             const int tw[4] = {S.tw_mask_x, S.tw_mask_y, S.tw_off_x, S.tw_off_y};
-            p.hd = texreplace_find(tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, u0, v0, u1, v1, tw, g_vram);
+            const int found = texreplace_find(tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, u0, v0, u1, v1, tw, g_vram);
+            p.hd = found != 0, p.glyph = found == 2;
         }
         // Z-buffer: 3D polygons test (and opaque ones write) their exact view depth, so the
         // ordering table's one depth per polygon no longer lets near polygons show through far
@@ -586,7 +582,7 @@ void draw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool go
             g = g0 + (g1 - g0) * i / steps;
             b = b0 + (b1 - b0) * i / steps;
         }
-        plot(x, y, shade(r, g, b, x, y, S.dither && gouraud), semi);
+        plot(x, y, shade(r, g, b), semi);
     }
 }
 
@@ -638,8 +634,9 @@ void draw_rect(const uint32_t* w) {
         if (textured && g_tex_replace && wdt > 0 && hgt > 0) {
             const int ua = S.rect_flip_x ? u0 - wdt + 1 : u0, va = S.rect_flip_y ? v0 - hgt + 1 : v0;
             const int tw[4] = {S.tw_mask_x, S.tw_mask_y, S.tw_off_x, S.tw_off_y};
-            p.hd = texreplace_find(tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, (float)ua, (float)va,
+            const int found = texreplace_find(tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, (float)ua, (float)va,
                                    (float)(ua + wdt), (float)(va + hgt), tw, g_vram);
+            p.hd = found != 0, p.glyph = found == 2;
         }
         if (k != 1.0f && wdt > 0 && hgt > 0) {
             int r = color & 0xFF, g = (color >> 8) & 0xFF, b = (color >> 16) & 0xFF;
@@ -669,7 +666,7 @@ void draw_rect(const uint32_t* w) {
                 int v = S.rect_flip_y ? v0 - j : v0 + j;
                 uint16_t t = texel(tex, u, v);
                 if (t == 0) continue;
-                uint16_t out = raw ? t : modulate(t, r, g, b, px, py, false);
+                uint16_t out = raw ? t : modulate(t, r, g, b);
                 plot(px, py, out, semi && (t & 0x8000));
             } else {
                 plot(px, py, flat, semi);

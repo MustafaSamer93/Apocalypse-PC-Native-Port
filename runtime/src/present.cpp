@@ -149,12 +149,8 @@ GLuint make_texture(int w, int h, GLint filter) {
 }
 
 float aspect_value(Aspect a, int w, int h) {
-    switch (a) {
-        case Aspect::A4_3: return 4.0f / 3.0f;
-        case Aspect::A16_9: return 16.0f / 9.0f;
-        case Aspect::A16_10: return 16.0f / 10.0f;
-        default: return (float)w / (float)std::max(h, 1);
-    }
+    const float r = aspect_ratio(a);
+    return r > 0 ? r : (float)w / (float)std::max(h, 1);
 }
 
 void draw_quad() {

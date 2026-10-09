@@ -117,12 +117,14 @@ void gte_blend_begin(GteBlendMode m);
 
 // Draw distance (drawdist.cpp): percent of the game's own view distance (100 = original)
 extern int g_draw_distance;
+extern int g_fov;          // setting: horizontal field of view in degrees (4:3 part), 0 = the game's (drawdist.cpp)
+extern float g_fov_base;   // the game's own field of view, measured from its view (degrees)
 extern bool g_smooth_font;  // setting: draw the game's text and button icons with smoothed textures (gpu.cpp)
 extern int g_menu_zoom;     // setting: the game's menus at this percent of their size (game_menu.cpp)
 // Enhancement settings, shared by F1 and the game's Options -> Enhancements (host_sdl.cpp).
 enum EnhSetting { E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_RES, E_ASPECT, E_DISPLAY, E_AUTOSAVE, E_SUBTITLES, E_AA,
                    E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT,
-                   E_FPS_COUNTER, E_BOOT, E_CRT };
+                   E_FPS_COUNTER, E_BOOT, E_CRT, E_FOV, E_GAME_FONT };
 // the boot sequence's text in TrueType fonts (bootfont.cpp)
 void bootfont_upload(int x, int y, int w, int h, const uint16_t* vram);
 void bootfont_fill(int x, int y, int w, int h);
@@ -179,8 +181,12 @@ extern bool g_tex_replace;
 void texreplace_vram_changed(int x = 0, int y = 0, int w = 1024, int h = 512);  // (default: all of it)
 void texreplace_atlas_lost();  // the renderer's atlas is gone (shut down)
 void texreplace_vram_written(int x, int y, int w, int h);  // any upload or copy: palettes texreplace_find read may change
-bool texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
-                     float v1, const int tw[4], const uint16_t* vram);  // the title screen (PRESS START) is up
+// 0 = the game's texture, 1 = its replacement, 2 = with a letter drawn in the game font (no game texels show through)
+int texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
+                    float v1, const int tw[4], const uint16_t* vram);
+extern bool g_game_font;            // setting: the game's letters in assets/fonts' font (texreplace.cpp)
+void texreplace_font_changed();     // ... after changing it
+std::string texreplace_font_name(); // that font's name ("" = none in assets/fonts)  // the title screen (PRESS START) is up
 extern uint32_t g_gpu_ot_z;  // depth of the ordering-table slot being sent (hw.cpp; 0: none)
 // Replacement pictures (replace.cpp): uploads and copies in VRAM, the whole VRAM re-sent, and the
 // look for known pictures at each VBlank.
