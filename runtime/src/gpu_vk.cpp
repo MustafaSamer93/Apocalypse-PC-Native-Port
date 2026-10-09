@@ -289,35 +289,6 @@ void upload_rect(int x, int y, int w, int h, const uint16_t* vram) {
     }
 }
 
-// Capture slots for extra frames (smooth.cpp) and the stash they draw over.
-struct Capture {
-    VkImg img;
-};
-Capture g_caps[16];
-Capture g_stash;
-int g_stash_x, g_stash_y, g_stash_w, g_stash_h;
-
-// Copies a native VRAM rectangle (as drawn so far) into `c`, resized as needed.
-void copy_out(Capture& c, int x, int y, int w, int h) {
-    sync_read();
-    if (c.img.w != w * S || c.img.h != h * S) {
-        vkc::destroy_image(c.img);
-        vkc::create_image(c.img, w * S, h * S, VK_FORMAT_R8G8B8A8_UNORM,
-                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        vkc::register_texture(&c.img);
-    }
-    copy_region(g_read, x * S, y * S, c.img, 0, 0, w * S, h * S);
-    vkc::transition(c.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-}
-
-bool clip_rect(int& x, int& y, int& w, int& h) {
-    x = std::clamp(x, 0, 1023);
-    y = std::clamp(y, 0, 511);
-    w = std::min(w, 1024 - x);
-    h = std::min(h, 512 - y);
-    return w > 0 && h > 0;
-}
-
 void destroy_pipelines() {
     for (VkPipeline& p : g_pipes)
         if (p) vkDestroyPipeline(vkc::device, p, nullptr), p = VK_NULL_HANDLE;
@@ -406,8 +377,6 @@ void vk_hw_shutdown() {
     if (!S) return;
     vkc::submit_wait();
     vkDeviceWaitIdle(vkc::device);
-    for (auto& c : g_caps) vkc::destroy_image(c.img);
-    vkc::destroy_image(g_stash.img);
     vkc::destroy_image(g_draw);
     vkc::destroy_image(g_read);
     vkc::destroy_image(g_zbuf);
@@ -638,41 +607,6 @@ unsigned vk_hw_display_texture(int x, int y, int w, int h, int* px, int* py, int
     return g_read.id;
 }
 
-void vk_hw_capture(int slot, int x, int y, int w, int h) {
-    g_prof.caps++;
-    if (!S || slot < 0 || slot >= 16 || !clip_rect(x, y, w, h)) return;
-    copy_out(g_caps[slot], x, y, w, h);
-}
-
-unsigned vk_hw_capture_texture(int slot, int* tex_w, int* tex_h) {
-    if (!S || slot < 0 || slot >= 16 || !g_caps[slot].img.image) return 0;
-    *tex_w = g_caps[slot].img.w;
-    *tex_h = g_caps[slot].img.h;
-    return g_caps[slot].img.id;
-}
-
-void vk_hw_stash(int x, int y, int w, int h) {
-    g_stash_w = 0;
-    if (!S || !clip_rect(x, y, w, h)) return;
-    copy_out(g_stash, x, y, w, h);
-    g_stash_x = x;
-    g_stash_y = y;
-    g_stash_w = w;
-    g_stash_h = h;
-}
-
-void vk_hw_unstash() {
-    if (!S || !g_stash_w) return;
-    flush();
-    if (g_samples > 1) {
-        draw_copy(g_stash.img, g_stash_x * S, g_stash_y * S, 1, g_stash_x, g_stash_y, g_stash_w, g_stash_h);
-    } else {
-        copy_region(g_stash.img, 0, 0, g_draw, g_stash_x * S, g_stash_y * S, g_stash_w * S, g_stash_h * S);
-        vkc::transition(g_stash.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-    mark_dirty(g_stash_x, g_stash_y, g_stash_x + g_stash_w, g_stash_y + g_stash_h);  // read copy re-syncs
-    g_stash_w = 0;
-}
 
 // Frees everything the renderer created (before the Vulkan device goes; present_vk.cpp).
 void vk_renderer_destroy() {

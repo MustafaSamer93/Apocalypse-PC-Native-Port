@@ -62,6 +62,7 @@ uint64_t g_vblanks = 0;
 // flash, fades) still cover the screen.
 constexpr uint32_t kNextPacket = 0x800FF668;
 uint32_t g_2d_from = 0, g_2d_mid = 0, g_2d_to = 0;  // packets: HUD from..mid, then menus/messages
+uint32_t g_fx_from = 0;  // packets: the effect renderer's (8003736C) from here to the HUD
                                                     // up to the tint's (phys)
 uint32_t g_2d_bar = 0;                              // the HUD's boss bar from here (up to mid)
 // Packets the text and icon routines made since the last frame was drawn (phys from, to).
@@ -101,19 +102,22 @@ uint64_t g_picture_frame = ~0ull;
 uint64_t g_movie_vblank = 0;  // when the MDEC last decoded a movie frame (VBlank count)
 bool g_movie_seen = false;
 
+// The effect renderer's packets (smoke, fire, flashes, glows, sparks, shards): their corners are
+// made on the screen from one projected point and a size in pixels, so in widescreen (the 3D
+// squeezed by g_gte_widescreen) they were stretched across it, 2.7x at 32:9.
+bool fx_packet(uint32_t a) { return g_fx_from && a >= g_fx_from && a < (g_2d_from ? g_2d_from : 0x200000); }
+
 // Horizontal factor for a primitive spanning x0..x1 and the point that stays put (x' =
 // fix + (x - fix) * factor); 1 = leave it.
 float squeeze_2d(float x0, float x1, float* fix) {
     const uint32_t a = g_gpu_packet_addr;
     if (g_gte_widescreen == 1.0f) return 1.0f;
-    if (g_bios_rom) {  // the BIOS boot sequence in widescreen: its logos keep their shape, centred
-        const float left = (float)S.area_x1, right = (float)(S.area_x2 + 1);
-        if (x1 - x0 >= 0.9f * (right - left)) return 1.0f;  // (backgrounds fill the screen)
-        *fix = (left + right) * 0.5f;
-        return g_gte_widescreen;
-    }
     if (!a) return 1.0f;
     if (replace_original_picture_shown(S.area_y1)) return 1.0f;  // shown at 4:3 (host_sdl.cpp)
+    if (fx_packet(a)) {  // a sprite (smoke, fire, a flash): its own shape round its middle
+        *fix = (x0 + x1) * 0.5f;
+        return g_gte_widescreen;
+    }
     const bool text = text_packet(a);
     if (!text && (a < g_2d_from || a >= g_2d_to)) return 1.0f;
     const float left = (float)S.area_x1, right = (float)(S.area_x2 + 1), width = right - left;
@@ -436,15 +440,8 @@ void draw_polygon(const uint32_t* w) {
     if (textured && S.tex_disable) textured = false;
     int bx0 = v[0].x, bx1 = v[0].x;
     for (int i = 1; i < nv; i++) bx0 = std::min(bx0, v[i].x), bx1 = std::max(bx1, v[i].x);
-    float cx = 0, k = squeeze_2d((float)bx0, (float)bx1, &cx);
-    if (g_bios_rom && textured && hw_active()) {  // the boot sequence's words: TrueType (bootfont.cpp)
-        float sx[4], sy[4];
-        int su[4], sv[4];
-        for (int i = 0; i < nv; i++) sx[i] = cx + ((float)v[i].x - cx) * k, sy[i] = (float)v[i].y, su[i] = v[i].u, sv[i] = v[i].v;
-        if (bootfont_draw(nv, sx, sy, su, sv, tex.page_x, tex.page_y, tex.depth, tex.clut_x, tex.clut_y, raw, v[0].r,
-                          v[0].g, v[0].b))
-            return;
-    }
+    const bool fx = g_gte_widescreen < 1.0f && g_gpu_packet_addr && fx_packet(g_gpu_packet_addr);
+    float cx = 0, k = fx ? 1.0f : squeeze_2d((float)bx0, (float)bx1, &cx);
     if (hw_active()) {
         HwPrim p;
         p.textured = textured; p.raw = raw; p.semi = semi; p.gouraud = gouraud;
@@ -519,6 +516,20 @@ void draw_polygon(const uint32_t* w) {
             if (all)
                 for (int i = 0; i < nv; i++) h[i].w = pr[i].w / wmax;
             exact_all = all;
+            // an effect: the corners made on the screen come in round the projected ones (a glow's
+            // middle), or round their own middle (a sprite)
+            if (fx && !all) {
+                float ax = 0, sx = 0;
+                int n = 0;
+                for (int i = 0; i < nv; i++) sx += h[i].x, ax += nc[i] ? h[i].x : 0, n += nc[i];
+                ax = n ? ax / (float)n : sx / (float)nv;
+                for (int i = 0; i < nv; i++)
+                    if (!nc[i]) h[i].x = ax + (h[i].x - ax) * g_gte_widescreen;
+            }
+        } else if (fx) {  // (no exact corners known: round its middle)
+            float sx = 0;
+            for (int i = 0; i < nv; i++) sx += h[i].x;
+            for (int i = 0; i < nv; i++) h[i].x = sx / (float)nv + (h[i].x - sx / (float)nv) * g_gte_widescreen;
         }
         // a replacement texture (texreplace.cpp): drawn from its HD copy of VRAM
         if (textured && g_tex_replace) {
@@ -794,7 +805,6 @@ void execute(const std::vector<uint32_t>& w) {
             for (int j = 0; j < hh; j++)
                 for (int i = 0; i < ww; i++) vram(x + i, y + j) = c;
             if (hw_active()) hw_fill(x, y, ww, hh, c);
-            if (g_bios_rom) bootfont_fill(x, y, ww, hh);
             return;
         }
         case 0x1F: DS.irq = true; return;
@@ -842,7 +852,6 @@ void upload_word(uint32_t v) {
                 g_upload.active = false;
                 LOG(Gpu, "upload %d,%d %dx%d", g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (hw_active()) hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
-                if (g_bios_rom) bootfont_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
                 texdump_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (g_upload.x + g_upload.w > 512 && g_upload.h > 1) texreplace_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 texreplace_vram_written(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
@@ -922,7 +931,7 @@ void gpu_write_gp1(R3000* c, uint32_t v) {
             DS.start_x = v & 0x3FE;
             DS.start_y = (v >> 10) & 0x1FF;
             LOG(Gpu, "display start %d,%d", DS.start_x, DS.start_y);
-            if (!core_in_ghost()) smooth_on_flip(), g_display_flipped = true;
+            if (!core_in_ghost()) g_display_flipped = true, g_display_flips++;
             break;
         case 0x06: DS.h1 = v & 0xFFF; DS.h2 = (v >> 12) & 0xFFF; break;
         case 0x07: DS.v1 = v & 0x3FF; DS.v2 = (v >> 10) & 0x3FF; break;
@@ -1026,6 +1035,7 @@ void gpu_vblank() {
 }
 
 bool g_display_flipped = false;
+uint64_t g_display_flips = 0;  // display starts the game has set (new frames shown)
 
 GpuDisplay gpu_display() {
     GpuDisplay d;
@@ -1059,9 +1069,10 @@ bool gpu_drawn_display(GpuDisplay* out) {
 
 // Entry hooks (tools/recomp/emit.py) on the level render's last routines, called from the
 // render (80030A30..80030A48): 0 = the HUD, 1 and 2 = more 2D, 3 = the full-screen tint;
-// 4 = the boss health bar, the HUD's last routine (8006D3C0, called from 8006DF78).
+// 4 = the boss health bar, the HUD's last routine (8006D3C0, called from 8006DF78); 5 = the
+// effects (8003736C, called from 80030A20).
 extern "C" void psx_hook_2d(R3000* c, int stage) {
-    static const uint32_t kFrom[5] = {0x80030A38, 0x80030A40, 0x80030A48, 0x80030A50, 0x8006DF80};
+    static const uint32_t kFrom[6] = {0x80030A38, 0x80030A40, 0x80030A48, 0x80030A50, 0x8006DF80, 0x80030A28};
     if (c->r[31] != kFrom[stage]) return;
     const uint32_t next = MEM_R32(c, kNextPacket) & 0x1FFFFC;
     if (stage == 0) {
@@ -1073,6 +1084,8 @@ extern "C" void psx_hook_2d(R3000* c, int stage) {
         g_2d_mid = next;
     } else if (stage == 3) {
         g_2d_to = next;
+    } else if (stage == 5) {
+        g_fx_from = next;
     }
 }
 
@@ -1128,7 +1141,7 @@ void gpu_list_done() {
     g_text_packets.clear();
     g_tilts.clear();
     g_last_text_from = 0;
-    g_2d_from = g_2d_mid = g_2d_to = g_2d_bar = 0;
+    g_2d_from = g_2d_mid = g_2d_to = g_2d_bar = g_fx_from = 0;
     if (hw_active()) hw_depth_reset();
 }
 
@@ -1145,7 +1158,7 @@ bool gpu_movie_playing() { return g_movie_seen && g_vblanks - g_movie_vblank < 3
 // No command half-sent and no VRAM transfer running (safe to feed GP0 from elsewhere).
 bool gpu_idle() { return g_cmd.empty() && !g_upload.active && !g_download.active; }
 
-// Everything but VRAM (smooth.cpp rolls this back after drawing an extra frame).
+// Everything but VRAM (sim60.cpp rolls this back after its ghost render).
 void gpu_regs_state(StateIO& s) {
     s(S);
     s(DS);
@@ -1166,15 +1179,3 @@ void gpu_state(StateIO& s) {
     if (s.loading()) replace_note_vram_reset();
 }
 
-// The CPU-side VRAM copy of a rectangle (fills and uploads land there even while the
-// OpenGL renderer draws the polygons).
-void gpu_vram_save(int x, int y, int w, int h, std::vector<uint16_t>& out) {
-    out.resize((size_t)w * h);
-    for (int j = 0; j < h; j++)
-        for (int i = 0; i < w; i++) out[(size_t)j * w + i] = g_vram[((y + j) & 511) * 1024 + ((x + i) & 1023)];
-}
-
-void gpu_vram_restore(int x, int y, int w, int h, const std::vector<uint16_t>& in) {
-    for (int j = 0; j < h; j++)
-        for (int i = 0; i < w; i++) g_vram[((y + j) & 511) * 1024 + ((x + i) & 1023)] = in[(size_t)j * w + i];
-}

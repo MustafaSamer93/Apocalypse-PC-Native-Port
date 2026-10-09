@@ -115,7 +115,6 @@ add_executable(repocalypse
     runtime/src/gpu_hw.cpp
     runtime/src/present.cpp
     runtime/src/savestate.cpp
-    runtime/src/smooth.cpp
     runtime/src/sim60.cpp
     runtime/src/drawdist.cpp
     runtime/src/mesh.cpp
@@ -131,7 +130,6 @@ add_executable(repocalypse
     runtime/src/subtitles.cpp
     runtime/src/cheats.cpp
     runtime/src/movie.cpp
-    runtime/src/bootfont.cpp
     ${volk_SOURCE_DIR}/volk.c)
 target_include_directories(repocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
 target_compile_definitions(repocalypse PRIVATE VK_NO_PROTOTYPES $<$<BOOL:${WIN32}>:VK_USE_PLATFORM_WIN32_KHR>)
@@ -169,7 +167,6 @@ if(NOT WIN32)
 endif()
 if(WIN32)
     target_link_libraries(repocalypse PRIVATE windowscodecs ole32)  # replacement pictures (replace.cpp)
-    target_link_libraries(repocalypse PRIVATE dwmapi)  # the display's refresh timing (host_sdl.cpp)
     target_link_libraries(repocalypse PRIVATE mfplat mfreadwrite mfuuid)  # replacement movies (movie.cpp)
 endif()
 if(MSVC)

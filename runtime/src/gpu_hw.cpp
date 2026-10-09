@@ -620,52 +620,10 @@ bool gl_hw_init(int scale) {
     return true;
 }
 
-struct Capture {
-    GLuint tex = 0, fbo = 0;
-    int w = 0, h = 0;  // texels
-};
-static Capture g_caps[16];
-static Capture g_stash;
-static int g_stash_x, g_stash_y, g_stash_w, g_stash_h;
-
-static void free_capture(Capture& c) {
-    if (c.fbo) glDeleteFramebuffers(1, &c.fbo);
-    if (c.tex) glDeleteTextures(1, &c.tex);
-    c = Capture{};
-}
-
-// Copies a native VRAM rectangle of the draw target into `c` (resized as needed).
-static void copy_out(Capture& c, int x, int y, int w, int h) {
-    flush();
-    if (c.w != w * S || c.h != h * S) {
-        free_capture(c);
-        c.tex = make_vram_texture(w * S, h * S);
-        c.fbo = make_fbo(c.tex);
-        c.w = w * S;
-        c.h = h * S;
-    }
-    if (g_samples > 1) sync_read();  // resolved copy
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_samples > 1 ? g_read_fbo : g_draw_fbo);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, c.fbo);
-    glBlitFramebuffer(x * S, y * S, (x + w) * S, (y + h) * S, 0, 0, w * S, h * S, GL_COLOR_BUFFER_BIT,
-                      GL_NEAREST);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-static bool clip_rect(int& x, int& y, int& w, int& h) {
-    x = std::clamp(x, 0, 1023);
-    y = std::clamp(y, 0, 511);
-    w = std::min(w, 1024 - x);
-    h = std::min(h, 512 - y);
-    return w > 0 && h > 0;
-}
-
 void gl_hw_shutdown() {
     if (!S) return;
     if (g_zbuffer) glDeleteRenderbuffers(1, &g_zbuffer);
     g_zbuffer = 0;
-    for (auto& c : g_caps) free_capture(c);
-    free_capture(g_stash);
     glDeleteFramebuffers(1, &g_draw_fbo);
     glDeleteFramebuffers(1, &g_read_fbo);
     if (g_draw_tex) glDeleteTextures(1, &g_draw_tex);
@@ -918,43 +876,6 @@ void gl_hw_readback(int x, int y, int w, int h, uint16_t* vram) {
     }
 }
 
-void gl_hw_capture(int slot, int x, int y, int w, int h) {
-    if (!S || slot < 0 || slot >= 16 || !clip_rect(x, y, w, h)) return;
-    copy_out(g_caps[slot], x, y, w, h);
-}
-
-unsigned gl_hw_capture_texture(int slot, int* tex_w, int* tex_h) {
-    if (!S || slot < 0 || slot >= 16 || !g_caps[slot].tex) return 0;
-    *tex_w = g_caps[slot].w;
-    *tex_h = g_caps[slot].h;
-    return g_caps[slot].tex;
-}
-
-void gl_hw_stash(int x, int y, int w, int h) {
-    g_stash_w = 0;
-    if (!S || !clip_rect(x, y, w, h)) return;
-    copy_out(g_stash, x, y, w, h);
-    g_stash_x = x;
-    g_stash_y = y;
-    g_stash_w = w;
-    g_stash_h = h;
-}
-
-void gl_hw_unstash() {
-    if (!S || !g_stash_w) return;
-    flush();
-    if (g_samples > 1) {
-        draw_copy(g_stash.tex, g_stash_x * S, g_stash_y * S, 1, g_stash_x, g_stash_y, g_stash_w, g_stash_h);
-    } else {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_stash.fbo);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_draw_fbo);
-        glBlitFramebuffer(0, 0, g_stash_w * S, g_stash_h * S, g_stash_x * S, g_stash_y * S,
-                          (g_stash_x + g_stash_w) * S, (g_stash_y + g_stash_h) * S, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    mark_dirty(g_stash_x, g_stash_y, g_stash_x + g_stash_w, g_stash_y + g_stash_h);  // read copy re-syncs
-    g_stash_w = 0;
-}
 
 unsigned gl_hw_display_texture(int x, int y, int w, int h, int* px, int* py, int* pw, int* ph) {
     if (g_samples > 1) sync_read();  // show the resolved image

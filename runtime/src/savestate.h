@@ -28,7 +28,7 @@ std::string state_autosave_level();
 // checked. False when there is none or it is damaged.
 constexpr uint32_t kSaveRecordSize = 136;
 bool state_read_autosave(uint8_t* record);
-extern uint64_t g_level_render_frame;  // the last frame the level render ran (smooth.cpp)
+extern uint64_t g_level_render_frame;  // the last frame the level render ran (sim60.cpp psx_hook_render)
 
 // Auto-save triggers (see savestate.cpp).
 void state_note_level_start();

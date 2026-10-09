@@ -14,7 +14,6 @@
 
 #include "memcard.h"
 #include "psx.h"
-#include "smooth.h"
 #include "state_io.h"
 
 extern "C" const uint32_t main_exe_hash;
@@ -309,7 +308,6 @@ void state_poll_load(R3000* c) {
     g_progress_pending = false;
     g_demo_loaded = false;
     read_progress(&g_saved_level, &g_saved_restart);
-    smooth_reset();
     game_menu_reset(true);
     std::longjmp(g_resume_jmp, 1);  // unwind the native stack; main() resumes
 }
@@ -537,7 +535,6 @@ std::string state_slot_label(int slot) {
 extern "C" void psx_hook_level_start(void) { state_note_level_start(); }
 
 void state_note_level_start() {
-    smooth_reset();
     game_menu_reset(false);
 }
 
@@ -558,19 +555,4 @@ bool state_take_resume(uint32_t* pc) {
     g_resume_pending = false;
     *pc = g_resume_pc;
     return true;
-}
-
-// The whole machine in memory (bios.cpp: the PlayStation boot sequence runs on a scratch machine
-// and the game then starts from this copy).
-std::vector<uint8_t> state_capture(R3000* c, uint32_t pc) {
-    StateIO s(false);
-    serialize(s, c, pc);
-    return std::move(s.data());
-}
-
-void state_restore(const std::vector<uint8_t>& data, R3000* c) {
-    StateIO s(data);
-    uint32_t pc;
-    serialize(s, c, pc);
-    sched_refresh(c);
 }

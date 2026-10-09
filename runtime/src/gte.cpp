@@ -187,11 +187,6 @@ extern "C" void psx_hook_strip_corner(R3000* c) {
     out = {corner, pa->x + width.x, pa->y + width.y, pa->w};
 }
 
-// The render camera (80077680) is (view position + shake) >> 12; the view is smoothed first.
-void smooth_view(R3000* c, uint32_t view, int32_t shake_x);  // smooth.cpp
-
-extern "C" void psx_hook_camera(R3000* c) { smooth_view(c, c->r[5], (int32_t)MEM_R32(c, 0x800ED510)); }
-
 // Exact view-space corners (PGXP "CPU mode" for this game's level renderer). The level pass
 // (80080A20...) projects each floor/wall corner, then keeps its view position as the GTE's
 // whole units (IR1..3, the fraction cut off) and, for near polygons, loads three such corners

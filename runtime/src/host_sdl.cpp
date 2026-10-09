@@ -15,7 +15,6 @@
 #include "render_backend.h"
 #include "psx.h"
 #include "savestate.h"
-#include "smooth.h"
 #include "ui_text.h"
 
 #ifdef _WIN32
@@ -29,7 +28,6 @@
 #endif
 
 constexpr const char* kVersion = "v1.0";
-int g_force_smooth = 0;  // --smooth K: images per game step regardless of the display
 void host_toast(const std::string& text);
 int g_renderer_override = -1;  // --renderer opengl|vulkan: 0 / 1, -1 = the saved setting
 float g_refresh_override = 0;  // --refresh HZ: assume this display refresh rate
@@ -51,7 +49,7 @@ struct GfxSettings {
     Aspect aspect = Aspect::A16_9;
     bool crt = false;       // CRT filter (present.cpp / present_vk.cpp)
     bool texture_filter = false;
-    int fps = 0;            // images per second: 0 = match the display, 30 = original, 60..150 (smooth.cpp)
+    int fps = 60;           // 30 = the original (no 60 Hz simulation), 60
 #ifdef _WIN32
     int aa = 3;             // anti-aliasing: bit 0 = FXAA pass, bit 1 = supersampling (SSAA)
 #else
@@ -68,10 +66,6 @@ int g_active_msaa = 1;      // MSAA samples the renderer was created with
 const char* const kAaNames[] = {"Off", "FXAA", "SSAA", "SSAA + FXAA"};
 GfxSettings g_gfx;
 float g_refresh_hz = 60.0f;  // display refresh rate
-bool g_multi_present = false;  // not one image per emulated vblank: host_throttle_frame presents
-bool g_present_vsync = true;   // ...paced by the display (else by a timer, for rates above its refresh)
-bool g_present_timed = false;  // ...on our own clock with vsync on (a display not a multiple of 60 Hz: 75)
-uint64_t g_next_present_ns = 0;
 int g_active_scale = -1;    // renderer actually in use
 
 // Every connected controller drives player 1 (Apocalypse is single-player). Devices SDL
@@ -220,41 +214,13 @@ std::string drawdist_label() {
     return s + "x";
 }
 
-// Most images per game step the display can show (a frame rate above its refresh rate was
-// presented on a timer without vsync: no more images reached the screen, only uneven ones).
-double max_factor_for_display() { return std::max(1.0, (g_refresh_hz + 2.0) / 30.0); }
-
-// Settings screen text for the frame rate choice.
-std::string fps_label() {
-    if (g_gfx.fps == 30) return "30 (original)";
-    if (g_active_scale <= 0) return "30 (others need 1x+)";
-    const int rate = g_gfx.fps ? g_gfx.fps : (int)std::lround(30 * smooth_factor_for_refresh(g_refresh_hz));
-    const int screen = (int)std::lround(g_refresh_hz);
-    std::string s = g_gfx.fps ? std::to_string(rate) : "Auto: " + std::to_string(rate);
-    if (g_gfx.fps && rate > screen) s += " (screen: " + std::to_string(screen) + ")";
-    return s;
-}
-
-// Applies graphics settings that affect emulation (renderer, widescreen projection).
-// Images per game step for the current settings and display (1 = the original 30 fps).
-double smooth_target() {
-    if (g_force_smooth) return g_force_smooth;
-    if (g_active_scale <= 0) return 1;  // extra images need the OpenGL renderer
-    if (g_gfx.fps == 0) return smooth_factor_for_refresh(g_refresh_hz);
-    return std::clamp(g_gfx.fps / 30.0, 1.0, std::min(5.0, max_factor_for_display()));
-}
-
 // Internal resolution actually rendered: the Resolution setting, raised by supersampling to
-// about twice the lines the window shows, capped by the image rate: above 60 the in-between
-// images are full renders too (at 75 fps 8x missed ~80 refreshes in 5 s of a heavy room, and 6x
-// fell to 64-72 fps in a fight full of explosions; 5x held 75).
+// about twice the lines the window shows (at most 8x = 1920 lines).
 int render_scale() {
     if (g_gfx.scale == 0 || !(g_gfx.aa & 2) || !g_window) return g_gfx.scale;
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(g_window, &w, &h);
-    const double rate = 30.0 * smooth_target();
-    const int cap = rate <= 61 ? 8 : rate <= 91 ? 5 : 4;
-    return std::clamp((2 * h + 239) / 240, g_gfx.scale, std::max(g_gfx.scale, cap));
+    return std::clamp((2 * h + 239) / 240, g_gfx.scale, std::max(g_gfx.scale, 8));
 }
 
 void apply_graphics() {
@@ -270,20 +236,7 @@ void apply_graphics() {
     }
     if (!g_gl_ok) g_active_scale = 0;
     hw_set_texture_filter(g_gfx.texture_filter);
-    smooth_set_factor(smooth_target());
-    // The menus run at 60 Hz with a frame rate of 60 or more (game_menu.cpp slows what they animate).
-    psx_opt_menu60 = (g_gfx.fps ? g_gfx.fps : 30 * smooth_factor_for_refresh(g_refresh_hz)) >= 60;
-    // A 60 Hz display at 60 images/s shows one image per emulated vblank (vsync pacing);
-    // other combinations present from host_throttle_frame: in step with the display when
-    // it is at least as fast as the image rate, otherwise on a timer without vsync.
-    const float rate = 30.0f * (float)smooth_factor();
-    g_multi_present = smooth_factor() >= 2 && !(g_vsync_pacing && smooth_factor() == 2);
-    g_present_vsync = rate <= g_refresh_hz + 2.0f;
-    // A display whose refreshes do not line up with the 60 Hz vblanks (75 Hz) shows at most one
-    // image per vblank when paced by it: present on our own clock there too (each swap still waits
-    // for the display, so no tearing).
-    const float beat = g_refresh_hz / 60.0f;
-    g_present_timed = g_present_vsync && std::abs(beat - std::round(beat)) * 60.0f > 2.0f;
+    psx_opt_menu60 = g_gfx.fps != 30;  // the menus at 60 Hz too (game_menu.cpp slows what they animate)
     const float ratio = aspect_ratio(g_gfx.aspect);  // (4/3) / ratio: 16:9 = 0.75, 32:9 = 0.375
     g_gte_widescreen = ratio > 0 ? (4.0f / 3.0f) / ratio : 1.0f;
 }
@@ -372,7 +325,6 @@ void save_settings() {
     std::fprintf(f, "autosave %d\n", g_autosave ? 1 : 0);
     std::fprintf(f, "subtitles %d\n", g_subtitles ? 1 : 0);
     std::fprintf(f, "fpscounter %d\n", g_fps_counter ? 1 : 0);
-    std::fprintf(f, "bootseq %d\n", g_boot_sequence ? 1 : 0);
     std::fprintf(f, "texreplace %d\n", g_tex_replace ? 1 : 0);
     std::fprintf(f, "fullscreen %d\n", g_fullscreen ? 1 : 0);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
@@ -421,7 +373,7 @@ void load_settings() {
             g_gfx.aspect = (Aspect)std::clamp(as, 0, 5);
             g_gfx.crt = crt != 0;
             g_gfx.texture_filter = filt != 0;
-            if (got == 5) g_gfx.fps = fps == 0 ? 0 : std::clamp(fps, 30, 144);
+            if (got == 5) g_gfx.fps = fps == 30 ? 30 : 60;
             else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
                 g_gfx.fps = smooth ? 0 : 30;  // older settings file
             continue;
@@ -447,10 +399,6 @@ void load_settings() {
             continue;
         }
         if (int tr; std::sscanf(line, "texreplace %d", &tr) == 1) g_tex_replace = tr != 0;
-        if (int bs; std::sscanf(line, "bootseq %d", &bs) == 1) {
-            g_boot_sequence = bs != 0;
-            continue;
-        }
         if (int fc; std::sscanf(line, "fpscounter %d", &fc) == 1) {
             g_fps_counter = fc != 0;
             continue;
@@ -803,7 +751,6 @@ void host_poll() {
 void host_set_turbo(bool on) { g_force_turbo = on; }
 
 bool host_quit_requested() { return g_quit; }
-bool host_multi_present() { return g_multi_present && !g_turbo; }
 void host_request_quit() { g_quit = true; }
 
 // Button name as in --press ("SQUARE") -> pad bit, 0 if unknown.
@@ -1168,8 +1115,8 @@ static int movie_crop(int h) {
     return (int)((float)h * (1.0f - std::max(g_gte_widescreen, 0.75f)) * 0.5f);  // (ultra-wide: as 16:9)
 }
 
-// Draws the game image for `frac` of the way into the current emulated vblank, then swaps.
-static void draw_game(const GpuDisplay& d, double frac) {
+// Draws the game image, then swaps.
+static void draw_game(const GpuDisplay& d) {
     int w = std::clamp(d.w, 1, 1024), h = std::clamp(d.h, 1, 512);
     PresentOptions opt = present_options();
     const int crop = movie_crop(h);
@@ -1187,29 +1134,15 @@ static void draw_game(const GpuDisplay& d, double frac) {
             return;
         }
     }
-    // 15-bit images drawn by the OpenGL renderer are shown straight from its VRAM (or an
-    // extra frame in between the game's own, see smooth.cpp); 24-bit movie frames (and
-    // the software renderer) go through the CPU copy.
+    // 15-bit images drawn by the hardware renderer are shown straight from its VRAM; 24-bit
+    // movie frames (and the software renderer) go through the CPU copy.
     if (d.enabled && !d.rgb24 && hw_active()) {
-        unsigned tex;
-        int tw, th;
-        uint64_t image;
-        if (smooth_pick((double)g_frame + frac, &tex, &tw, &th)) {
-            present_game_texture(tex, tw, th, 0, 0, tw, th, h, opt);
-            image = smooth_flips() << 8 | (tex & 0xFF);
-        } else {
-            int px, py, pw, ph;
-            unsigned vram = hw_display_texture(d.x, d.y, w, h, &px, &py, &pw, &ph);
-            const int cs = crop * hw_scale();
-            present_game_texture(vram, 1024 * hw_scale(), 512 * hw_scale(), px, py + cs, pw, ph - 2 * cs, h - 2 * crop, opt);
-            image = smooth_flips() << 8;
-        }
-        if (image != g_last_image) g_images++;
-        g_last_image = image;
-        if (g_bios_rom) {
-            void bootfont_present(const GpuDisplay& d, SDL_Window* window);
-            bootfont_present(d, g_window);  // the boot sequence's text (bootfont.cpp)
-        }
+        int px, py, pw, ph;
+        unsigned vram = hw_display_texture(d.x, d.y, w, h, &px, &py, &pw, &ph);
+        const int cs = crop * hw_scale();
+        present_game_texture(vram, 1024 * hw_scale(), 512 * hw_scale(), px, py + cs, pw, ph - 2 * cs, h - 2 * crop, opt);
+        if (g_display_flips != g_last_image) g_images++;
+        g_last_image = g_display_flips;
         maybe_screenshot();  // before the toasts: the picture is the game alone
         draw_toast();
         draw_version();
@@ -1217,8 +1150,8 @@ static void draw_game(const GpuDisplay& d, double frac) {
         present_swap();
         return;
     }
-    if (smooth_flips() << 8 != g_last_image) g_images++;
-    g_last_image = smooth_flips() << 8;
+    if (g_display_flips != g_last_image) g_images++;
+    g_last_image = g_display_flips;
     g_pixels.resize((size_t)w * h);
     if (d.enabled) {
         for (int y = 0; y < h; y++) {
@@ -1370,8 +1303,7 @@ void host_present(const GpuDisplay& d) {
         void vk_profile_frame(uint64_t frame);
         vk_profile_frame(g_frame);
     }
-    if (g_multi_present && !g_turbo) return;  // host_throttle_frame shows it over several refreshes
-    draw_game(d, 0.0);
+    draw_game(d);
 }
 
 // ================================================================ enhancement settings
@@ -1381,7 +1313,7 @@ void host_present(const GpuDisplay& d) {
 // Font scaling of the game's menus (percent, game_menu.cpp).
 constexpr int kFontScaleChoices[] = {30, 40, 50, 60, 70, 80};
 // Frame rates offered in the menus (30 = the original).
-constexpr int kMenuFpsChoices[] = {30, 60, 75, 90, 120, 144};
+constexpr int kMenuFpsChoices[] = {30, 60};
 // Resolution choices: render scale (lines = 240 x scale, the first at or above the named lines;
 // the renderer works in whole multiples of the PS1's 240) and name.
 constexpr int kResChoices[] = {1, 3, 4, 5, 6, 9};
@@ -1421,13 +1353,13 @@ const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
                                   "Font scaling", "Renderer", "Screen mode", "Resolution", "Aspect ratio", "Display",
                                   "Autosave", "One-liners", "Anti-aliasing", "Infinite health", "Infinite lives",
-                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "Boot sequence", "CRT filter", "Font", "Native 3D"};
+                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font", "Native 3D"};
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
 std::string enh_value(int id) {
     switch (id) {
-        case E_FPS: return g_gfx.fps == 30 ? "30 (original)" : fps_label();
+        case E_FPS: return g_gfx.fps == 30 ? "30 (original)" : "60";
         case E_SIM: return sim60_label();
         case E_DRAWDIST: return drawdist_label();
         case E_PRECISE: return g_gte_precise ? "On (no wobble)" : "Off (original)";
@@ -1448,7 +1380,6 @@ std::string enh_value(int id) {
         case E_SUBTITLES: return g_subtitles ? "On" : "Off";
         case E_AA: return kAaNames[std::clamp(g_gfx.aa, 0, 3)];
         case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
-        case E_BOOT: return g_boot_sequence ? "On" : "Off";
         case E_NATIVE_3D: return g_native_3d ? "On (level 1 test)" : "Off (precise 3D)";
         case E_GAME_FONT: {
             const std::string name = texreplace_font_name();
@@ -1502,7 +1433,6 @@ void enh_change(int id, int dir) {
         case E_AA: g_gfx.aa = (g_gfx.aa + dir + 4) % 4; break;
         case E_FPS_COUNTER: g_fps_counter = !g_fps_counter; break;
         case E_CRT: g_gfx.crt = !g_gfx.crt; break;  // present.cpp / present_vk.cpp
-        case E_BOOT: g_boot_sequence = !g_boot_sequence; break;  // bios.cpp: from the next start
         case E_NATIVE_3D: g_native_3d = !g_native_3d; break;  // mesh.cpp
         case E_GAME_FONT:  // texreplace.cpp
             g_game_font = !g_game_font;
@@ -1835,11 +1765,11 @@ static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
     enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
                R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
-               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_BOOT, R_GAME_FONT, R_NATIVE_3D, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
+               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_GAME_FONT, R_NATIVE_3D, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
     // the main page, and the Enhancements page (what goes beyond the original game)
     static const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA,
                                                R_ASPECT, R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
-    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_NATIVE_3D, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_BOOT, R_ENH_BACK};
+    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_NATIVE_3D, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK};
     bool enh_page = false;
     static int slot = 1;
     int& chapter = g_chapter_sel;
@@ -1939,10 +1869,6 @@ static void run_settings_menu() {
                         break;
                     case R_NATIVE_3D:
                         enh_change(E_NATIVE_3D, step);
-                        break;
-                    case R_BOOT:
-                        enh_change(E_BOOT, step);
-                        gfx_changed = true;
                         break;
                     case R_FPS_COUNTER:
                         enh_change(E_FPS_COUNTER, step);
@@ -2066,7 +1992,6 @@ static void run_settings_menu() {
                 case R_FONT:
                 case R_MENU_SIZE: return choice(enh_name(r - R_FPS), enh_value(r - R_FPS));
                 case R_FPS_COUNTER: return choice(enh_name(E_FPS_COUNTER), enh_value(E_FPS_COUNTER));
-                case R_BOOT: return choice(enh_name(E_BOOT), enh_value(E_BOOT));
                 case R_GAME_FONT: return choice(enh_name(E_GAME_FONT), enh_value(E_GAME_FONT));
                 case R_NATIVE_3D: return choice(enh_name(E_NATIVE_3D), enh_value(E_NATIVE_3D));
                 case R_ENH_BACK: return "Back";
@@ -2097,25 +2022,6 @@ static void sleep_ns(uint64_t ns) {
     g_prof_sleep_ns += SDL_GetTicksNS() - t0;
 }
 
-// The display's last refresh (SDL_GetTicksNS time) and its exact period, from the desktop
-// compositor (Windows); false where not known. A timer at the nominal rate (75.000 Hz) drifts
-// against the real one (74.97...): about every 30 s a refresh got two images and the next none.
-static bool display_vblank(uint64_t* last_ns, uint64_t* period_ns) {
-#ifdef _WIN32
-    DWM_TIMING_INFO ti{};
-    ti.cbSize = sizeof ti;
-    if (FAILED(DwmGetCompositionTimingInfo(nullptr, &ti)) || !ti.qpcRefreshPeriod || !ti.qpcVBlank) return false;
-    static const double freq = (double)SDL_GetPerformanceFrequency();
-    const uint64_t now_ns = SDL_GetTicksNS(), now_qpc = SDL_GetPerformanceCounter();
-    *last_ns = now_ns - (uint64_t)((double)(int64_t)(now_qpc - ti.qpcVBlank) * 1e9 / freq);
-    *period_ns = (uint64_t)((double)ti.qpcRefreshPeriod * 1e9 / freq);
-    return *period_ns > 2000000;
-#else
-    (void)last_ns, (void)period_ns;
-    return false;
-#endif
-}
-
 void host_throttle_frame() {
     if (static const bool on = std::getenv("APOC_FRAME_TIMES") != nullptr; on) {  // debug: frames over N ms (default 20)
         // with where the time went: waiting for the display (acquire/present), waiting for the
@@ -2133,61 +2039,19 @@ void host_throttle_frame() {
         }
         last = now, p0 = g_prof_present_ns, f0 = g_prof_fence_ns, g0 = g_prof_gpu_ns, s0 = g_prof_sleep_ns;
     }
-    bool multi = g_multi_present && !g_turbo && g_gl_ok;
-    bool want_vsync = (multi ? g_present_vsync : g_vsync_pacing) && !g_turbo;
+    // vsync on (no tearing); a ~60 Hz display paces the frames itself (the swap waits), others
+    // by our clock at the PS1's 59.94 Hz
+    const bool want_vsync = !g_turbo;
     if (want_vsync != g_vsync_active) {
         present_set_vsync(want_vsync);
         g_vsync_active = want_vsync;
     }
-    if (g_turbo || (g_vsync_active && !multi)) {  // vsync: the swap already waited
+    if (g_turbo || g_vsync_pacing) {
         g_next_frame_ns = SDL_GetTicksNS();
         return;
     }
-    uint64_t now = SDL_GetTicksNS();
+    const uint64_t now = SDL_GetTicksNS();
     g_next_frame_ns += FRAME_NS;
-    if (multi) {
-        // Several images per emulated vblank, each picking the image for its moment in time.
-        const uint64_t start = g_next_frame_ns - FRAME_NS;
-        auto frac_at = [&](uint64_t t) {
-            return std::clamp((double)(int64_t)(t - start) / (double)FRAME_NS, 0.0, 0.999);
-        };
-        if (g_present_vsync && !g_present_timed) {
-            // As many display refreshes as fit before the next vblank is due (each swap
-            // waits for the display).
-            const uint64_t refresh = (uint64_t)(1e9 / g_refresh_hz);
-            for (bool drawn = false;; drawn = true) {
-                now = SDL_GetTicksNS();
-                if (drawn && now + refresh / 2 > g_next_frame_ns) break;
-                draw_game(g_last_display, frac_at(now));
-            }
-        } else {
-            // The image rate is above the display refresh, or does not line up with it: present
-            // on our own clock.
-            uint64_t period = (uint64_t)(1e9 / (30.0 * smooth_factor()));
-            // At the display's own rate: in step with its real refreshes, each image half way
-            // between two of them (so each refresh gets exactly one)
-            uint64_t vblank = 0, refresh = 0;
-            const bool locked = display_vblank(&vblank, &refresh) &&
-                                std::abs(1e9 / (double)refresh - 30.0 * smooth_factor()) < 2.0;
-            if (locked) period = refresh;
-            if (g_next_present_ns + 4 * period < start || g_next_present_ns > g_next_frame_ns + period)
-                g_next_present_ns = start;  // (re)start in step with emulated time
-            while (g_next_present_ns < g_next_frame_ns) {
-                if (locked) {  // the nearest point half way between refreshes
-                    const uint64_t mid = vblank + refresh / 2;
-                    const int64_t d = (int64_t)(g_next_present_ns - mid);
-                    const int64_t n = (d >= 0 ? d + (int64_t)refresh / 2 : d - (int64_t)refresh / 2) / (int64_t)refresh;
-                    g_next_present_ns = mid + (uint64_t)(n * (int64_t)refresh);
-                    if (g_next_present_ns >= g_next_frame_ns) break;
-                }
-                now = SDL_GetTicksNS();
-                if (g_next_present_ns > now) sleep_ns(g_next_present_ns - now);
-                draw_game(g_last_display, frac_at(g_next_present_ns));
-                g_next_present_ns += period;
-            }
-        }
-        now = SDL_GetTicksNS();
-    }
     if (g_next_frame_ns > now) {
         sleep_ns(g_next_frame_ns - now);
     } else if (now - g_next_frame_ns > FRAME_NS * 4) {

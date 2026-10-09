@@ -60,12 +60,10 @@ void usage() {
         "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
         "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
-        "  --smooth K         K images per game step (1 = original 30 fps; default: match the display)\n"
         "  --refresh HZ       display refresh rate to assume (if the detected one is wrong)\n"
         "  --sim60            60 Hz simulation in every level (default: levels 1-4 only; F1 menu)\n"
         "  --chapter N        start at chapter N (saves/chapters; F2 or F1 -> Chapter lists them)\n"
         "  --renderer R       opengl or vulkan (default: the F1 setting; at first OpenGL, Vulkan on Linux)\n"
-        "  --bios-intro       play the BIOS boot sequence (assets/bios) even with other options\n"
         "keys: arrows, Z=Cross X=Circle A=Square S=Triangle Q/W=L1/R1 1/2=L2/R2\n"
         "      Enter=Start Backspace=Select Tab=fast-forward F2=chapters F11=fullscreen Esc=quit\n");
 }
@@ -74,7 +72,7 @@ void usage() {
 // player sees where things go.
 void make_asset_folders() {
     std::error_code ec;
-    for (const char* d : {"assets/image", "assets/bios", "assets/replacements/textures",
+    for (const char* d : {"assets/image", "assets/replacements/textures",
                           "assets/replacements/fmvs"})
         std::filesystem::create_directories(d, ec);
 }
@@ -234,9 +232,6 @@ int main(int argc, char** argv) {
     std::string card_dir = "saves";
     int scale = 0;  // window: 0 = 1080 lines or as much as fits
     bool interp_only = false;  // debugging: run everything in the interpreter
-    // The BIOS boot sequence plays on a plain start; scripted runs (chapters, presses, screenshots)
-    // count frames from the game's start, so any option leaves it out unless --bios-intro is given.
-    bool bios_intro = argc == 1 && !std::getenv("APOC_NO_BIOS_BOOT");
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -255,7 +250,6 @@ int main(int argc, char** argv) {
         }
         else if (a == "--turbo") host_set_turbo(true);
         else if (a == "--interp") interp_only = true;
-        else if (a == "--bios-intro") bios_intro = true;
         else if (a == "--fps60") psx_opt_skip_frame_wait = 1;
         else if (a == "--sim60") {  // 60 Hz simulation in any level (sim60.cpp)
             g_sim60_force = true;
@@ -269,10 +263,6 @@ int main(int argc, char** argv) {
         else if (a == "--refresh") {  // --refresh HZ: display refresh rate to assume
             extern float g_refresh_override;
             g_refresh_override = (float)std::atof(next().c_str());
-        }
-        else if (a == "--smooth") {  // --smooth K: K images per game step (1 = original 30 fps)
-            extern int g_force_smooth;
-            g_force_smooth = std::clamp(std::atoi(next().c_str()), 1, 5);
         }
         else if (a == "--chapter") {  // --chapter N: load chapter N (1 = the first) once running
             extern bool host_parse_state_script(const char*);
@@ -361,7 +351,6 @@ int main(int argc, char** argv) {
     cpu.r[30] = cpu.r[29];
     cpu.r[31] = 0;
     sched_add(&cpu, Ev::Scanline, CYCLES_PER_SCANLINE_NTSC);
-    if (bios_intro && (argc > 1 || g_boot_sequence)) bios_boot_sequence(&cpu, entry);  // (--bios-intro: always)
 
     // Loading a save state longjmps back here (from the VSync safe point) with the machine
     // restored; the game then continues from VSync's entry: VSync itself runs recompiled,

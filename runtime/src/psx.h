@@ -80,15 +80,12 @@ void watchdog_start();                    // freeze report thread (core.cpp)
 void core_early_cancel();                // a picture upload: forget the frame shown early (core.cpp)
 void core_frame_drawn(R3000* c);          // a frame's ordering table was drawn (gpu_run_list)
 uint32_t gpu_run_list(R3000* c, uint32_t addr);  // walks a GPU packet list (ordering table) into GP0
-void gpu_vram_save(int x, int y, int w, int h, std::vector<uint16_t>& out);
-void gpu_vram_restore(int x, int y, int w, int h, const std::vector<uint16_t>& in);
 
-// Ghost mode (smooth.cpp): run game code outside emulated time, then roll memory,
+// Ghost mode (sim60.cpp): run game code outside emulated time, then roll memory,
 // scheduler and interrupts back. Exceeding the cycle budget longjmps to `abort`.
 void core_ghost_begin(R3000* c, uint64_t cycle_budget, std::jmp_buf* abort);
 int core_ghost_end(R3000* c);  // returns how many sound/CD/movie writes were dropped
 bool core_in_ghost();
-void smooth_on_flip();         // the game showed a new frame (GP1 display start)
 
 // Pose blending between two renders (gte.cpp, sim60.cpp)
 enum class GteBlendMode { Off, Record, Blend };
@@ -122,13 +119,7 @@ extern int g_menu_zoom;     // setting: the game's menus at this percent of thei
 // Enhancement settings, shared by F1 and the game's Options -> Enhancements (host_sdl.cpp).
 enum EnhSetting { E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_RES, E_ASPECT, E_DISPLAY, E_AUTOSAVE, E_SUBTITLES, E_AA,
                    E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT,
-                   E_FPS_COUNTER, E_BOOT, E_CRT, E_GAME_FONT, E_NATIVE_3D };
-// the boot sequence's text in TrueType fonts (bootfont.cpp)
-void bootfont_upload(int x, int y, int w, int h, const uint16_t* vram);
-void bootfont_fill(int x, int y, int w, int h);
-bool bootfont_draw(int nv, const float* sx, const float* sy, const int* u, const int* v, int page_x, int page_y,
-                   int depth, int clut_x, int clut_y, bool raw, int r, int g, int b);
-extern bool g_boot_sequence;  // setting: the BIOS boot sequence at start (bios.cpp; assets/bios)
+                   E_FPS_COUNTER, E_CRT, E_GAME_FONT, E_NATIVE_3D };
 const char* enh_name(int id);
 std::string enh_value(int id);
 void enh_change(int id, int dir);
@@ -253,7 +244,6 @@ void host_rumble(int port, uint8_t small_motor, uint8_t large_motor);
 void host_poll();                    // pump OS events
 uint64_t host_frame_count();
 bool host_quit_requested();
-bool host_multi_present();  // several images per emulated frame (smooth frame rate)
 void host_request_quit();            // close the game (as closing the window does)
 void host_present(const GpuDisplay& d);
 void host_throttle_frame();          // sleep to hold 60 Hz
@@ -269,14 +259,8 @@ void bios_take_interrupt(R3000* c);
 void bios_vblank(R3000* c);          // BIOS-side pad/card polling at VBlank
 void bios_pad_refresh(R3000* c);     // the pads into their BIOS buffers
 extern bool g_display_flipped;       // the game set the display start since VBlank (gpu.cpp)
+extern uint64_t g_display_flips;     // ... how many times so far
 void bios_deliver_event(R3000* c, uint32_t cls, uint32_t spec);
-// The PlayStation boot sequence from the player's BIOS (assets/bios, optional): the real BIOS
-// runs until it starts the game at `entry`, then the machine is put back as it was.
-void bios_boot_sequence(R3000* c, uint32_t entry);
-extern const uint8_t* g_bios_rom;    // while the boot sequence runs (512 KB), else null
-// The real BIOS on a real (interpreted) CPU: exceptions and interrupts go to its own handlers.
-// Returns true when execution reached stop_pc, false at the cycle limit or on a skip.
-bool interp_run_machine(R3000* c, uint32_t pc, uint32_t stop_pc, uint64_t cycle_limit, bool (*skip)());
 
 void dispatch_register(const RecompFunc* table, uint32_t count);
 RecompFuncPtr dispatch_lookup(uint32_t addr);

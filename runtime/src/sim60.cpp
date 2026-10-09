@@ -1176,7 +1176,20 @@ bool record_previous_pose(R3000* c, bool anim, bool joints) {
     return done;
 }
 
-// The level's render (called from smooth.cpp's render hook when psx_opt_sim60 is on).
+// The level's render (800307F0): its frame noted, the draw distance applied, and with the 60 Hz
+// simulation drawn through sim60_render (which calls this hook again with the frame's values in place).
+extern uint64_t g_level_render_frame;  // savestate.cpp
+void drawdist_apply(R3000* c);
+bool sim60_in_render();
+int sim60_render(R3000* c);
+extern "C" int psx_hook_render(R3000* c) {
+    if (core_in_ghost()) return 0;
+    g_level_render_frame = host_frame_count();  // (savestate.cpp: a level is running)
+    drawdist_apply(c);
+    return psx_opt_sim60 && !sim60_in_render() ? sim60_render(c) : 0;
+}
+
+// The level's render with the 60 Hz simulation (from psx_hook_render).
 int sim60_render_lights_hidden(R3000* c);
 int sim60_render(R3000* c) {
     if (g_in_render) return 0;
@@ -1494,5 +1507,5 @@ extern "C" void psx_hook_glow_sort(R3000* c) {
     c->r[2] = (uint32_t)(z - std::min(bias, z / 2)) & 0x3FFC;
 }
 
-// smooth.cpp: the 60 Hz simulation's own render is under way (its values are in place)
+// The 60 Hz simulation's own render is under way (its values are in place)
 bool sim60_in_render() { return g_in_render; }

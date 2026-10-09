@@ -69,13 +69,6 @@ bool hw_hd_upload(int level, int x, int y, int w, int h, const uint32_t* rgba); 
 
 // Finishes pending draws; returns the VRAM texture and the display rectangle in its pixels.
 unsigned hw_display_texture(int x, int y, int w, int h, int* px, int* py, int* pw, int* ph);
-// Extra frames (smooth.cpp). A capture copies a rendered VRAM rectangle (native
-// coordinates) into its own texture; slots survive until the renderer is restarted.
-void hw_capture(int slot, int x, int y, int w, int h);
-unsigned hw_capture_texture(int slot, int* tex_w, int* tex_h);  // 0 if the slot is empty
-// Keeps a copy of a VRAM rectangle so it can be put back after drawing over it.
-void hw_stash(int x, int y, int w, int h);
-void hw_unstash();
 
 void hw_depth_reset();  // a new frame: the Z-buffer is cleared
 bool hw_zbuffer_ready();  // the VRAM render target has a depth buffer (HwPrim::ztest works)

@@ -26,7 +26,7 @@ def lbl(a: int) -> str:
 # Runtime hooks emitted at the entry of specific functions.
 #   8008632C VSync: save-state safe point (see runtime/src/savestate.cpp)
 #   80030AD4 the level's main loop: a level has started (auto-save)
-#   800307F0 the level's render: extra frames between simulation steps (smooth.cpp)
+#   800307F0 the level's render: draw distance, the 60 Hz simulation's render (sim60.cpp)
 #   8002FF90 the level's tick: 60 Hz simulation prototype (sim60.cpp)
 #   800189EC the game records progress (level, restart point, health, weapons): auto-save
 #   8005F688 the player's update: every jump rises the full height (sim60.cpp)
@@ -64,6 +64,7 @@ ENTRY_HOOKS = {
     0x8001B8BC: "psx_hook_2d(c, 2);",
     0x8001C004: "psx_hook_2d(c, 3);",  # full-screen tint
     0x8006D3C0: "psx_hook_2d(c, 4);",  # boss health bar (part of the HUD, centred)
+    0x8003736C: "psx_hook_2d(c, 5);",  # effects: sprites keep their shape in widescreen
     # menu / HUD drawing routines: their packets are 2D (gpu.cpp)
     0x8001AA28: "if (psx_hook_2d_call(c, 0)) return;",  # text
     0x8006D028: "if (psx_hook_2d_call(c, 1)) return;",  # icons (button symbols, ...)
@@ -89,7 +90,6 @@ INSN_HOOKS = {
     0x800376F8: "psx_hook_glow_sort(c);",
     0x80080D38: "psx_hook_strip_corner(c);",  # a strip corner (lamps): exact position (gte.cpp)
     0x800312A0: "psx_hook_game_over(c);",  # lives left (v1) after a death: 0 restarts the level (savestate.cpp)
-    0x800776B4: "psx_hook_camera(c);",  # the render camera: smoothed view (gte.cpp)
     0x8005CDA0: "psx_hook_aim(c);",  # player fire vector +471/+472 set: exact stick/mouse angle (host_sdl.cpp)
     # 800664FC: the VBlank wait's loop (800664E4: until the VBlank callback has counted a0 more):
     # straight to the next event instead of running the loop through the idle cycles (with the

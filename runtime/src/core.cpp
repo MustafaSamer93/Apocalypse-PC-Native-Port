@@ -12,7 +12,6 @@
 #include <SDL3/SDL.h>
 
 #include "psx.h"
-#include "smooth.h"
 
 uint8_t psx_ram[PSX_RAM_SIZE];
 uint8_t psx_scratch[PSX_SCRATCH_SIZE];
@@ -156,7 +155,7 @@ static uint64_t g_ev_time[(int)Ev::Count];
 static bool g_ev_active[(int)Ev::Count];
 static bool g_force_check = false;
 
-// Ghost mode (smooth.cpp): game code runs outside emulated time while an extra frame is
+// Ghost mode (sim60.cpp): game code runs outside emulated time while the previous pose is
 // rendered. No events or interrupts are delivered; reaching the cycle budget aborts it.
 static bool g_ghost = false;
 static uint64_t g_ghost_deadline = 0;
@@ -246,8 +245,7 @@ void psx_run_events(R3000* c) {
     sched_update(c);
     // Interrupts are only delivered from the outermost check point, never while the
     // runtime is itself inside event processing.
-    // (the real BIOS of the boot sequence takes its own: interp_run_machine)
-    if (g_events_depth == 1 && !g_bios_rom && irq_should_take(c)) bios_take_interrupt(c);
+    if (g_events_depth == 1 && irq_should_take(c)) bios_take_interrupt(c);
     g_events_depth--;
     sched_update(c);
 }
@@ -293,14 +291,10 @@ static GpuDisplay shown_display() {
 
 // gpu.cpp: the game drew a frame's ordering table (not in a ghost render). It goes to the screen
 // now, instead of a refresh later when the game flips to it: one frame less input lag. Only for
-// double-buffered frames the size of the display, one per refresh, and not with the smooth frame
-// rate (its extra images are timed from the game's flips). The 60 Hz simulation makes no extra
-// images: early there too (it was off at the automatic frame rate, a frame more input lag).
+// double-buffered frames the size of the display, one per refresh.
 void core_frame_drawn(R3000* c) {
     GpuDisplay d;
-    if (!g_pending || host_multi_present() || (smooth_factor() >= 2 && !psx_opt_sim60) ||
-        !gpu_drawn_display(&d))
-        return;
+    if (!g_pending || !gpu_drawn_display(&d)) return;
     const GpuDisplay now = gpu_display();
     if (d.x == now.x && d.y == now.y) return;  // drawn where the screen is: shown as usual
     g_early = d;
@@ -495,12 +489,7 @@ uint32_t mem_read_slow(R3000* c, uint32_t addr, int size) {
         return v;
     }
     if (p >= 0x1F000000 && p < 0x1F800000) return 0xFFFFFFFFu;  // no expansion ROM
-    if (p >= 0x1FC00000 && p < 0x1FC80000) {  // the BIOS ROM: only during the boot sequence
-        if (!g_bios_rom) return 0;
-        uint32_t v = 0;
-        std::memcpy(&v, g_bios_rom + (p - 0x1FC00000), size);
-        return v;
-    }
+    if (p >= 0x1FC00000 && p < 0x1FC80000) return 0;  // the BIOS ROM (high-level BIOS: none)
     LOG(Mem, "unhandled read%d %08X", size * 8, addr);
     return 0;
 }
@@ -682,7 +671,7 @@ void core_state(StateIO& s) {
 
 void sched_refresh(R3000* c) { sched_update(c); }
 
-// ================================================================ ghost mode (smooth.cpp)
+// ================================================================ ghost mode (sim60.cpp)
 
 struct CoreGhostSnap {
     std::vector<uint8_t> ram;
