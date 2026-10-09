@@ -154,6 +154,16 @@ void cheats_frame(R3000* c) {
     static bool invincible_set = false;
     const uint32_t p = player(c);
     if (p) weapons_check(c, p);
+    // tests: APOC_CHEATS=1 switches every cheat on; APOC_WEAPON=N keeps weapon type N in hand
+    static const bool all = std::getenv("APOC_CHEATS") != nullptr;
+    static const char* w = std::getenv("APOC_WEAPON");
+    if (all)
+        for (bool& on : g_on) on = true;
+    if (w && p) {
+        const int t = std::atoi(w);
+        if (t >= 1 && t <= kTypes && valid(MEM_R32(c, p + kWeaponSlots + 4 * (uint32_t)(t - 1))))
+            MEM_W32(c, p + kCurrent, (uint32_t)t);
+    }
     // health: the game's own switch, and only while ours is on (its cheat code can use it too)
     if (g_on[0]) MEM_W32(c, kInvincible, 1), invincible_set = true;
     else if (invincible_set) MEM_W32(c, kInvincible, 0), invincible_set = false;

@@ -245,15 +245,16 @@ double smooth_target() {
 }
 
 // Internal resolution actually rendered: the Resolution setting, raised by supersampling to
-// about twice the lines the window shows at 60 images/s (at most 8x = 1920 lines). Above 60 the
-// in-between images are full renders too: the lines shrink with the image rate, so the GPU does
-// about the same work as at 60 (8x at 75 fps missed ~80 refreshes in 5 s of a heavy room, 6x ~10).
+// about twice the lines the window shows, capped by the image rate: above 60 the in-between
+// images are full renders too (at 75 fps, 7x and 8x missed 70-80 refreshes in 5 s of a heavy
+// room; 6x ~10).
 int render_scale() {
     if (g_gfx.scale == 0 || !(g_gfx.aa & 2) || !g_window) return g_gfx.scale;
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(g_window, &w, &h);
-    const double rate = std::max(60.0, 30.0 * smooth_target());
-    return std::clamp((int)(2 * h * 60 / rate) / 240, g_gfx.scale, std::max(g_gfx.scale, 8));
+    const double rate = 30.0 * smooth_target();
+    const int cap = rate <= 61 ? 8 : rate <= 76 ? 6 : rate <= 91 ? 5 : 4;
+    return std::clamp((2 * h + 239) / 240, g_gfx.scale, std::max(g_gfx.scale, cap));
 }
 
 void apply_graphics() {

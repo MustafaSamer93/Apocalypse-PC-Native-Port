@@ -95,6 +95,10 @@ INSN_HOOKS = {
     # straight to the next event instead of running the loop through the idle cycles (with the
     # 8x CPU of 60 Hz mode that was ~10% of the host's time)
     0x800664FC: "psx_idle_until_event(c);",
+    # the weapon in hand fires (sim60.cpp: not on the 60 Hz simulation's extra ticks)
+    0x8005DA24: "psx_hook_fire(c, 0);",  # start firing: the fire state is about to change
+    0x8005DA54: "psx_hook_fire(c, 1);",  # call to the weapon's start-firing method
+    0x8005DA90: "psx_hook_fire(c, 2);",  # call to its keep-firing method
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.

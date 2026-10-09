@@ -563,10 +563,15 @@ void effects_after(R3000* c) {
         uint32_t serial, size_word;
         if (!heap_block(c, o, &serial, &size_word)) return;
         const uint32_t size = size_word >> 4;
+        // All or nothing: an effect with one field that jumped (a shard corner snapped to a new
+        // spot, a reused object) is drawn as it is; half way with the rest it was a sliver
+        // across the screen (the rocket launcher's explosions).
+        const size_t first = g_mid_words.size();
+        bool jumped = false;
         for_each_field(c, list, o, cls, [&](uint32_t a, Kind k, int32_t limit) {
             const int n = k == Kind::Point ? 3 : 1;
             // inside its own block (tables it points to are elsewhere: the span check below)
-            if (a >= o && a < o + 0x100 && a + 4 * n > o + size) return;
+            if (jumped || (a >= o && a < o + 0x100 && a + 4 * n > o + size)) return;
             if (!span_free(starts, o, a, 4 * n)) return;
             uint32_t was[3], now[3];
             bool moved = false;
@@ -575,17 +580,42 @@ void effects_after(R3000* c) {
                 now[i] = MEM_R32(c, a + 4 * i);
                 if (now[i] != was[i]) moved = true;
                 if (k == Kind::Point || k == Kind::Number) {
-                    if (!step_ok((int32_t)was[i], (int32_t)now[i], limit)) return;
+                    if (!step_ok((int32_t)was[i], (int32_t)now[i], limit)) jumped = true;
                 } else if (k == Kind::Halves) {
                     for (int s = 0; s < 32; s += 16)
-                        if (!step_ok(0, (int16_t)((now[i] >> s) - (was[i] >> s)), limit)) return;
+                        if (!step_ok(0, (int16_t)((now[i] >> s) - (was[i] >> s)), limit)) jumped = true;
                 }
             }
-            if (moved)
+            if (moved && !jumped)
                 for (int i = 0; i < n; i++)
                     g_mid_words.push_back({a + 4 * (uint32_t)i, was[i], now[i], k == Kind::Point ? Kind::Number : k, o, list, cls,
                                            serial, size_word});
         });
+        if (jumped) {
+            g_mid_words.resize(first);
+            return;
+        }
+        // A shard spins: its corners each drawn half way between two turns squashed it into a
+        // sliver. It moves whole instead: its new shape at the half-way point of its centre
+        // (each corner's "before" is its new place less the centre's step).
+        if (list == kShardList && 0x48 + 36 <= size && span_free(starts, o, o + 0x48, 36)) {
+            const uint32_t c0 = o + 0x48;
+            int32_t was[9], now[9], step[3] = {};
+            for (int i = 0; i < 9; i++) {
+                uint32_t w;
+                if (!word_before(c0 + 4 * i, &w)) return;
+                was[i] = (int32_t)w, now[i] = (int32_t)MEM_R32(c, c0 + 4 * i);
+            }
+            for (int a = 0; a < 3; a++)
+                step[a] = (int32_t)(((int64_t)now[a] + now[3 + a] + now[6 + a] - was[a] - was[3 + a] - was[6 + a]) / 3);
+            g_mid_words.erase(std::remove_if(g_mid_words.begin() + (ptrdiff_t)first, g_mid_words.end(),
+                                             [&](const MidWord& m) { return m.addr >= c0 && m.addr < c0 + 36; }),
+                              g_mid_words.end());
+            for (int i = 0; i < 9; i++)
+                if (step[i % 3])
+                    g_mid_words.push_back({c0 + 4 * (uint32_t)i, (uint32_t)(now[i] - step[i % 3]), (uint32_t)now[i], Kind::Number,
+                                           o, list, cls, serial, size_word});
+        }
     });
     g_effects_before.clear();
     g_effect_words_before.clear();
@@ -1419,6 +1449,24 @@ extern "C" int psx_hook_tick(R3000* c) {
     c->r[31] = ra;
     c->r[29] = sp;
     return 1;
+}
+
+// The weapon in hand fires from the player's update (8005DA24..8005DA90: its methods +0x14,
+// start, and +0x1C, keep firing, with the fire state in player byte +536), and the extra ticks
+// run that update too: every weapon but the gun (its own timer is retimed) fired twice as often
+// (the rocket launcher 39 shots instead of 20 in 10 s: twice the explosions, the effect lists
+// full). On an extra tick the call goes to a function that returns 0 (8002BC98: "no shot") and the
+// fire state is put back, so the next world update starts or keeps firing as the game would.
+extern "C" void psx_hook_fire(R3000* c, int site) {
+    static uint8_t state = 0;
+    if (!g_player_odd) return;
+    const uint32_t player = c->r[18];  // s2
+    if (site == 0) {
+        state = (uint8_t)MEM_R8(c, player + 536);
+        return;
+    }
+    if (site == 1) MEM_W8(c, player + 536, state);
+    c->r[2] = 0x8002BC98;  // the call's target (v0)
 }
 
 // Glows (the glow list: lights, pickups, lamps) are flat screen-facing fans that the game sorts
