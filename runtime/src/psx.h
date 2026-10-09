@@ -117,14 +117,12 @@ void gte_blend_begin(GteBlendMode m);
 
 // Draw distance (drawdist.cpp): percent of the game's own view distance (100 = original)
 extern int g_draw_distance;
-extern int g_fov;          // setting: horizontal field of view in degrees (4:3 part), 0 = the game's (drawdist.cpp)
-extern float g_fov_base;   // the game's own field of view, measured from its view (degrees)
 extern bool g_smooth_font;  // setting: draw the game's text and button icons with smoothed textures (gpu.cpp)
 extern int g_menu_zoom;     // setting: the game's menus at this percent of their size (game_menu.cpp)
 // Enhancement settings, shared by F1 and the game's Options -> Enhancements (host_sdl.cpp).
 enum EnhSetting { E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_RES, E_ASPECT, E_DISPLAY, E_AUTOSAVE, E_SUBTITLES, E_AA,
                    E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT,
-                   E_FPS_COUNTER, E_BOOT, E_CRT, E_FOV, E_GAME_FONT };
+                   E_FPS_COUNTER, E_BOOT, E_CRT, E_GAME_FONT };
 // the boot sequence's text in TrueType fonts (bootfont.cpp)
 void bootfont_upload(int x, int y, int w, int h, const uint16_t* vram);
 void bootfont_fill(int x, int y, int w, int h);

@@ -363,7 +363,6 @@ void save_settings() {
                  g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
     std::fprintf(f, "sim %d\n", g_sim60_setting);
     std::fprintf(f, "drawdist %d\n", g_draw_distance);
-    std::fprintf(f, "fov %d\n", g_fov);
     std::fprintf(f, "gamefont %d\n", g_game_font ? 1 : 0);
     std::fprintf(f, "precise %d\n", g_gte_precise ? 1 : 0);
     std::fprintf(f, "font %d\n", g_smooth_font ? 1 : 0);
@@ -472,10 +471,6 @@ void load_settings() {
         }
         if (int gf; std::sscanf(line, "gamefont %d", &gf) == 1) {
             g_game_font = gf != 0;
-            continue;
-        }
-        if (int fv; std::sscanf(line, "fov %d", &fv) == 1) {
-            g_fov = fv == 0 ? 0 : std::clamp(fv, 30, 120);
             continue;
         }
         if (int dd; std::sscanf(line, "drawdist %d", &dd) == 1) {
@@ -1420,7 +1415,7 @@ const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
                                   "Font scaling", "Renderer", "Screen mode", "Resolution", "Aspect ratio", "Display",
                                   "Autosave", "One-liners", "Anti-aliasing", "Infinite health", "Infinite lives",
-                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "Boot sequence", "CRT filter", "Field of view", "Font"};
+                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "Boot sequence", "CRT filter", "Font"};
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -1453,9 +1448,6 @@ std::string enh_value(int id) {
             if (name.empty()) return "Original (no font in assets/fonts)";
             return g_game_font ? name : "Original";
         }
-        case E_FOV:
-            if (g_fov == 0) return g_fov_base > 0 ? "Original (" + std::to_string(std::lround(g_fov_base)) + ")" : "Original";
-            return std::to_string(g_fov);
         case E_CRT: return g_gfx.crt ? "On" : "Off";
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
@@ -1508,12 +1500,6 @@ void enh_change(int id, int dir) {
             g_game_font = !g_game_font;
             texreplace_font_changed();
             break;
-        case E_FOV: {  // drawdist.cpp: Original, then 5-degree steps above the game's own up to 120
-            const int first = ((int)(g_fov_base > 0 ? g_fov_base : 60) / 5 + 1) * 5;
-            if (dir > 0) g_fov = g_fov == 0 ? first : g_fov >= 120 ? 0 : g_fov + 5;
-            else g_fov = g_fov == 0 ? 120 : g_fov <= first ? 0 : g_fov - 5;
-            break;
-        }
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
         case E_CHEAT_WEAPONS:
@@ -1841,11 +1827,11 @@ static void run_settings_menu() {
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
     enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
                R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
-               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_BOOT, R_FOV, R_GAME_FONT, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
+               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_BOOT, R_GAME_FONT, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
     // the main page, and the Enhancements page (what goes beyond the original game)
     static const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA,
                                                R_ASPECT, R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
-    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_FOV, R_PRECISE, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_BOOT, R_ENH_BACK};
+    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_BOOT, R_ENH_BACK};
     bool enh_page = false;
     static int slot = 1;
     int& chapter = g_chapter_sel;
@@ -1942,10 +1928,6 @@ static void run_settings_menu() {
                         break;
                     case R_GAME_FONT:
                         enh_change(E_GAME_FONT, step);
-                        break;
-                    case R_FOV:
-                        enh_change(E_FOV, step);
-                        gfx_changed = true;
                         break;
                     case R_BOOT:
                         enh_change(E_BOOT, step);
@@ -2074,7 +2056,6 @@ static void run_settings_menu() {
                 case R_MENU_SIZE: return choice(enh_name(r - R_FPS), enh_value(r - R_FPS));
                 case R_FPS_COUNTER: return choice(enh_name(E_FPS_COUNTER), enh_value(E_FPS_COUNTER));
                 case R_BOOT: return choice(enh_name(E_BOOT), enh_value(E_BOOT));
-                case R_FOV: return choice(enh_name(E_FOV), enh_value(E_FOV));
                 case R_GAME_FONT: return choice(enh_name(E_GAME_FONT), enh_value(E_GAME_FONT));
                 case R_ENH_BACK: return "Back";
             }
