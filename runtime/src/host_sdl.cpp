@@ -22,6 +22,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <dwmapi.h>
 #include <io.h>
 #else
 #include <unistd.h>
@@ -244,12 +245,15 @@ double smooth_target() {
 }
 
 // Internal resolution actually rendered: the Resolution setting, raised by supersampling to
-// about twice the lines the window shows (at most 8x = 1920 lines).
+// about twice the lines the window shows at 60 images/s (at most 8x = 1920 lines). Above 60 the
+// in-between images are full renders too: the lines shrink with the image rate, so the GPU does
+// about the same work as at 60 (8x at 75 fps missed ~80 refreshes in 5 s of a heavy room, 6x ~10).
 int render_scale() {
     if (g_gfx.scale == 0 || !(g_gfx.aa & 2) || !g_window) return g_gfx.scale;
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(g_window, &w, &h);
-    return std::clamp((2 * h + 239) / 240, g_gfx.scale, std::max(g_gfx.scale, 8));
+    const double rate = std::max(60.0, 30.0 * smooth_target());
+    return std::clamp((int)(2 * h * 60 / rate) / 240, g_gfx.scale, std::max(g_gfx.scale, 8));
 }
 
 void apply_graphics() {
@@ -2100,6 +2104,25 @@ static void sleep_ns(uint64_t ns) {
     g_prof_sleep_ns += SDL_GetTicksNS() - t0;
 }
 
+// The display's last refresh (SDL_GetTicksNS time) and its exact period, from the desktop
+// compositor (Windows); false where not known. A timer at the nominal rate (75.000 Hz) drifts
+// against the real one (74.97...): about every 30 s a refresh got two images and the next none.
+static bool display_vblank(uint64_t* last_ns, uint64_t* period_ns) {
+#ifdef _WIN32
+    DWM_TIMING_INFO ti{};
+    ti.cbSize = sizeof ti;
+    if (FAILED(DwmGetCompositionTimingInfo(nullptr, &ti)) || !ti.qpcRefreshPeriod || !ti.qpcVBlank) return false;
+    static const double freq = (double)SDL_GetPerformanceFrequency();
+    const uint64_t now_ns = SDL_GetTicksNS(), now_qpc = SDL_GetPerformanceCounter();
+    *last_ns = now_ns - (uint64_t)((double)(int64_t)(now_qpc - ti.qpcVBlank) * 1e9 / freq);
+    *period_ns = (uint64_t)((double)ti.qpcRefreshPeriod * 1e9 / freq);
+    return *period_ns > 2000000;
+#else
+    (void)last_ns, (void)period_ns;
+    return false;
+#endif
+}
+
 void host_throttle_frame() {
     if (static const bool on = std::getenv("APOC_FRAME_TIMES") != nullptr; on) {  // debug: frames over N ms (default 20)
         // with where the time went: waiting for the display (acquire/present), waiting for the
@@ -2147,10 +2170,23 @@ void host_throttle_frame() {
         } else {
             // The image rate is above the display refresh, or does not line up with it: present
             // on our own clock.
-            const uint64_t period = (uint64_t)(1e9 / (30.0 * smooth_factor()));
+            uint64_t period = (uint64_t)(1e9 / (30.0 * smooth_factor()));
+            // At the display's own rate: in step with its real refreshes, each image half way
+            // between two of them (so each refresh gets exactly one)
+            uint64_t vblank = 0, refresh = 0;
+            const bool locked = display_vblank(&vblank, &refresh) &&
+                                std::abs(1e9 / (double)refresh - 30.0 * smooth_factor()) < 2.0;
+            if (locked) period = refresh;
             if (g_next_present_ns + 4 * period < start || g_next_present_ns > g_next_frame_ns + period)
                 g_next_present_ns = start;  // (re)start in step with emulated time
             while (g_next_present_ns < g_next_frame_ns) {
+                if (locked) {  // the nearest point half way between refreshes
+                    const uint64_t mid = vblank + refresh / 2;
+                    const int64_t d = (int64_t)(g_next_present_ns - mid);
+                    const int64_t n = (d >= 0 ? d + (int64_t)refresh / 2 : d - (int64_t)refresh / 2) / (int64_t)refresh;
+                    g_next_present_ns = mid + (uint64_t)(n * (int64_t)refresh);
+                    if (g_next_present_ns >= g_next_frame_ns) break;
+                }
                 now = SDL_GetTicksNS();
                 if (g_next_present_ns > now) sleep_ns(g_next_present_ns - now);
                 draw_game(g_last_display, frac_at(g_next_present_ns));
