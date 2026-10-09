@@ -49,7 +49,7 @@ constexpr uint32_t kButtons = 0x800EC0F8;  // 16 bytes a button: +0 held, +1 pre
 constexpr uint32_t kGpRepeat = 0x800FEEBC + 344, kUpdateCount = 0x800FF2F0;
 
 // Our pages: their settings (host_sdl.cpp enh_*), in order.
-constexpr int kEnhSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_CRT, E_FPS, E_FPS_COUNTER, E_GAME_FONT, E_FONT_SCALE,
+constexpr int kEnhSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_CRT, E_FPS, E_FPS_COUNTER, E_NATIVE_3D, E_GAME_FONT, E_FONT_SCALE,
                                 E_AUTOSAVE, E_SUBTITLES, E_BOOT};
 constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT};
 // The game's own options, for the pause menu (the front end has its own pages for them); ids

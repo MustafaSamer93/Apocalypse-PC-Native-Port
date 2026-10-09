@@ -118,6 +118,7 @@ add_executable(repocalypse
     runtime/src/smooth.cpp
     runtime/src/sim60.cpp
     runtime/src/drawdist.cpp
+    runtime/src/mesh.cpp
     runtime/src/render_backend.cpp
     runtime/src/replace.cpp
     runtime/src/texdump.cpp

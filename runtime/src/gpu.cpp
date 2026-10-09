@@ -487,6 +487,7 @@ void draw_polygon(const uint32_t* w) {
         // them, so neighbouring polygons still share their edges); when every vertex was, the
         // texture is perspective-correct too (w relative to the farthest vertex).
         float zv[4] = {};  // exact view depth of each vertex (0: none)
+        bool exact_all = false;  // every vertex exact: drawn whatever its size (the PS1's limit is for whole pixels)
         // exact texture coordinates (gte.cpp): the subdivision's whole-texel UVs get their fraction back
         if (g_gte_precise && textured)
             for (int i = 0; i < nv; i++) pgxp_uv_find(uva[i], uvw[i], &h[i].u, &h[i].v);
@@ -517,6 +518,7 @@ void draw_polygon(const uint32_t* w) {
             }
             if (all)
                 for (int i = 0; i < nv; i++) h[i].w = pr[i].w / wmax;
+            exact_all = all;
         }
         // a replacement texture (texreplace.cpp): drawn from its HD copy of VRAM
         if (textured && g_tex_replace) {
@@ -542,8 +544,8 @@ void draw_polygon(const uint32_t* w) {
                 for (int i = 0; i < nv; i++) h[i].z = semi ? zv[i] * 0.99f : zv[i];
             }
         }
-        if (!oversized(v[0], v[1], v[2])) hw_triangle(&h[0], &h[1], &h[2], p, st);
-        if (quad && !oversized(v[1], v[2], v[3])) hw_triangle(&h[1], &h[2], &h[3], p, st);
+        if (exact_all || !oversized(v[0], v[1], v[2])) hw_triangle(&h[0], &h[1], &h[2], p, st);
+        if (quad && (exact_all || !oversized(v[1], v[2], v[3]))) hw_triangle(&h[1], &h[2], &h[3], p, st);
         return;
     }
     if (k != 1.0f)
