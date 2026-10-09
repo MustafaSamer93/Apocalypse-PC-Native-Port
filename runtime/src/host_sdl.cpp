@@ -246,14 +246,14 @@ double smooth_target() {
 
 // Internal resolution actually rendered: the Resolution setting, raised by supersampling to
 // about twice the lines the window shows, capped by the image rate: above 60 the in-between
-// images are full renders too (at 75 fps, 7x and 8x missed 70-80 refreshes in 5 s of a heavy
-// room; 6x ~10).
+// images are full renders too (at 75 fps 8x missed ~80 refreshes in 5 s of a heavy room, and 6x
+// fell to 64-72 fps in a fight full of explosions; 5x held 75).
 int render_scale() {
     if (g_gfx.scale == 0 || !(g_gfx.aa & 2) || !g_window) return g_gfx.scale;
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(g_window, &w, &h);
     const double rate = 30.0 * smooth_target();
-    const int cap = rate <= 61 ? 8 : rate <= 76 ? 6 : rate <= 91 ? 5 : 4;
+    const int cap = rate <= 61 ? 8 : rate <= 91 ? 5 : 4;
     return std::clamp((2 * h + 239) / 240, g_gfx.scale, std::max(g_gfx.scale, cap));
 }
 

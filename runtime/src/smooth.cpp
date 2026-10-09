@@ -359,7 +359,9 @@ bool smooth_pick(double t, unsigned* tex, int* tex_w, int* tex_h) {
     if (smooth_factor() < 2 || front.count == 0) return false;
     double since = t - (double)g_last_flip;
     if (since < 0 || since > 30) return false;  // the game stopped drawing frames here
-    int i = (int)std::floor(since * front.images / front.period + 1e-6);
+    // the image made for the moment nearest this one (it was the one before: up to half a step
+    // late, a quarter now)
+    int i = (int)std::lround(since * front.images / front.period);
     if (i <= 0) return false;       // the game's own image
     i = std::min(i, front.count);   // the game is late: hold the newest extra image
     *tex = hw_capture_texture(g_front * kMaxExtra + i - 1, tex_w, tex_h);
