@@ -1,9 +1,9 @@
 // The game's own menus (front end and pause):
 //  - Font scaling: each menu is drawn at g_menu_zoom percent around its middle (text size, line
 //    spacing and gaps), without changing the menu itself.
-//  - Options -> Enhancements: an extra item in the Options menu opening a page of the
-//    menu settings (renderer, screen mode, display, frame rate, font scaling, autosave:
-//    host_sdl.cpp enh_*), drawn and driven as a menu of the game's own.
+//  - Main menu -> Recomp Enhancements (under "options"): a page of our settings (renderer,
+//    screen mode, display, frame rate, font, autosave: host_sdl.cpp enh_*), drawn and driven as
+//    a menu of the game's own; Options -> Cheats likewise.
 //  - Main Menu -> Load Game: "Auto Save" at the top of the memory card saves (savestate.cpp).
 //  - Pause menu: "Options" (a list of the pages above) and "Exit to desktop"; main menu: "exit
 //    to desktop".
@@ -59,26 +59,30 @@ enum GameOpt { G_FX = 1000, G_MUSIC, G_VOICE, G_DIFFICULTY, G_VIBRATION, G_PAD_W
 constexpr int kSoundSettings[] = {G_FX, G_MUSIC, G_VOICE};
 constexpr int kGameSettings[] = {G_DIFFICULTY, G_VIBRATION};
 constexpr int kPadSettings[] = {G_PAD_WEAPON, G_PAD_CROUCH, G_PAD_JUMP, G_PAD_BOMB};
+// Where a page is offered besides the pause menu's Options (which lists them all).
+enum class Front : uint8_t { None, Options, Main };  // the front end: none (it has its own), Options, the main menu
 struct Page {
     const char* label;
     const int* settings;
     int count;
-    bool pause_only;  // not in the front end's Options (it has its own)
+    Front front;
 };
 constexpr Page g_pages[] = {
-    {"sound", kSoundSettings, (int)std::size(kSoundSettings), true},
-    {"game", kGameSettings, (int)std::size(kGameSettings), true},
-    {"controller config", kPadSettings, (int)std::size(kPadSettings), true},
-    {"enhancements", kEnhSettings, (int)std::size(kEnhSettings), false},
-    {"cheats", kCheatSettings, (int)std::size(kCheatSettings), false},
+    {"sound", kSoundSettings, (int)std::size(kSoundSettings), Front::None},
+    {"game", kGameSettings, (int)std::size(kGameSettings), Front::None},
+    {"controller config", kPadSettings, (int)std::size(kPadSettings), Front::None},
+    {"recomp enhancements", kEnhSettings, (int)std::size(kEnhSettings), Front::Main},
+    {"cheats", kCheatSettings, (int)std::size(kCheatSettings), Front::Options},
 };
 constexpr int kPages = (int)std::size(g_pages);
 
 // A page's block in the game's heap: its menu, its item texts, then its label.
 uint32_t page_label(uint32_t block, const Page& p) { return block + 444 + kTextSize * (uint32_t)p.count; }
+constexpr uint32_t kLabelSize = 24;
 
 // A game menu our menus are shown in place of: Options (the pages' items are in it, after "misc
-// options") or the pause menu ("Options" opens a list of the pages).
+// options"), the main menu (its page's item under "options") or the pause menu ("Options" opens
+// a list of the pages).
 struct Host {
     uint32_t menu = 0;
     uint32_t pages[kPages] = {};  // their blocks (in the pause menu: only while one is open)
@@ -86,7 +90,7 @@ struct Host {
     bool in_list = false;         // pause: the list of the pages is shown
     bool drawn = false;           // the menu was drawn since the last key read
 };
-Host g_opt, g_pause;
+Host g_opt, g_pause, g_mainh;
 
 // The pause menu's block: the list of the pages (a menu), then texts: "Options", "Exit to
 // desktop", the pages' labels, "back".
@@ -254,24 +258,26 @@ void init_like(R3000* c, uint32_t menu, uint32_t like, float size = 1.0f) {
                sized((int32_t)MEM_R32(c, like + 20))});
 }
 
-// Builds a page's menu like the game's menu `like`; 0 if the heap is full.
-uint32_t build_page(R3000* c, uint32_t like, const Page& p, float size = 1.0f) {
-    const uint32_t block = game_call(c, kAlloc, 444 + kTextSize * (uint32_t)p.count + 16);
+// Builds a page's menu like the game's menu `like`, ending in `back`; 0 if the heap is full.
+uint32_t build_page(R3000* c, uint32_t like, const Page& p, int back, float size = 1.0f) {
+    const uint32_t block = game_call(c, kAlloc, 444 + kTextSize * (uint32_t)p.count + kLabelSize);
     if (!block) return 0;
-    write_text(c, page_label(block, p), p.label, 16);
+    write_text(c, page_label(block, p), p.label, kLabelSize);
     init_like(c, block, like, size);
     refresh_texts(c, block, p);
     for (int i = 0; i < p.count; i++) game_call(c, kMenuAdd, block, block + 444 + kTextSize * (uint32_t)i);
-    game_call(c, kMenuAdd, block, text_of(c, kStrReturnToOptions));
+    game_call(c, kMenuAdd, block, text_of(c, back));
     game_call(c, kMenuLayout, block);  // centred up and down
     return block;
 }
 
 // Adds an item to the end of a laid out menu, keeping it centred (half a line up), unless it is
-// there. (Done at each draw: a draw may be one the 60 Hz renderer rolls back, sim60.cpp.)
+// in it. (Done at each draw: a draw may be one the 60 Hz renderer rolls back, sim60.cpp.)
 void append_item(R3000* c, uint32_t menu, uint32_t text) {
     const int n = MEM_R8(c, menu + 10);
-    if (n >= (int)kMaxItems || (n > 0 && MEM_R32(c, item(menu, n - 1)) == text)) return;
+    if (n >= (int)kMaxItems) return;
+    for (int i = 0; i < n; i++)
+        if (MEM_R32(c, item(menu, i)) == text) return;
     game_call(c, kMenuAdd, menu, text);
     MEM_W32(c, menu + 16, (uint32_t)((int32_t)MEM_R32(c, menu + 16) - (int32_t)MEM_R32(c, menu + 20) / 2));
 }
@@ -435,6 +441,15 @@ extern "C" void psx_hook_menu_add(R3000* c) {
             MEM_W32(c, kStrings + 4 * kStrSelectLevel, g_main_text + 16);
         }
         state_note_main_menu();
+        // Recomp Enhancements (its item goes under "options" at the menu's draws)
+        g_mainh = Host{};
+        g_mainh.menu = menu;
+        for (int i = 0; i < kPages; i++)
+            if (g_pages[i].front == Front::Main && (g_mainh.pages[i] = build_page(c, menu, g_pages[i], kStrReturnToMain, 0.75f))) {
+                // smaller, and a line lower: clear of the title above it
+                const uint32_t pg = g_mainh.pages[i];
+                MEM_W32(c, pg + 16, MEM_R32(c, pg + 16) + MEM_R32(c, pg + 20));
+            }
         return;
     }
     if (c->r[31] == kPauseMade) {
@@ -455,8 +470,8 @@ extern "C" void psx_hook_menu_add(R3000* c) {
     g_opt = Host{};
     g_opt.menu = menu;
     for (int i = 0; i < kPages; i++) {
-        if (g_pages[i].pause_only) continue;
-        g_opt.pages[i] = build_page(c, menu, g_pages[i]);
+        if (g_pages[i].front != Front::Options) continue;
+        g_opt.pages[i] = build_page(c, menu, g_pages[i], kStrReturnToOptions);
         if (g_opt.pages[i]) game_call(c, kMenuAdd, menu, page_label(g_opt.pages[i], g_pages[i]));
     }
 }
@@ -478,9 +493,8 @@ extern "C" void psx_hook_menu_free(R3000* c) {
         if (g_song_started) game_call(c, kSongStop);  // (else it plays on over the intro movie)
         if (g_main_text) game_call(c, kFree, g_main_text);
         g_main = g_main_text = 0;
-        return;
     }
-    for (Host* h : {&g_opt, &g_pause}) {
+    for (Host* h : {&g_opt, &g_pause, &g_mainh}) {
         if (!h->menu || menu != h->menu) continue;
         for (uint32_t& b : h->pages)
             if (b) game_call(c, kFree, b), b = 0;
@@ -497,7 +511,7 @@ extern "C" void psx_hook_menu_free(R3000* c) {
 extern "C" int psx_hook_menu_update(R3000* c) {
     static bool inside = false;
     if (inside) return 0;
-    for (Host* h : {&g_opt, &g_pause})
+    for (Host* h : {&g_opt, &g_pause, &g_mainh})
         if (h->menu && c->r[4] == h->menu) c->r[4] = shown_menu(*h);
     if (g_proxy && g_load && c->r[4] == g_load) c->r[4] = g_proxy;  // Load Game: ours moves
     const uint32_t ra = c->r[31], sp = c->r[29];
@@ -549,9 +563,22 @@ extern "C" int psx_hook_menu_draw(R3000* c) {
         }
         if (g_main_text) append_item(c, menu, g_main_text);
         move_after(c, menu, text_of(c, kStrSelectLevel), text_of(c, kStrLoadGame));
+        // our page's item, under "options"
+        uint32_t options = 0;
+        for (int i = 0; i < std::min<int>(MEM_R8(c, menu + 10), kMaxItems); i++) {
+            std::string s = read_text(c, MEM_R32(c, item(menu, i)));
+            for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+            if (s == "options") options = MEM_R32(c, item(menu, i));
+        }
+        for (int i = 0; i < kPages; i++) {
+            if (!g_mainh.pages[i]) continue;
+            const uint32_t label = page_label(g_mainh.pages[i], g_pages[i]);
+            append_item(c, menu, label);
+            if (options) move_after(c, menu, label, options);
+        }
     }
     if (g_pause.menu && menu == g_pause.menu && g_pause_block) append_item(c, menu, pause_text(kPauseExit));
-    for (Host* h : {&g_opt, &g_pause}) {
+    for (Host* h : {&g_opt, &g_pause, &g_mainh}) {
         if (!h->menu || menu != h->menu) continue;
         if (!ghost) h->drawn = true;
         if (h->page >= 0) refresh_texts(c, h->pages[h->page], g_pages[h->page]);
@@ -575,7 +602,7 @@ void host_keys(R3000* c, Host& h, uint32_t p_select, uint32_t p_back, uint16_t p
     const bool pause = &h == &g_pause;
     auto open_page = [&](int i) {
         // (smaller between the pause screen's title and button prompts)
-        if (pause && !h.pages[i]) h.pages[i] = build_page(c, h.menu, g_pages[i], 0.7f);
+        if (pause && !h.pages[i]) h.pages[i] = build_page(c, h.menu, g_pages[i], kStrReturnToOptions, 0.7f);
         if (!h.pages[i]) return;
         h.page = i;
         game_call(c, kMenuSelect, h.pages[i], 0);
@@ -683,7 +710,7 @@ extern "C" int psx_hook_menu_keys(R3000* c) {
     g_main_drawn = false;
     if (main_shown && g_main && g_main_text && MEM_R32(c, p_select) && selected_is(c, g_main, g_main_text))
         host_request_quit();
-    for (Host* h : {&g_opt, &g_pause}) {
+    for (Host* h : {&g_opt, &g_pause, &g_mainh}) {
         const bool shown = h->drawn;
         h->drawn = false;
         if (!h->menu) continue;

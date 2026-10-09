@@ -1980,7 +1980,7 @@ static void run_settings_menu() {
                 case R_FILTER: return choice("Smooth textures", g_gfx.texture_filter ? "On" : "Off");
                 case R_DUMP_TEX: return choice("Dump textures", g_tex_dump ? "On (assets/dumps/textures)" : "Off");
                 case R_TEX_REPLACE: return choice("Texture replacements", g_tex_replace ? "[x] On" : "[ ] Off (original)");
-                case R_ENHANCE: return "Enhancements\t>";
+                case R_ENHANCE: return "Recomp Enhancements\t>";
                 case R_DEVICE: return choice("Controls", dev_line);
                 case R_REMAP: return std::string("Set up buttons\t") + (is_all ? "" : custom ? "(custom)" : "(default)");
                 case R_RESET: return "Reset buttons to default";
@@ -1998,12 +1998,12 @@ static void run_settings_menu() {
             }
             return "";
         };
-        std::vector<std::string> lines = {enh_page ? "ENHANCEMENTS" : "SETTINGS"};
+        std::vector<std::string> lines = {enh_page ? "RECOMP ENHANCEMENTS" : "SETTINGS"};
         for (Row r : enh_page ? kEnhRows : kMainRows) lines.push_back(line(r));
         lines.push_back(status);
         if (enh_page) {
             lines.push_back("Beyond the original game. Also in the game's");
-            lines.push_back("own menu: Options -> Enhancements.");
+            lines.push_back("own main menu: Recomp Enhancements.");
         }
         lines.push_back("Arrows: change   Enter: pick   Esc: back");
         if (!enh_page) lines.push_back("F2: chapters   F5/F9: save/load");
