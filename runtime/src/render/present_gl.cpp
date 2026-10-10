@@ -335,11 +335,11 @@ void gl_present_overlay_end() {
     glDisable(GL_BLEND);
 }
 
-GLuint g_badge_tex[3] = {};
-int g_badge_w[3] = {}, g_badge_h[3] = {};
+GLuint g_badge_tex[kBadgeSlots] = {};
+int g_badge_w[kBadgeSlots] = {}, g_badge_h[kBadgeSlots] = {};
 
 void gl_present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed) {
-    slot = std::clamp(slot, 0, 2);
+    slot = std::clamp(slot, 0, kBadgeSlots - 1);
     GLuint& tex = g_badge_tex[slot];
     if (!tex || w != g_badge_w[slot] || h != g_badge_h[slot]) {
         if (tex) glDeleteTextures(1, &tex);

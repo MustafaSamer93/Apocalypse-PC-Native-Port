@@ -116,7 +116,7 @@ float squeeze_2d(float x0, float x1, float* fix) {
     const uint32_t a = g_gpu_packet_addr;
     if (g_gte_widescreen == 1.0f) return 1.0f;
     if (!a) return 1.0f;
-    if (replace_original_picture_shown(S.area_y1)) return 1.0f;  // shown at 4:3 (host_sdl.cpp)
+    if (replace_original_picture_shown(S.area_y1)) return 1.0f;  // shown at 4:3 (host.cpp present_options)
     if (fx_packet(a)) {  // a sprite (smoke, fire, a flash): its own shape round its middle
         *fix = (x0 + x1) * 0.5f;
         return g_gte_widescreen;
@@ -1075,7 +1075,7 @@ extern "C" void psx_hook_2d(R3000* c, int stage) {
     }
 }
 
-// The version number is shown in the corner (host_sdl.cpp draw_version) on the title screen
+// The version number is shown in the corner (host.cpp finish_frame) on the title screen
 // (its blinking "Press start", str#2 at 800A0818, was drawn this recently) and while one of the
 // game's menus is drawn (game_menu.cpp: front end, Start's pause menu); not in play or movies.
 uint64_t g_press_start_seen = 0, g_menu_drawn = 0;

@@ -1,5 +1,5 @@
 #version 450
-// Vulkan port of present.cpp kFxaaFS (the source image is top-down here: no flip).
+// Vulkan port of present_gl.cpp kFxaaFS (the source image is top-down here: no flip).
 layout(set = 0, binding = 0) uniform sampler2D u_tex;
 layout(push_constant) uniform PC { vec2 px; } pc;
 layout(location = 0) in vec2 v_uv;

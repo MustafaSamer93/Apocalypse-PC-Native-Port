@@ -37,7 +37,7 @@ void present_shutdown();
 void present_set_vsync(bool on);
 
 // Draws the game image into the back buffer. Either `pixels` (w*h XRGB8888, row 0 = top)
-// or a GL texture region in texel units (row y = top; see gpu_hw.cpp) is shown.
+// or a GL texture region in texel units (row y = top; see gpu_gl.cpp) is shown.
 // `native_h` is the PS1 line count (for CRT scanlines).
 void present_game_pixels(const uint32_t* pixels, int w, int h, const PresentOptions& o);
 void present_game_texture(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, int native_h,
@@ -50,9 +50,11 @@ void present_redraw(const PresentOptions& o);
 // so drawing uses 640x480 units.
 SDL_Renderer* present_overlay_begin();
 void present_overlay_end();
-// A small w x h image (ARGB, row 0 = top) in the window's lower-left corner, `margin` pixels in
-// (the FPS counter). The pixels are uploaded only when `changed`; otherwise the last are shown.
-void present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed);  // slot 0 FPS, 1 version, 2 boot text
+// A small w x h image (ARGB, row 0 = top) at the bottom of the window, at x and `margin` pixels up
+// (slot 0: the FPS counter, 1: the version). The pixels are uploaded only when `changed`;
+// otherwise the slot's last ones are shown.
+constexpr int kBadgeSlots = 2;
+void present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed);
 
 void present_swap();
 void present_save_bmp(const char* path);  // back buffer -> BMP (debug screenshots)

@@ -1,5 +1,5 @@
 #version 450
-// PS1 primitives into scaled VRAM (Vulkan port of gpu_hw.cpp kVS). VRAM row 0 is image row 0.
+// PS1 primitives into scaled VRAM (Vulkan port of gpu_gl.cpp kVS). VRAM row 0 is image row 0.
 layout(location = 0) in vec2 a_pos;
 layout(location = 1) in vec4 a_color;
 layout(location = 2) in vec2 a_uv;

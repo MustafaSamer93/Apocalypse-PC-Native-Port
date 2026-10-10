@@ -64,7 +64,7 @@ void gte_blend_begin(GteBlendMode m) {
     g_seg_misses = 0;
 }
 
-// Precise vertices (F1 -> Precise 3D). The GTE hands the game whole-pixel screen positions,
+// Precise vertices (Recomp Enhancements -> Precise 3D). The GTE hands the game whole-pixel screen positions,
 // so vertices jump from pixel to pixel as things move, and the GPU maps textures without
 // perspective; both make textures wobble. Each projection's exact position and depth is kept
 // here under the whole-pixel position it produced (as a GPU vertex word packs it: 11-bit x

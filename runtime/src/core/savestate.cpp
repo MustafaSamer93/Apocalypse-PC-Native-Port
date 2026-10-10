@@ -83,7 +83,7 @@ void read_progress(std::string* level, std::string* restart) {
 }
 
 // Chapters: the state at each progress point the first time it is reached, in that order,
-// as "saves/chapters/NN <level> <restart point>.state" (listed in the F1 menu).
+// as "saves/chapters/NN <level> <restart point>.state" (listed in the settings screen).
 constexpr int kChapterNew = kChapterBase - 1;  // the slot save_to writes a new chapter to
 std::string g_new_chapter;
 
@@ -312,7 +312,7 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
 
     state_poll_load(c);
     state_poll_restart(c);
-    if (g_autoload_request) {  // F1 -> Load auto-save
+    if (g_autoload_request) {  // Settings -> Load auto-save
         g_autoload_request = false;
         if (frame < g_level_render_frame + 30) load_record_in_level(c);
         else host_toast("Load the auto-save from Load Game");
@@ -398,7 +398,7 @@ extern "C" void psx_hook_game_over(R3000* c) {
     if (c->r[3] != 0) return;
     // Game over: the player respawns here as for a death with a life left, then
     // state_poll_restart loads a level start through the game's continue path (level state 3, as
-    // F1 -> Load auto-save; the respawn itself only goes to the current checkpoint).
+    // Settings -> Load auto-save; the respawn itself only goes to the current checkpoint).
     uint8_t rec[kSaveRecordSize];
     uint32_t lives;
     if (MEM_R32(c, kDifficulty) == 2) {

@@ -1,4 +1,4 @@
-// Draw distance (F1 -> Draw distance).
+// Draw distance (Recomp Enhancements -> Draw distance).
 //
 // Each level sets one view distance with 8007D76C(near, fog start, fog length) (from its
 // script; the boot default is 10, 6000, 2048). From that the function derives, in RAM:

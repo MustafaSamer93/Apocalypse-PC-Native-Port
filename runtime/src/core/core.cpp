@@ -75,7 +75,7 @@ void trace_dump() {
     }
 }
 
-// Freeze report: a thread that notices when no frame has come for 8 s (outside the F1 and chapter
+// Freeze report: a thread that notices when no frame has come for 8 s (outside the settings and chapter
 // menus, which stop the game on purpose) and writes, once per freeze, what the CPU was doing - its
 // registers and the return addresses on its stack - plus the RAM to debug/, like a crash.
 // (Read from another thread while the game runs: a snapshot, enough to see where it is stuck.)

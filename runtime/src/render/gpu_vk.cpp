@@ -1,5 +1,5 @@
-// Vulkan PS1 renderer: the same design as the OpenGL one (gpu_hw.cpp), whose batching and
-// dirty-region logic it repeats. VRAM lives in two RGBA8 images of (1024*S)x(512*S): `draw`
+// Vulkan PS1 renderer: the same design as the OpenGL one (gpu_gl.cpp), with the same batching
+// and dirty-region logic (hw_common.cpp). VRAM lives in two RGBA8 images of (1024*S)x(512*S): `draw`
 // (render target; multisampled with MSAA) and `read` (sampled for textures and palettes, and
 // shown). VRAM row 0 is image row 0 here (the OpenGL version keeps it at the bottom), so all
 // rectangles, scissors and texel coordinates use the same numbers as the OpenGL code.
@@ -13,6 +13,7 @@
 #include "core/psx.h"
 #include "game/game.h"
 #include "render/gpu_hw.h"
+#include "render/hw_common.h"
 #include "render/render_backend.h"
 #include "render/vk_context.h"
 #include "vram.frag.h"
@@ -20,9 +21,7 @@
 
 namespace {
 
-int S = 0;  // scale; 0 = not initialised
-int g_samples_wanted = 1, g_samples = 1;
-bool g_filter = false;
+using namespace hwc;
 
 VkImg g_draw, g_read, g_stage;  // stage: native 1024x512, for uploads
 VkShaderModule g_vs, g_fs, g_copy_vs, g_copy_fs;
@@ -30,23 +29,11 @@ VkPipelineLayout g_layout = VK_NULL_HANDLE, g_copy_layout = VK_NULL_HANDLE;
 VkPipeline g_pipes[5] = {};          // opaque, then semi modes 0..3
 VkPipeline g_copy_pipe = VK_NULL_HANDLE;  // copy pass into `draw` (its sample count)
 VkImg g_hd;  // replacement textures' atlas (texreplace.cpp), sampler set 1; made on first use
-constexpr int kHdW = 8192, kHdH = 4096;  // VRAM's texture area x 4 (4-bit above, 8-bit below)
 // Z-buffer: depth image beside `draw` (same size and sample count); HwPrim::ztest batches test
 // and write it, cleared for each frame (vk_hw_depth_reset).
 VkImg g_zbuf;
 bool g_zbuf_clear = true;
 void begin_draw() { vkc::begin_rendering(g_draw, g_zbuf.image ? &g_zbuf : nullptr); }
-
-struct VkVtx {
-    float x, y;
-    uint8_t r, g, b, a;
-    float u, v;
-    uint32_t info0, info1;
-    float w;  // 1, or view depth for perspective-correct texturing (HwVtx::w)
-    uint32_t box;  // HwPrim::box
-    float z;  // Z-buffer depth (HwVtx::z)
-};
-static_assert(sizeof(VkVtx) == 40, "vertex layout (vk_context.cpp kVtxStride)");
 
 struct VramPush {
     int32_t scale, pass, set_mask, filter;
@@ -55,48 +42,6 @@ struct VramPush {
 struct CopyPush {
     int32_t scale, pad, off[2];
 };
-
-// Primitives are batched while the state below stays the same (as gpu_hw.cpp).
-struct BatchKey {
-    bool semi = false;
-    int semi_mode = 0;
-    bool set_mask = false;
-    int ztest = 0;      // HwPrim::ztest
-    int tw[4] = {};
-    int sc[4] = {};  // scissor x1,y1,x2,y2 (native, inclusive)
-    bool operator==(const BatchKey& o) const {
-        return semi == o.semi && (!semi || semi_mode == o.semi_mode) && set_mask == o.set_mask &&
-               ztest == o.ztest &&
-               std::memcmp(tw, o.tw, sizeof tw) == 0 && std::memcmp(sc, o.sc, sizeof sc) == 0;
-    }
-};
-std::vector<VkVtx> g_batch;
-BatchKey g_key;
-
-bool g_dirty = false;  // region drawn since `read` was last synchronised (native, exclusive max)
-int g_dx0, g_dy0, g_dx1, g_dy1;
-
-uint32_t rgba_of(uint16_t p) {
-    uint32_t r = (p & 31) * 255 / 31, g = ((p >> 5) & 31) * 255 / 31, b = ((p >> 10) & 31) * 255 / 31;
-    uint32_t a = (p & 0x8000) ? 255 : 0;
-    return r | g << 8 | b << 16 | a << 24;
-}
-
-void mark_dirty(int x0, int y0, int x1, int y1) {
-    x0 = std::max(x0, 0); y0 = std::max(y0, 0); x1 = std::min(x1, 1024); y1 = std::min(y1, 512);
-    if (x0 >= x1 || y0 >= y1) return;
-    if (!g_dirty) {
-        g_dirty = true;
-        g_dx0 = x0; g_dy0 = y0; g_dx1 = x1; g_dy1 = y1;
-    } else {
-        g_dx0 = std::min(g_dx0, x0); g_dy0 = std::min(g_dy0, y0);
-        g_dx1 = std::max(g_dx1, x1); g_dy1 = std::max(g_dy1, y1);
-    }
-}
-
-bool overlaps_dirty(int x0, int y0, int x1, int y1) {
-    return g_dirty && x0 < g_dx1 && x1 > g_dx0 && y0 < g_dy1 && y1 > g_dy0;
-}
 
 VkCommandBuffer cb() { return vkc::cmd(); }
 
@@ -107,7 +52,7 @@ void set_viewport_scissor(int sx, int sy, int sw, int sh) {
     vkCmdSetScissor(cb(), 0, 1, &sc);
 }
 
-void flush() {
+void vk_flush() {
     if (g_batch.empty()) return;
     // textures come from `read`; once it is readable, batches follow each other in one rendering
     VkImg& tex = g_read;
@@ -118,7 +63,7 @@ void flush() {
             vkc::transition(*img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
     begin_draw();
-    const size_t bytes = g_batch.size() * sizeof(VkVtx);
+    const size_t bytes = g_batch.size() * sizeof(Vtx);
     vkc::Staging st = vkc::stage(bytes);
     std::memcpy(st.ptr, g_batch.data(), bytes);
     VkCommandBuffer c = cb();
@@ -159,7 +104,7 @@ void flush() {
 }
 
 // Makes `read` match `draw` for the region drawn since the last sync.
-void sync_read() {
+void vk_sync_read() {
     flush();
     if (!g_dirty) return;
     vkc::end_rendering();
@@ -178,53 +123,13 @@ void sync_read() {
     g_dirty = false;
 }
 
-// Before a textured primitive: if it samples VRAM drawn since the last sync, sync first.
-void prepare_textures(const HwPrim& p) {
-    if (!p.textured || !g_dirty) return;
-    int pw = p.depth == 0 ? 64 : p.depth == 1 ? 128 : 256;
-    bool hit = overlaps_dirty(p.page_x, p.page_y, p.page_x + pw, p.page_y + 256);
-    if (p.depth < 2) hit = hit || overlaps_dirty(p.clut_x, p.clut_y, p.clut_x + (p.depth == 0 ? 16 : 256), p.clut_y + 1);
-    if (hit) sync_read();
-}
-
-void begin_prim(const HwPrim& p, const HwState& s) {
-    prepare_textures(p);
-    BatchKey k;
-    k.semi = p.semi;
-    k.semi_mode = p.semi_mode;
-    k.set_mask = s.set_mask;
-    k.ztest = p.ztest;
-    k.tw[0] = s.tw_mask_x; k.tw[1] = s.tw_mask_y; k.tw[2] = s.tw_off_x; k.tw[3] = s.tw_off_y;
-    k.sc[0] = s.area_x1; k.sc[1] = s.area_y1; k.sc[2] = s.area_x2; k.sc[3] = s.area_y2;
-    if (!(k == g_key)) {
-        flush();
-        g_key = k;
-    }
-}
-
-uint32_t info0(const HwPrim& p) {
-    return (uint32_t)(p.page_x & 1023) | (uint32_t)(p.page_y & 511) << 10 | (uint32_t)p.depth << 20 |
-           (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24 |
-           (uint32_t)p.hd << 27 | (uint32_t)p.glyph << 28;
-}
-uint32_t info1(const HwPrim& p) { return (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10; }
-
-void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f, float z = 0.0f) {
-    g_batch.push_back(VkVtx{x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b, 255, u, v, info0(p), info1(p), w, p.box, z});
-}
-
-void draw_area_dirty(int x0, int y0, int x1, int y1, const HwState& s) {
-    mark_dirty(std::max(x0, s.area_x1), std::max(y0, s.area_y1), std::min(x1, s.area_x2 + 1),
-               std::min(y1, s.area_y2 + 1));
-}
-
 // Draws texels of `src` into `draw` over the native rectangle x, y, w, h: target pixel p takes
 // texel (p - off) / scale (copy.frag). Used where a copy cannot write (a multisampled target).
 void draw_copy(VkImg& src, int offx, int offy, int scale, int x, int y, int w, int h) {
     vkc::end_rendering();
     vkc::transition(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     begin_draw();
-    VkVtx q[6] = {};
+    Vtx q[6] = {};
     float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
     float c[6][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x1, y0}, {x1, y1}, {x0, y1}};
     for (int i = 0; i < 6; i++) { q[i].x = c[i][0]; q[i].y = c[i][1]; }
@@ -290,6 +195,8 @@ void destroy_pipelines() {
 
 bool vk_hw_init(int scale) {
     if (!vkc::ready()) return false;
+    hwc::flush = vk_flush;
+    hwc::sync_read = vk_sync_read;
     if (!g_layout) {
         g_vs = vkc::shader(kSpv_vram_vert, sizeof kSpv_vram_vert);
         g_fs = vkc::shader(kSpv_vram_frag, sizeof kSpv_vram_frag);
@@ -403,70 +310,10 @@ bool vk_hw_hd_upload(int level, int x, int y, int w, int h, const uint32_t* rgba
     return true;
 }
 
-bool vk_hw_active() { return S != 0; }
-int vk_hw_scale() { return S; }
-int vk_hw_samples() { return S ? g_samples : 0; }
-void vk_hw_set_samples(int n) { g_samples_wanted = std::clamp(n, 1, 8); }
-int vk_hw_samples_wanted() { return g_samples_wanted; }
-void vk_hw_set_texture_filter(bool on) {
-    if (on != g_filter) flush();
-    g_filter = on;
-}
-
 // ================================================================ Z-buffer
 
 void vk_hw_depth_reset() { g_zbuf_clear = true; }
 bool vk_hw_zbuffer_ready() { return S && g_zbuf.image; }
-
-// ================================================================ primitives
-
-void vk_hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim& p, const HwState& s) {
-    begin_prim(p, s);
-    for (const HwVtx* v : {a, b, c}) {
-        const HwVtx* col = p.gouraud ? v : a;
-        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p, v->w, v->z);
-    }
-    draw_area_dirty((int)std::floor(std::min({a->x, b->x, c->x})), (int)std::floor(std::min({a->y, b->y, c->y})),
-                    (int)std::ceil(std::max({a->x, b->x, c->x})) + 1, (int)std::ceil(std::max({a->y, b->y, c->y})) + 1, s);
-}
-
-void vk_hw_rect(int x, int y, int w, int h, int u0, int v0, bool flip_x, bool flip_y, uint32_t color, const HwPrim& p,
-                const HwState& s) {
-    if (w <= 0 || h <= 0) return;
-    begin_prim(p, s);
-    int r = color & 0xFF, g = (color >> 8) & 0xFF, b = (color >> 16) & 0xFF;
-    float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
-    float ua = (float)u0, va = (float)v0;
-    float ub = flip_x ? ua - (float)w : ua + (float)w, vb = flip_y ? va - (float)h : va + (float)h;
-    push(x0, y0, r, g, b, ua, va, p);
-    push(x1, y0, r, g, b, ub, va, p);
-    push(x0, y1, r, g, b, ua, vb, p);
-    push(x1, y0, r, g, b, ub, va, p);
-    push(x1, y1, r, g, b, ub, vb, p);
-    push(x0, y1, r, g, b, ua, vb, p);
-    draw_area_dirty(x, y, x + w, y + h, s);
-}
-
-void vk_hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, const HwPrim& p,
-                const HwState& s) {
-    begin_prim(p, s);
-    if (!gouraud) c1 = c0;
-    int r0 = c0 & 0xFF, g0 = (c0 >> 8) & 0xFF, b0 = (c0 >> 16) & 0xFF;
-    int r1 = c1 & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = (c1 >> 16) & 0xFF;
-    // a one-pixel-wide quad along the major axis, covering both end pixels
-    float ax = (float)x0, ay = (float)y0, bx = (float)x1, by = (float)y1;
-    bool xmajor = std::abs(x1 - x0) >= std::abs(y1 - y0);
-    if (xmajor) {
-        if (bx >= ax) bx += 1; else ax += 1;
-        push(ax, ay, r0, g0, b0, 0, 0, p); push(bx, by, r1, g1, b1, 0, 0, p); push(ax, ay + 1, r0, g0, b0, 0, 0, p);
-        push(bx, by, r1, g1, b1, 0, 0, p); push(bx, by + 1, r1, g1, b1, 0, 0, p); push(ax, ay + 1, r0, g0, b0, 0, 0, p);
-    } else {
-        if (by >= ay) by += 1; else ay += 1;
-        push(ax, ay, r0, g0, b0, 0, 0, p); push(bx, by, r1, g1, b1, 0, 0, p); push(ax + 1, ay, r0, g0, b0, 0, 0, p);
-        push(bx, by, r1, g1, b1, 0, 0, p); push(bx + 1, by, r1, g1, b1, 0, 0, p); push(ax + 1, ay, r0, g0, b0, 0, 0, p);
-    }
-    draw_area_dirty(std::min(x0, x1), std::min(y0, y1), std::max(x0, x1) + 1, std::max(y0, y1) + 1, s);
-}
 
 // ================================================================ VRAM operations
 

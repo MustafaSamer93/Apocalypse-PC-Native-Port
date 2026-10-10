@@ -2,7 +2,7 @@
 //  - Font scaling: each menu is drawn at g_menu_zoom percent around its middle (text size, line
 //    spacing and gaps), without changing the menu itself.
 //  - Main menu -> Recomp Enhancements (under "options"): a page of our settings (renderer,
-//    screen mode, display, frame rate, font, autosave: host_sdl.cpp enh_*), drawn and driven as
+//    screen mode, display, frame rate, font, autosave: host/settings.cpp enh_*), drawn and driven as
 //    a menu of the game's own; Options -> Cheats likewise.
 //  - Main Menu -> Load Game: "Auto Save" at the top of the memory card saves (savestate.cpp).
 //  - Pause menu: "Options" (a list of the pages above) and "Exit to desktop"; main menu: "exit
@@ -49,7 +49,7 @@ constexpr uint32_t kFrontEnd = 0x80011BA0, kFrontEndEnd = 0x80014700;
 constexpr uint32_t kButtons = 0x800EC0F8;  // 16 bytes a button: +0 held, +1 pressed
 constexpr uint32_t kGpRepeat = 0x800FEEBC + 344, kUpdateCount = 0x800FF2F0;
 
-// Our pages: their settings (host_sdl.cpp enh_*), in order.
+// Our pages: their settings (host/settings.cpp enh_*), in order.
 constexpr int kEnhSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_CRT, E_FPS, E_FPS_COUNTER, E_GAME_FONT, E_FONT_SCALE,
                                 E_AUTOSAVE, E_SUBTITLES};
 constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT};
@@ -109,7 +109,7 @@ bool g_main_drawn = false;
 // 800A5254, 24 bytes an entry, +8 its name: prison sewer plague death rooftops cemetary plague
 // warfact warboss backwall beast), loaded and played the way Options -> Sound's music test does
 // (80015F48 stops the song and loads NAME.VAB/.SEQ, 8006A428 plays it at the music level).
-// A level loads its own. APOC_MENU_SONG=N picks another (-1 = none).
+// A level loads its own.
 constexpr uint32_t kSongs = 0x800A5254, kSongLoad = 0x80015F48, kSongPlay = 0x8006A428,
                    kSongStop = 0x8006A3F0;
 bool g_song_started = false;  // for this main menu

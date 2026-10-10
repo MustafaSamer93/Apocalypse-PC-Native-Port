@@ -1,7 +1,8 @@
-// Two rendering backends, OpenGL (gpu_hw.cpp + present.cpp) and Vulkan (gpu_vk.cpp +
+// Two rendering backends, OpenGL (gpu_gl.cpp + present_gl.cpp) and Vulkan (gpu_vk.cpp +
 // present_vk.cpp), behind the same functions (gpu_hw.h, present.h). Each backend defines
-// them with its prefix (gl_hw_triangle, vk_present_swap, ...); render_backend.cpp forwards
-// the plain names to the backend chosen at start-up.
+// them with its prefix (gl_hw_fill, vk_present_swap, ...); render_backend.cpp forwards
+// the plain names to the backend chosen at start-up. The primitives and settings both share
+// are defined once (hw_common.cpp).
 #pragma once
 
 #include <SDL3/SDL.h>
@@ -15,22 +16,6 @@
 #define RENDER_FUNCS(X)                                                                                        \
     X(bool, hw_init, (int scale), (scale))                                                                     \
     X(void, hw_shutdown, (), ())                                                                               \
-    X(bool, hw_active, (), ())                                                                                 \
-    X(int, hw_scale, (), ())                                                                                   \
-    X(void, hw_set_samples, (int n), (n))                                                                      \
-    X(int, hw_samples_wanted, (), ())                                                                          \
-    X(int, hw_samples, (), ())                                                                                 \
-    X(void, hw_set_texture_filter, (bool on), (on))                                                            \
-    X(void, hw_triangle, (const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim& p, const HwState& s), \
-      (a, b, c, p, s))                                                                                         \
-    X(void, hw_rect,                                                                                           \
-      (int x, int y, int w, int h, int u0, int v0, bool fx, bool fy, uint32_t color, const HwPrim& p,          \
-       const HwState& s),                                                                                      \
-      (x, y, w, h, u0, v0, fx, fy, color, p, s))                                                               \
-    X(void, hw_line,                                                                                           \
-      (int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, const HwPrim& p,                \
-       const HwState& s),                                                                                      \
-      (x0, y0, c0, x1, y1, c1, gouraud, p, s))                                                                 \
     X(void, hw_fill, (int x, int y, int w, int h, uint16_t color), (x, y, w, h, color))                        \
     X(void, hw_upload, (int x, int y, int w, int h, const uint16_t* vram), (x, y, w, h, vram))                 \
     X(void, hw_copy, (int sx, int sy, int dx, int dy, int w, int h), (sx, sy, dx, dy, w, h))                   \

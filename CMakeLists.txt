@@ -62,7 +62,7 @@ foreach(src ${VK_SHADERS})
     list(APPEND VK_SHADER_HEADERS ${out})
 endforeach()
 add_custom_target(vk_shaders DEPENDS ${VK_SHADER_HEADERS})
-# The CRT filters' shared GLSL as a C++ raw string for the OpenGL presenter (present.cpp).
+# The CRT filters' shared GLSL as a C++ raw string for the OpenGL presenter (present_gl.cpp).
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/shaders/crt_body.glsl)
 file(READ ${CMAKE_SOURCE_DIR}/runtime/shaders/crt_body.glsl CRT_BODY)
 file(CONFIGURE OUTPUT ${SHADER_OUT}/crt_body.glsl.h CONTENT "R\"GLSL(@CRT_BODY@)GLSL\"
@@ -117,6 +117,7 @@ add_executable(repocalypse
     runtime/src/render/gl_api.cpp
     runtime/src/render/gpu_gl.cpp
     runtime/src/render/gpu_vk.cpp
+    runtime/src/render/hw_common.cpp
     runtime/src/render/present_gl.cpp
     runtime/src/render/present_vk.cpp
     runtime/src/render/render_backend.cpp

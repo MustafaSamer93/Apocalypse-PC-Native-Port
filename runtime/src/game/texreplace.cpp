@@ -1,4 +1,4 @@
-// Texture replacements (F1 -> Texture replacements): textures\replacements\<file>\<index>.png,
+// Texture replacements (Settings -> Texture replacements): textures\replacements\<file>\<index>.png,
 // named as tools/psx_textures.py exports them (textures\files), drawn instead of the game's own.
 //
 // Matching: the .psx files named by the folders are read from the disc (CD.HED / CD.WAD) and
@@ -680,7 +680,7 @@ void texreplace_vram_changed(int x, int y, int w, int h) {
     g_dirty = true;
 }
 
-// gpu_hw.cpp / gpu_vk.cpp: the renderer was shut down (its HD copy went with it): place again.
+// gpu_gl.cpp / gpu_vk.cpp: the renderer was shut down (its HD copy went with it): place again.
 void texreplace_atlas_lost() { g_placed.clear(), g_found.clear(); }
 
 void texreplace_vram_written(int x, int y, int w, int h) {

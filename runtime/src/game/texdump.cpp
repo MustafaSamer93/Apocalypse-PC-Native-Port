@@ -1,4 +1,4 @@
-// Texture dump (F1 -> Dump textures): every texture page the game draws with - page, colour
+// Texture dump (Settings -> Dump textures): every texture page the game draws with - page, colour
 // depth and palette - is written once as assets/dumps/textures/<level>/<hash>.png (colour 0 = see-through
 // = alpha 0), for upscaling. The hash covers the page's texels and its palette, so the same
 // picture always gets the same name. A page is looked at again only after an upload or copy

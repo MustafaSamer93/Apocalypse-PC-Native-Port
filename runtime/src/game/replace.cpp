@@ -274,7 +274,7 @@ void replace_note_vram_reset() {
     g_picture[0] = g_picture[1] = false;
 }
 
-// The title screen's picture is in the frame buffer at `display_y` (host_sdl.cpp: the version label).
+// The title screen's picture is in the frame buffer at `display_y` (host.cpp: the version label).
 bool replace_title_shown(int display_y) { return g_title[(display_y >> 8) & 1]; }
 
 // gpu.cpp: a polygon drawn with the drawing area at `area_y`.
@@ -284,7 +284,7 @@ void replace_note_poly(int area_y) {
 }
 
 // The buffer at `display_y` shows one of the disc's own full-screen pictures (not replaced):
-// it is shown at its own 4:3 shape, not stretched to a wide screen (host_sdl.cpp).
+// it is shown at its own 4:3 shape, not stretched to a wide screen (host.cpp present_options).
 bool replace_original_picture_shown(int display_y) {
     const int b = (display_y >> 8) & 1;
     return g_picture[b] && !g_replaced[b];

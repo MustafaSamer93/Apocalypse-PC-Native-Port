@@ -1,5 +1,5 @@
 #version 450
-// Vulkan port of gpu_hw.cpp kFS: palette lookups, texture windows, semi-transparency passes.
+// Vulkan port of gpu_gl.cpp kFS: palette lookups, texture windows, semi-transparency passes.
 layout(set = 0, binding = 0) uniform sampler2D u_vram;
 layout(set = 1, binding = 0) uniform sampler2D u_hd;  // replacement textures (bit 27: v_uv is in its pixels)
 layout(push_constant) uniform PC {

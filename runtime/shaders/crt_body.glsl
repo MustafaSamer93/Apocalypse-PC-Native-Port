@@ -1,4 +1,4 @@
-// CRT filter, shared by present.cpp (OpenGL, through crt_body.glsl.h) and crt.frag (Vulkan).
+// CRT filter, shared by present_gl.cpp (OpenGL, through crt_body.glsl.h) and crt.frag (Vulkan).
 // The includer defines: SRC (sampler2D), RECT (image x, y, w, h in texels, y = top row),
 // TEX_SIZE (texels), OUT_SIZE (pixels), LINES (PS1 lines), TIME (seconds).
 // One pass after RetroArch's newpixie-crt (rolling scanlines, filmic curve, vignette, noise,

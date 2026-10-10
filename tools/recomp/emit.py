@@ -89,7 +89,7 @@ INSN_HOOKS = {
     0x800376F8: "psx_hook_glow_sort(c);",
     0x80080D38: "psx_hook_strip_corner(c);",  # a strip corner (lamps): exact position (gte.cpp)
     0x800312A0: "psx_hook_game_over(c);",  # lives left (v1) after a death: 0 restarts the level (savestate.cpp)
-    0x8005CDA0: "psx_hook_aim(c);",  # player fire vector +471/+472 set: exact stick/mouse angle (host_sdl.cpp)
+    0x8005CDA0: "psx_hook_aim(c);",  # player fire vector +471/+472 set: exact stick/mouse angle (input.cpp)
     # 800664FC: the VBlank wait's loop (800664E4: until the VBlank callback has counted a0 more):
     # straight to the next event instead of running the loop through the idle cycles (with the
     # 8x CPU of 60 Hz mode that was ~10% of the host's time)

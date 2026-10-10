@@ -1,4 +1,4 @@
-// Vulkan presentation (see present.h; the OpenGL version is present.cpp): swapchain, the game
+// Vulkan presentation (see present.h; the OpenGL version is present_gl.cpp): swapchain, the game
 // image with sharp or area-average scaling, the CRT and FXAA filters, the settings overlay,
 // and screenshots.
 #include <SDL3/SDL.h>
@@ -41,7 +41,7 @@ VkPipeline g_plain_aa = VK_NULL_HANDLE;  // plain, into the FXAA intermediate im
 VkImg g_aa;       // the scaled image, for the FXAA pass
 VkImg g_sw;       // the software renderer's picture
 VkImg g_ov_img;   // the overlay (present_overlay_size)
-VkImg g_badge[3];  // present_badge's images
+VkImg g_badge[kBadgeSlots];  // present_badge's images
 SDL_Surface* g_ov_surf = nullptr;
 SDL_Renderer* g_ov_ren = nullptr;
 
@@ -286,7 +286,8 @@ void vk_present_shutdown() {
     vkDeviceWaitIdle(vkc::device);
     vk_renderer_destroy();
     destroy_swapchain();
-    for (VkImg* im : {&g_aa, &g_sw, &g_ov_img, &g_badge[0], &g_badge[1], &g_badge[2]}) vkc::destroy_image(*im);
+    for (VkImg* im : {&g_aa, &g_sw, &g_ov_img}) vkc::destroy_image(*im);
+    for (VkImg& im : g_badge) vkc::destroy_image(im);
     for (VkPipeline* p : {&g_plain, &g_crt, &g_fxaa, &g_overlay, &g_plain_aa})
         if (*p) vkDestroyPipeline(vkc::device, *p, nullptr), *p = VK_NULL_HANDLE;
     for (VkPipelineLayout* l : {&g_layout, &g_fxaa_layout})
@@ -395,7 +396,7 @@ void vk_present_overlay_end() {
 }
 
 void vk_present_badge(int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed) {
-    VkImg& badge = g_badge[std::clamp(slot, 0, 2)];
+    VkImg& badge = g_badge[std::clamp(slot, 0, kBadgeSlots - 1)];
     VkImg* target = frame();
     if (!target) return;
     vkc::end_rendering();

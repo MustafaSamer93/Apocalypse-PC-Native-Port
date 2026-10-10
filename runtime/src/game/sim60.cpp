@@ -1,4 +1,4 @@
-// 60 Hz simulation (levels 1-4 by default; F1 -> Simulation; --sim60 for every level).
+// 60 Hz simulation (levels 1-4 by default; Recomp Enhancements -> Simulation; --sim60 for every level).
 //
 // The level loop (80030AD4) normally calls the tick (8002FF90) twice per rendered frame
 // and waits for two VBlanks; the tick advances a 60 Hz counter (gp+0x438) and updates
@@ -48,7 +48,7 @@ int psx_opt_sim60 = 0;
 // demos always run at 30 Hz: they replay input recorded per 30 Hz update.
 int g_sim60_setting = 1;
 bool g_sim60_force = false;  // --sim60: on in any level, even when it is not known yet
-bool g_sim60_fps30 = false;  // frame rate "30 (original)" (host_sdl.cpp): the game runs as it was
+bool g_sim60_fps30 = false;  // frame rate "30 (original)" (host/settings.cpp): the game runs as it was
 std::string g_sim60_level;  // base name of the level's trigger file ("prsn" = level 1)
 bool g_sim60_demo = false;
 

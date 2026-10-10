@@ -1,5 +1,5 @@
 #version 450
-// Vulkan port of present.cpp kPlainFS: area-average downsampling, sharp bilinear upscaling.
+// Vulkan port of present_gl.cpp kPlainFS: area-average downsampling, sharp bilinear upscaling.
 layout(set = 0, binding = 0) uniform sampler2D u_tex;
 layout(push_constant) uniform PC { vec4 rect; vec2 tex_size; vec2 out_size; float lines; } pc;
 layout(location = 0) in vec2 v_uv;

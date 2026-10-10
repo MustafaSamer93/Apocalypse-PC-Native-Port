@@ -9,6 +9,7 @@
 #include "game/game.h"
 #include "render/gl_api.h"
 #include "render/gpu_hw.h"
+#include "render/hw_common.h"
 #include "render/render_backend.h"
 
 #include <algorithm>
@@ -19,48 +20,17 @@
 
 namespace {
 
-int S = 0;  // scale; 0 = not initialised
+using namespace hwc;
+
 GLuint g_draw_tex, g_draw_fbo, g_read_tex, g_read_fbo, g_stage_tex;
 GLuint g_draw_rb = 0;                     // multisampled draw target (instead of g_draw_tex)
-int g_samples_wanted = 1, g_samples = 1;  // MSAA samples asked for / in use
 GLuint g_prog, g_copy_prog, g_vao, g_vbo;
 GLint u_scale, u_texwin, u_pass, u_set_mask, u_filter, u_vram, u_hd;
 GLuint g_hd_tex = 0;  // replacement textures' atlas (texreplace.cpp), on texture unit 1
-constexpr int kHdW = 8192, kHdH = 4096;  // VRAM's texture area x 4 (4-bit above, 8-bit below)
 GLint uc_src, uc_scale, uc_off;
-bool g_filter = false;
 
-struct GLVtx {
-    float x, y;
-    uint8_t r, g, b, a;
-    float u, v;
-    uint32_t info0, info1;
-    float w;  // 1, or view depth for perspective-correct texturing (HwVtx::w)
-    uint32_t box;  // HwPrim::box
-    float z;  // Z-buffer depth (HwVtx::z)
-};
-
-// Primitives are batched while the state below stays the same.
-struct BatchKey {
-    bool semi = false;
-    int semi_mode = 0;
-    bool set_mask = false;
-    int ztest = 0;      // HwPrim::ztest
-    int tw[4] = {};
-    int sc[4] = {};  // scissor x1,y1,x2,y2 (native, inclusive)
-    bool operator==(const BatchKey& o) const {
-        return semi == o.semi && (!semi || semi_mode == o.semi_mode) && set_mask == o.set_mask &&
-               ztest == o.ztest &&
-               std::memcmp(tw, o.tw, sizeof tw) == 0 && std::memcmp(sc, o.sc, sizeof sc) == 0;
-    }
-};
-std::vector<GLVtx> g_batch;
-BatchKey g_key;
 GLuint g_zbuffer = 0;  // depth renderbuffer of the draw FBO (0: none)
 
-// Region drawn since `read` was last synchronised (native, exclusive max).
-bool g_dirty = false;
-int g_dx0, g_dy0, g_dx1, g_dy1;
 
 const char* kVS = R"(#version 330 core
 layout(location = 0) in vec2 a_pos;
@@ -343,28 +313,6 @@ GLuint make_fbo(GLuint tex) {
     return f;
 }
 
-uint32_t rgba_of(uint16_t p) {
-    uint32_t r = (p & 31) * 255 / 31, g = ((p >> 5) & 31) * 255 / 31, b = ((p >> 10) & 31) * 255 / 31;
-    uint32_t a = (p & 0x8000) ? 255 : 0;
-    return r | g << 8 | b << 16 | a << 24;
-}
-
-void mark_dirty(int x0, int y0, int x1, int y1) {
-    x0 = std::max(x0, 0); y0 = std::max(y0, 0); x1 = std::min(x1, 1024); y1 = std::min(y1, 512);
-    if (x0 >= x1 || y0 >= y1) return;
-    if (!g_dirty) {
-        g_dirty = true;
-        g_dx0 = x0; g_dy0 = y0; g_dx1 = x1; g_dy1 = y1;
-    } else {
-        g_dx0 = std::min(g_dx0, x0); g_dy0 = std::min(g_dy0, y0);
-        g_dx1 = std::max(g_dx1, x1); g_dy1 = std::max(g_dy1, y1);
-    }
-}
-
-bool overlaps_dirty(int x0, int y0, int x1, int y1) {
-    return g_dirty && x0 < g_dx1 && x1 > g_dx0 && y0 < g_dy1 && y1 > g_dy0;
-}
-
 void set_blend(int mode) {
     glEnable(GL_BLEND);
     switch (mode) {
@@ -394,7 +342,7 @@ void bind_draw_target() {
     glViewport(0, 0, 1024 * S, 512 * S);
 }
 
-void flush() {
+void gl_flush() {
     if (g_batch.empty()) return;
     bind_draw_target();
     glEnable(GL_SCISSOR_TEST);
@@ -414,7 +362,7 @@ void flush() {
     glUniform1i(u_filter, g_filter ? 1 : 0);
     glBindVertexArray(g_vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g_batch.size() * sizeof(GLVtx)), g_batch.data(), GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g_batch.size() * sizeof(Vtx)), g_batch.data(), GL_STREAM_DRAW);
     if (g_key.ztest && g_zbuffer) {
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
@@ -442,7 +390,7 @@ void flush() {
 }
 
 // Makes `read` match `draw` for the region drawn since the last sync.
-void sync_read() {
+void gl_sync_read() {
     flush();
     if (!g_dirty) return;
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_draw_fbo);
@@ -452,64 +400,13 @@ void sync_read() {
     g_dirty = false;
 }
 
-// Before a textured primitive: if it samples VRAM drawn since the last sync, sync first.
-void prepare_textures(const HwPrim& p) {
-    if (!p.textured || !g_dirty) return;
-    int pw = p.depth == 0 ? 64 : p.depth == 1 ? 128 : 256;
-    bool hit = overlaps_dirty(p.page_x, p.page_y, p.page_x + pw, p.page_y + 256);
-    if (p.depth < 2) hit = hit || overlaps_dirty(p.clut_x, p.clut_y, p.clut_x + (p.depth == 0 ? 16 : 256), p.clut_y + 1);
-    if (hit) sync_read();
-}
-
-void begin_prim(const HwPrim& p, const HwState& s) {
-    static bool warned_mask = false;
-    if (s.check_mask && !warned_mask) {
-        warned_mask = true;
-        log_msg(LogCat::Gpu, "hardware renderer: mask-bit test is not emulated");
-    }
-    prepare_textures(p);
-    BatchKey k;
-    k.semi = p.semi;
-    k.semi_mode = p.semi_mode;
-    k.set_mask = s.set_mask;
-    k.ztest = p.ztest;
-    k.tw[0] = s.tw_mask_x; k.tw[1] = s.tw_mask_y; k.tw[2] = s.tw_off_x; k.tw[3] = s.tw_off_y;
-    k.sc[0] = s.area_x1; k.sc[1] = s.area_y1; k.sc[2] = s.area_x2; k.sc[3] = s.area_y2;
-    if (!(k == g_key)) {
-        flush();
-        g_key = k;
-    }
-}
-
-uint32_t info0(const HwPrim& p) {
-    return (uint32_t)(p.page_x & 1023) | (uint32_t)(p.page_y & 511) << 10 | (uint32_t)p.depth << 20 |
-           (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24 |
-           (uint32_t)p.hd << 27 | (uint32_t)p.glyph << 28;
-}
-uint32_t info1(const HwPrim& p) { return (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10; }
-
-void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f, float z = 0.0f) {
-    GLVtx t;
-    t.x = x; t.y = y; t.w = w;
-    t.z = z;
-    t.r = (uint8_t)r; t.g = (uint8_t)g; t.b = (uint8_t)b; t.a = 255;
-    t.u = u; t.v = v;
-    t.info0 = info0(p);
-    t.info1 = info1(p);
-    t.box = p.box;
-    g_batch.push_back(t);
-}
-
-void draw_area_dirty(int x0, int y0, int x1, int y1, const HwState& s) {
-    mark_dirty(std::max(x0, s.area_x1), std::max(y0, s.area_y1), std::min(x1, s.area_x2 + 1),
-               std::min(y1, s.area_y2 + 1));
-}
-
 }  // namespace
 
 // ================================================================ lifecycle
 
 bool gl_hw_init(int scale) {
+    hwc::flush = gl_flush;
+    hwc::sync_read = gl_sync_read;
     if (!g_prog) {
         g_prog = gl_program(kVS, kFS);
         g_copy_prog = gl_program(kCopyVS, kCopyFS);
@@ -529,19 +426,19 @@ bool gl_hw_init(int scale) {
         glBindVertexArray(g_vao);
         glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, x));
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void*)offsetof(Vtx, x));
         glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GLVtx), (void*)offsetof(GLVtx, r));
+        glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vtx), (void*)offsetof(Vtx, r));
         glEnableVertexAttribArray(2);
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, u));
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void*)offsetof(Vtx, u));
         glEnableVertexAttribArray(3);
-        glVertexAttribIPointer(3, 2, GL_UNSIGNED_INT, sizeof(GLVtx), (void*)offsetof(GLVtx, info0));
+        glVertexAttribIPointer(3, 2, GL_UNSIGNED_INT, sizeof(Vtx), (void*)offsetof(Vtx, info0));
         glEnableVertexAttribArray(4);
-        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, w));
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void*)offsetof(Vtx, w));
         glEnableVertexAttribArray(5);
-        glVertexAttribIPointer(5, 1, GL_UNSIGNED_INT, sizeof(GLVtx), (void*)offsetof(GLVtx, box));
+        glVertexAttribIPointer(5, 1, GL_UNSIGNED_INT, sizeof(Vtx), (void*)offsetof(Vtx, box));
         glEnableVertexAttribArray(6);
-        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(GLVtx), (void*)offsetof(GLVtx, z));
+        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void*)offsetof(Vtx, z));
         g_stage_tex = make_vram_texture(1024, 512);
     }
     gl_hw_shutdown();
@@ -657,66 +554,6 @@ bool gl_hw_hd_upload(int level, int x, int y, int w, int h, const uint32_t* rgba
     return true;
 }
 
-bool gl_hw_active() { return S != 0; }
-int gl_hw_scale() { return S; }
-int gl_hw_samples() { return S ? g_samples : 0; }
-void gl_hw_set_samples(int n) { g_samples_wanted = std::clamp(n, 1, 8); }
-int gl_hw_samples_wanted() { return g_samples_wanted; }
-void gl_hw_set_texture_filter(bool on) {
-    if (on != g_filter) flush();
-    g_filter = on;
-}
-
-// ================================================================ primitives
-
-void gl_hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim& p, const HwState& s) {
-    begin_prim(p, s);
-    for (const HwVtx* v : {a, b, c}) {
-        const HwVtx* col = p.gouraud ? v : a;
-        push((float)v->x, (float)v->y, col->r, col->g, col->b, (float)v->u, (float)v->v, p, v->w, v->z);
-    }
-    draw_area_dirty((int)std::floor(std::min({a->x, b->x, c->x})), (int)std::floor(std::min({a->y, b->y, c->y})),
-                    (int)std::ceil(std::max({a->x, b->x, c->x})) + 1, (int)std::ceil(std::max({a->y, b->y, c->y})) + 1, s);
-}
-
-void gl_hw_rect(int x, int y, int w, int h, int u0, int v0, bool flip_x, bool flip_y, uint32_t color, const HwPrim& p,
-             const HwState& s) {
-    if (w <= 0 || h <= 0) return;
-    begin_prim(p, s);
-    int r = color & 0xFF, g = (color >> 8) & 0xFF, b = (color >> 16) & 0xFF;
-    float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
-    float ua = (float)u0, va = (float)v0;
-    float ub = flip_x ? ua - (float)w : ua + (float)w, vb = flip_y ? va - (float)h : va + (float)h;
-    push(x0, y0, r, g, b, ua, va, p);
-    push(x1, y0, r, g, b, ub, va, p);
-    push(x0, y1, r, g, b, ua, vb, p);
-    push(x1, y0, r, g, b, ub, va, p);
-    push(x1, y1, r, g, b, ub, vb, p);
-    push(x0, y1, r, g, b, ua, vb, p);
-    draw_area_dirty(x, y, x + w, y + h, s);
-}
-
-void gl_hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, const HwPrim& p,
-             const HwState& s) {
-    begin_prim(p, s);
-    if (!gouraud) c1 = c0;
-    int r0 = c0 & 0xFF, g0 = (c0 >> 8) & 0xFF, b0 = (c0 >> 16) & 0xFF;
-    int r1 = c1 & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = (c1 >> 16) & 0xFF;
-    // a one-pixel-wide quad along the major axis, covering both end pixels
-    float ax = (float)x0, ay = (float)y0, bx = (float)x1, by = (float)y1;
-    bool xmajor = std::abs(x1 - x0) >= std::abs(y1 - y0);
-    if (xmajor) {
-        if (bx >= ax) bx += 1; else ax += 1;
-        push(ax, ay, r0, g0, b0, 0, 0, p); push(bx, by, r1, g1, b1, 0, 0, p); push(ax, ay + 1, r0, g0, b0, 0, 0, p);
-        push(bx, by, r1, g1, b1, 0, 0, p); push(bx, by + 1, r1, g1, b1, 0, 0, p); push(ax, ay + 1, r0, g0, b0, 0, 0, p);
-    } else {
-        if (by >= ay) by += 1; else ay += 1;
-        push(ax, ay, r0, g0, b0, 0, 0, p); push(bx, by, r1, g1, b1, 0, 0, p); push(ax + 1, ay, r0, g0, b0, 0, 0, p);
-        push(bx, by, r1, g1, b1, 0, 0, p); push(bx + 1, by, r1, g1, b1, 0, 0, p); push(ax + 1, ay, r0, g0, b0, 0, 0, p);
-    }
-    draw_area_dirty(std::min(x0, x1), std::min(y0, y1), std::max(x0, x1) + 1, std::max(y0, y1) + 1, s);
-}
-
 // ================================================================ Z-buffer
 
 void gl_hw_depth_reset() {
@@ -757,7 +594,7 @@ static void draw_copy(GLuint src, int offx, int offy, int scale, int x, int y, i
     glUniform2i(uc_off, offx, offy);
     glBindVertexArray(g_vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-    GLVtx q[6] = {};
+    Vtx q[6] = {};
     float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
     float c[6][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x1, y0}, {x1, y1}, {x0, y1}};
     for (int i = 0; i < 6; i++) { q[i].x = c[i][0]; q[i].y = c[i][1]; }
@@ -784,7 +621,7 @@ static void upload_rect(int x, int y, int w, int h, const uint16_t* vram) {
     glUniform2i(uc_off, 0, 0);
     glBindVertexArray(g_vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-    GLVtx q[6] = {};
+    Vtx q[6] = {};
     float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
     float c[6][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x1, y0}, {x1, y1}, {x0, y1}};
     for (int i = 0; i < 6; i++) { q[i].x = c[i][0]; q[i].y = c[i][1]; }

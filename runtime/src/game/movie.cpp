@@ -437,7 +437,7 @@ bool movie_audio(int16_t* l, int16_t* r) {
     return true;
 }
 
-// host_sdl.cpp, once a frame: `movie_picture_shown` = the game shows a movie picture now.
+// host.cpp, once a frame: `movie_picture_shown` = the game shows a movie picture now.
 void movie_vblank(bool movie_picture_shown) {
     if (!g_play.str) return;
     if (movie_picture_shown) {
@@ -450,7 +450,7 @@ void movie_vblank(bool movie_picture_shown) {
     if (host_frame_count() - g_play.last_read > kStaleFrames) stop("the game stopped reading it");
 }
 
-// host_sdl.cpp: the replacement's picture for now (null: show the game's own).
+// host.cpp: the replacement's picture for now (null: show the game's own).
 const uint32_t* movie_picture(int* w, int* h) {
     if (!g_play.str) return nullptr;
     const double t = g_play.has_audio ? (double)g_play.played / 44100.0
