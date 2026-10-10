@@ -100,35 +100,40 @@ endif()
 # ---------------------------------------------------------------- runtime
 add_executable(repocalypse
     runtime/src/main.cpp
-    runtime/src/core.cpp
-    runtime/src/bios.cpp
-    runtime/src/memcard.cpp
-    runtime/src/interp.cpp
-    runtime/src/gte.cpp
-    runtime/src/hw.cpp
-    runtime/src/gpu.cpp
-    runtime/src/cdrom.cpp
-    runtime/src/spu.cpp
-    runtime/src/mdec.cpp
-    runtime/src/host_sdl.cpp
-    runtime/src/gl_api.cpp
-    runtime/src/gpu_hw.cpp
-    runtime/src/present.cpp
-    runtime/src/savestate.cpp
-    runtime/src/sim60.cpp
-    runtime/src/drawdist.cpp
-    runtime/src/render_backend.cpp
-    runtime/src/replace.cpp
-    runtime/src/texdump.cpp
-    runtime/src/texreplace.cpp
-    runtime/src/vk_context.cpp
-    runtime/src/gpu_vk.cpp
-    runtime/src/present_vk.cpp
-    runtime/src/ui_text.cpp
-    runtime/src/game_menu.cpp
-    runtime/src/subtitles.cpp
-    runtime/src/cheats.cpp
-    runtime/src/movie.cpp
+    # the emulated machine: memory, scheduler, BIOS, interpreter, save states
+    runtime/src/core/bios.cpp
+    runtime/src/core/core.cpp
+    runtime/src/core/interp.cpp
+    runtime/src/core/memcard.cpp
+    runtime/src/core/savestate.cpp
+    # PS1 hardware
+    runtime/src/hw/cdrom.cpp
+    runtime/src/hw/gpu.cpp
+    runtime/src/hw/gte.cpp
+    runtime/src/hw/hw.cpp
+    runtime/src/hw/mdec.cpp
+    runtime/src/hw/spu.cpp
+    # renderers and presentation (OpenGL, Vulkan)
+    runtime/src/render/gl_api.cpp
+    runtime/src/render/gpu_gl.cpp
+    runtime/src/render/gpu_vk.cpp
+    runtime/src/render/present_gl.cpp
+    runtime/src/render/present_vk.cpp
+    runtime/src/render/render_backend.cpp
+    runtime/src/render/ui_text.cpp
+    runtime/src/render/vk_context.cpp
+    # host platform: window, input, settings
+    runtime/src/host/host.cpp
+    # Apocalypse enhancements
+    runtime/src/game/cheats.cpp
+    runtime/src/game/drawdist.cpp
+    runtime/src/game/game_menu.cpp
+    runtime/src/game/movie.cpp
+    runtime/src/game/replace.cpp
+    runtime/src/game/sim60.cpp
+    runtime/src/game/subtitles.cpp
+    runtime/src/game/texdump.cpp
+    runtime/src/game/texreplace.cpp
     ${volk_SOURCE_DIR}/volk.c)
 target_include_directories(repocalypse PRIVATE runtime/include runtime/src ${volk_SOURCE_DIR} ${stb_SOURCE_DIR} ${SHADER_OUT})
 target_compile_definitions(repocalypse PRIVATE VK_NO_PROTOTYPES $<$<BOOL:${WIN32}>:VK_USE_PLATFORM_WIN32_KHR>)

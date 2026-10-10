@@ -24,11 +24,11 @@
 #include <unistd.h>
 #endif
 
-#include "memcard.h"
-#include "psx.h"
-#include "savestate.h"
-
-extern std::jmp_buf g_resume_jmp;
+#include "core/memcard.h"
+#include "core/psx.h"
+#include "core/savestate.h"
+#include "game/game.h"
+#include "host/host.h"
 
 extern "C" {
 extern const RecompFunc main_func_table[];
@@ -37,12 +37,6 @@ extern const uint32_t main_exe_text_addr;
 extern const uint32_t main_exe_text_size;
 extern const uint32_t main_exe_hash;
 }
-
-bool host_init(const char* title, int scale);
-void host_shutdown();
-bool host_parse_press_script(const char* spec);
-void host_set_turbo(bool on);
-extern int g_start_state;
 
 namespace {
 
@@ -245,7 +239,6 @@ int main(int argc, char** argv) {
             sim60_apply();
         }
         else if (a == "--renderer") {  // --renderer opengl|vulkan (default: the saved setting)
-            extern int g_renderer_override;
             std::string r = next();
             g_renderer_override = r == "vulkan" ? 1 : r == "opengl" ? 0 : -1;
         }
@@ -255,8 +248,6 @@ int main(int argc, char** argv) {
             g_start_state = kChapterBase + n - 1;
         }
         else if (a == "--screenshot") {  // --screenshot FRAME[,FRAME...] PREFIX
-            extern std::vector<uint64_t> g_shot_frames;
-            extern std::string g_shot_prefix;
             std::string list = next();
             for (size_t p = 0; p < list.size();) {
                 size_t e = list.find(',', p);

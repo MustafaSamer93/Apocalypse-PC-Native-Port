@@ -210,7 +210,12 @@ void psx_run_events(R3000* c);
 // fraction carried over so nothing is lost to rounding.
 extern uint32_t psx_cpi_q;
 extern uint32_t psx_cycle_frac;
-#define ADD_CYCLES(n)                                       do {                                                        psx_cycle_frac += (uint32_t)(n) * psx_cpi_q;            c->cycles += psx_cycle_frac >> 2;                       psx_cycle_frac &= 3;                                } while (0)
+#define ADD_CYCLES(n)                                    \
+    do {                                                 \
+        psx_cycle_frac += (uint32_t)(n) * psx_cpi_q;     \
+        c->cycles += psx_cycle_frac >> 2;                \
+        psx_cycle_frac &= 3;                             \
+    } while (0)
 #define CHECK_EVENTS(c) do { if (RECOMP_UNLIKELY((c)->cycles >= (c)->next_event)) psx_run_events(c); } while (0)
 // Average cost of an instruction including cache/memory stalls. Recompiled code runs
 // far faster than this on the host; the value only paces emulated time.
@@ -241,10 +246,9 @@ RECOMP_INLINE void psx_idle_until_event(R3000* c) {
     if (c->cycles < c->next_event) c->cycles = c->next_event;
 }
 void psx_hook_glow_sort(R3000* c);  // glow renderer: v0 = ordering-table slot, a1 = depth, s4 = glow (sim60.cpp)
-void psx_hook_strip_corner(R3000* c);
-void psx_hook_fire(R3000* c, int site);  // the player's weapon fires (sim60.cpp)  // level transform: a strip corner is stored (gte.cpp)
-void psx_hook_camera(R3000* c);        // render camera: smoothed view (gte.cpp)
-void psx_hook_aim(R3000* c);           // player aim: s0 = player, fire vector +471/+472 just set (host_sdl.cpp)
+void psx_hook_strip_corner(R3000* c);  // level transform: a strip corner is stored (gte.cpp)
+void psx_hook_fire(R3000* c, int site);  // the player's weapon fires (sim60.cpp)
+void psx_hook_aim(R3000* c);           // player aim: s0 = player, fire vector +471/+472 just set (input.cpp)
 // the game's menus (game_menu.cpp): add item, destroy, move selection, draw, read select/back
 void psx_hook_menu_init(R3000* c);
 void psx_hook_menu_add(R3000* c);
