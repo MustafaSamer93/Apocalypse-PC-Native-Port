@@ -124,6 +124,9 @@ add_executable(repocalypse
     runtime/src/render/vk_context.cpp
     # host platform: window, input, settings
     runtime/src/host/host.cpp
+    runtime/src/host/input.cpp
+    runtime/src/host/settings.cpp
+    runtime/src/host/settings_menu.cpp
     # Apocalypse enhancements
     runtime/src/game/cheats.cpp
     runtime/src/game/drawdist.cpp

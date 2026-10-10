@@ -1,12 +1,11 @@
-// Host platform layer: SDL3 window, audio, input and frame pacing.
+// Host platform layer: the SDL3 window and renderer start-up, presenting frames, frame pacing,
+// audio and on-screen messages.
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <ctime>
-#include <filesystem>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -14,6 +13,7 @@
 #include "core/savestate.h"
 #include "game/game.h"
 #include "host/host.h"
+#include "host/host_internal.h"
 #include "render/gpu_hw.h"
 #include "render/present.h"
 #include "render/render_backend.h"
@@ -23,84 +23,32 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#include <dwmapi.h>
-#include <io.h>
-#else
-#include <unistd.h>
 #endif
 
 constexpr const char* kVersion = "v1.0";
-int g_renderer_override = -1;  // --renderer opengl|vulkan: 0 / 1, -1 = the saved setting
+int g_renderer_override = -1;
+int g_start_state = -1;
+std::vector<uint64_t> g_shot_frames;
+std::string g_shot_prefix;
+
+namespace host {
+
+SDL_Window* g_window = nullptr;
+SDL_AudioStream* g_audio = nullptr;
+bool g_video_ok = false;
+bool g_quit = false;
+uint64_t g_frame = 0;
+uint64_t g_next_frame_ns = 0;
 
 namespace {
 
-SDL_Window* g_window = nullptr;
-bool g_gl_ok = false;
-SDL_AudioStream* g_audio = nullptr;
-
-// Graphics settings (settings screen, saved in settings.ini).
-struct GfxSettings {
-#ifdef _WIN32
-    int scale = 5;          // 0 = software renderer, 1..8 = OpenGL internal resolution (5 = 1200 lines)
-#else
-    int scale = 4;          // (Linux: what holds 60 fps on the Steam Deck, with FXAA and Vulkan)
-#endif
-    Aspect aspect = Aspect::A16_9;
-    bool crt = false;       // CRT filter (present.cpp / present_vk.cpp)
-    bool texture_filter = false;
-    int fps = 60;           // 30 = the original (no 60 Hz simulation), 60
-#ifdef _WIN32
-    int aa = 3;             // anti-aliasing: bit 0 = FXAA pass, bit 1 = supersampling (SSAA)
-#else
-    int aa = 1;             // (Linux: FXAA only; SSAA rendered the Steam Deck at 7x, 20-30 fps)
-#endif
-    int msaa = 1;           // multisample anti-aliasing: samples per pixel (1, 2, 4, 8)
-#ifdef _WIN32
-    bool vulkan = false;    // renderer: Vulkan instead of OpenGL (applies at the next start)
-#else
-    bool vulkan = true;     // (Linux: Mesa's OpenGL ran the Steam Deck at 20-50 fps where Vulkan holds 60)
-#endif
-};
-int g_active_msaa = 1;      // MSAA samples the renderer was created with
-const char* const kAaNames[] = {"Off", "FXAA", "SSAA", "SSAA + FXAA"};
-GfxSettings g_gfx;
-float g_refresh_hz = 60.0f;  // display refresh rate
-int g_active_scale = -1;    // renderer actually in use
-
-// Every connected controller drives player 1 (Apocalypse is single-player). Devices SDL
-// has a mapping for are opened as gamepads; anything else (e.g. some 8BitDo modes) as a
-// raw joystick with a generic layout.
-struct InputDevice {
-    SDL_JoystickID id;
-    SDL_Gamepad* pad = nullptr;
-    SDL_Joystick* joy = nullptr;
-};
-std::vector<InputDevice> g_devices;
-bool g_quit = false;
-bool g_turbo = false;
-bool g_force_turbo = false;
-bool g_vsync_pacing = false;   // display is ~60 Hz: RenderPresent paces the frames
-bool g_vsync_active = false;   // current renderer vsync state (off while fast-forwarding)
-uint64_t g_next_frame_ns = 0;
-std::vector<uint32_t> g_pixels;
-
 constexpr uint64_t FRAME_NS = 1000000000ull * 1001 / 60000;  // 59.94 Hz
-
-// Scripted input for automated testing: button held on port 0 for a frame range.
-struct ScriptedPress {
-    uint16_t bit;
-    uint64_t from, to;
-};
-std::vector<ScriptedPress> g_script;
-uint64_t g_frame = 0;
-
-// PS1 pad bits (active low in the wire format; here 1 = pressed)
-enum : uint16_t {
-    B_SELECT = 1 << 0, B_L3 = 1 << 1, B_R3 = 1 << 2, B_START = 1 << 3,
-    B_UP = 1 << 4, B_RIGHT = 1 << 5, B_DOWN = 1 << 6, B_LEFT = 1 << 7,
-    B_L2 = 1 << 8, B_R2 = 1 << 9, B_L1 = 1 << 10, B_R1 = 1 << 11,
-    B_TRIANGLE = 1 << 12, B_CIRCLE = 1 << 13, B_CROSS = 1 << 14, B_SQUARE = 1 << 15,
-};
+float g_refresh_hz = 60.0f;    // display refresh rate
+bool g_turbo = false;          // fast-forward (Tab held, or --turbo)
+bool g_force_turbo = false;
+bool g_vsync_pacing = false;   // display is ~60 Hz: the swap paces the frames
+bool g_vsync_active = false;   // current vsync state (off while fast-forwarding)
+std::vector<uint32_t> g_pixels;
 
 // Audio playback health, reported with the frame times (--log host).
 int g_audio_underruns = 0, g_audio_drops = 0, g_audio_min_queued = 1 << 30;
@@ -108,6 +56,12 @@ int g_audio_underruns = 0, g_audio_drops = 0, g_audio_min_queued = 1 << 30;
 // Short on-screen messages ("State 1 saved").
 std::string g_toast;
 uint64_t g_toast_until = 0;
+
+double g_fps_shown = 0;        // images per second over the last second (host_present)
+uint64_t g_images = 0;         // distinct images shown
+uint64_t g_last_image = ~0ull;
+
+// ================================================================ overlays
 
 // Badges: a line of white text in a dark box at the bottom of the window, drawn into its own
 // small surface only when the text or the window size changes (present_badge keeps it).
@@ -146,14 +100,6 @@ void draw_badge(int slot, const std::string& text, int chars, bool right) {
                   margin, changed);
 }
 
-// FPS counter (Enhancements): the images shown per second.
-bool g_fps_counter = false;
-double g_fps_shown = 0;  // images per second over the last second (host_present)
-
-void draw_fps_counter() {
-    if (g_fps_counter) draw_badge(0, std::to_string((int)std::lround(g_fps_shown)) + " FPS", 7, false);
-}
-
 void draw_toast() {
     if (g_toast.empty() || SDL_GetTicksNS() >= g_toast_until) return;
     SDL_Renderer* r = present_overlay_begin();
@@ -167,343 +113,145 @@ void draw_toast() {
     present_overlay_end();
 }
 
-// The version, on the title screen and while the game's menus are up.
-void draw_version() {
-    if (gpu_title_screen() || replace_title_shown(gpu_display().y)) draw_badge(1, kVersion, (int)std::strlen(kVersion) + 1, true);
+// Over the game image: the screenshot first (the game alone), then the toast, the version (on
+// the title screen and while the game's menus are up) and the FPS counter; then the swap.
+void finish_frame(bool version) {
+    for (uint64_t f : g_shot_frames)
+        if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
+    draw_toast();
+    if (version && (gpu_title_screen() || replace_title_shown(gpu_display().y)))
+        draw_badge(1, kVersion, (int)std::strlen(kVersion) + 1, true);
+    if (g_fps_counter) draw_badge(0, std::to_string((int)std::lround(g_fps_shown)) + " FPS", 7, false);
+    present_swap();
 }
 
-PresentOptions present_options() {
-    PresentOptions o;
-    o.aspect = g_gfx.aspect;
-    // the disc's own full-screen pictures keep their 4:3 (replacements are fitted to the screen)
-    if (o.aspect != Aspect::A4_3 && !gpu_movie_playing() && replace_original_picture_shown(gpu_display().y))
-        o.aspect = Aspect::A4_3;
-    // movies on ultra-wide screens: shaped as in 16:9, with bars at the sides
-    if ((o.aspect == Aspect::A21_9 || o.aspect == Aspect::A32_9) && gpu_movie_playing()) o.aspect = Aspect::A16_9;
-    o.crt = g_gfx.crt;
-    o.fxaa = g_gfx.aa & 1;
-    return o;
+// ================================================================ the game image
+
+// Lines to cut off at the top and at the bottom of an image `h` lines high: in widescreen a
+// movie (made for 4:3, with black bands in the picture) is enlarged to the full width, keeping
+// its proportions, and loses what no longer fits (1/8 at each edge for 16:9).
+int movie_crop(int h) {
+    if (g_gfx.aspect == Aspect::A4_3 || g_gfx.aspect == Aspect::Stretch || !gpu_movie_playing()) return 0;
+    return (int)((float)h * (1.0f - std::max(g_gte_widescreen, 0.75f)) * 0.5f);  // (ultra-wide: as 16:9)
 }
 
-// Settings screen text for the multisampling rate (with what the GPU could give).
-std::string msaa_label() {
-    std::string s = std::to_string(g_gfx.msaa) + "x" + (g_gfx.msaa == 1 ? " (off)" : "");
-    int got = hw_samples();
-    if (g_gfx.msaa > 1 && got > 0 && got < g_gfx.msaa) s += ", " + std::to_string(got) + "x fits";
-    return s;
-}
-
-// Settings screen text for the simulation rate choice.
-std::string sim60_label() {
-    const char* names[] = {"30 Hz original", "60 Hz all levels", "60 Hz all (beta)"};
-    std::string s = names[std::clamp(g_sim60_setting, 0, 2)];
-    if (g_sim60_fps30) s += " (frame rate 30)";  // the frame rate setting keeps it off
-    else if (psx_opt_sim60) s += " ON";          // active in the current level
-    return s;
-}
-
-// Draw distance choices, percent of the game's own (drawdist.cpp).
-constexpr int kDrawDistChoices[] = {100, 150, 200, 300, 400};
-
-std::string drawdist_label() {
-    if (g_draw_distance <= 100) return "Original";
-    if (g_draw_distance >= 400) return "Max";  // the depth range (16380) in every level (drawdist.cpp)
-    std::string s = std::to_string(g_draw_distance / 100);
-    if (g_draw_distance % 100) s += "." + std::to_string(g_draw_distance % 100 / 10);
-    return s + "x";
-}
-
-// Internal resolution actually rendered: the Resolution setting, raised by supersampling to
-// about twice the lines the window shows (at most 8x = 1920 lines).
-int render_scale() {
-    if (g_gfx.scale == 0 || !(g_gfx.aa & 2) || !g_window) return g_gfx.scale;
-    int w = 0, h = 0;
-    SDL_GetWindowSizeInPixels(g_window, &w, &h);
-    return std::clamp((2 * h + 239) / 240, g_gfx.scale, std::max(g_gfx.scale, 8));
-}
-
-void apply_graphics() {
-    // "30 (original)": the game as it was, so no 60 Hz simulation either (sim60.cpp)
-    if (g_sim60_fps30 != (g_gfx.fps == 30)) {
-        g_sim60_fps30 = g_gfx.fps == 30;
-        sim60_apply();
+// Draws the game image, then the overlays, and swaps.
+void draw_game(const GpuDisplay& d) {
+    const int w = std::clamp(d.w, 1, 1024), h = std::clamp(d.h, 1, 512);
+    const PresentOptions opt = present_options();
+    const int crop = movie_crop(h);
+    // A replacement movie (movie.cpp) in place of the game's own movie picture, cropped like it.
+    if (int mw = 0, mh = 0; d.enabled && d.rgb24 && gpu_movie_playing()) {
+        if (const uint32_t* px = movie_picture(&mw, &mh)) {
+            const int mc = (int)((int64_t)crop * mh / h);
+            present_game_pixels(px + (size_t)mc * mw, mw, mh - 2 * mc, opt);
+            if (g_last_image != (uint64_t)(uintptr_t)px) g_images++;  // (each new movie frame)
+            g_last_image = (uint64_t)(uintptr_t)px;
+            finish_frame(false);
+            return;
+        }
     }
-    const int want = render_scale();
-    if (g_gl_ok && (want != g_active_scale || g_gfx.msaa != g_active_msaa)) {
-        g_active_scale = gpu_set_renderer(want, g_gfx.msaa);
-        g_active_msaa = g_gfx.msaa;
-    }
-    if (!g_gl_ok) g_active_scale = 0;
-    hw_set_texture_filter(g_gfx.texture_filter);
-    psx_opt_menu60 = g_gfx.fps != 30;  // the menus at 60 Hz too (game_menu.cpp slows what they animate)
-    const float ratio = aspect_ratio(g_gfx.aspect);  // (4/3) / ratio: 16:9 = 0.75, 32:9 = 0.375
-    g_gte_widescreen = ratio > 0 ? (4.0f / 3.0f) / ratio : 1.0f;
-}
-
-// ---------------------------------------------------------------- custom button layouts
-// Set up in the in-game settings screen (F1), one layout per controller model (SDL GUID),
-// saved automatically to settings.ini.
-
-struct Bind {
-    enum Kind : uint8_t { None, Button, Hat, Axis } kind = None;
-    uint8_t index = 0;
-    int8_t value = 0;  // hat direction mask, or axis direction (+1/-1)
-};
-struct Layout {
-    Bind bind[16];  // indexed by PS1 pad bit number
-};
-std::map<std::string, Layout> g_layouts;
-// (debug: APOC_SETTINGS=PATH uses another file, so test runs leave the player's alone)
-const char* settings_file() {
-    static const char* f = std::getenv("APOC_SETTINGS") ? std::getenv("APOC_SETTINGS") : "settings.ini";
-    return f;
-}
-// Remapped keyboard: one key per PS1 button (bit number), used when g_key_custom.
-SDL_Scancode g_keys[16] = {};
-bool g_key_custom = false;
-// Player 1's input (like PSXRecomp's per-player source): "" = keyboard and every controller,
-// "keyboard" = keyboard & mouse only, else one controller's GUID. A chosen controller that is not
-// connected falls back to all, so a missing pad never leaves the game without input.
-std::string g_input;
-bool g_fullscreen = true;  // start in fullscreen (saved as "fullscreen N")
-
-// Order the settings screen asks for buttons in.
-const struct { uint16_t bit; const char* name; } kRemapOrder[] = {
-    {B_UP, "D-PAD UP"}, {B_DOWN, "D-PAD DOWN"}, {B_LEFT, "D-PAD LEFT"}, {B_RIGHT, "D-PAD RIGHT"},
-    {B_CROSS, "CROSS (X)"}, {B_CIRCLE, "CIRCLE (O)"}, {B_SQUARE, "SQUARE"}, {B_TRIANGLE, "TRIANGLE"},
-    {B_L1, "L1"}, {B_R1, "R1"}, {B_L2, "L2"}, {B_R2, "R2"}, {B_START, "START"}, {B_SELECT, "SELECT"},
-};
-
-int bit_index(uint16_t bit) {
-    int i = 0;
-    while (!(bit & (1u << i))) i++;
-    return i;
-}
-
-SDL_Joystick* device_joystick(const InputDevice& d) { return d.pad ? SDL_GetGamepadJoystick(d.pad) : d.joy; }
-
-std::string device_guid(const InputDevice& d) {
-    char buf[64];
-    SDL_GUIDToString(SDL_GetJoystickGUID(device_joystick(d)), buf, sizeof buf);
-    return buf;
-}
-
-const char* device_name(const InputDevice& d) {
-    const char* n = d.pad ? SDL_GetGamepadName(d.pad) : SDL_GetJoystickName(d.joy);
-    return n ? n : "Controller";
-}
-
-bool bind_active(SDL_Joystick* j, const Bind& b) {
-    switch (b.kind) {
-        case Bind::Button: return SDL_GetJoystickButton(j, b.index);
-        case Bind::Hat: return (SDL_GetJoystickHat(j, b.index) & b.value) != 0;
-        case Bind::Axis: {
-            int v = SDL_GetJoystickAxis(j, b.index);
-            return b.value > 0 ? v > 16000 : v < -16000;
-        }
-        default: return false;
-    }
-}
-
-// Written to a new file, flushed to the disk and then put in place of the old one: a crash or
-// power loss while saving leaves the old settings, never a file of zeros.
-void save_settings() {
-    const std::string tmp = std::string(settings_file()) + ".new";
-    FILE* f = std::fopen(tmp.c_str(), "w");
-    if (!f) return;
-    std::fprintf(f, "# Written by the game's settings screen (F1). Safe to delete to reset.\n");
-    std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d\n", g_gfx.scale, (int)g_gfx.aspect,
-                 g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
-    std::fprintf(f, "sim %d\n", g_sim60_setting);
-    std::fprintf(f, "drawdist %d\n", g_draw_distance);
-    std::fprintf(f, "gamefont %d\n", g_game_font ? 1 : 0);
-    std::fprintf(f, "precise %d\n", g_gte_precise ? 1 : 0);
-    std::fprintf(f, "font %d\n", g_smooth_font ? 1 : 0);
-    std::fprintf(f, "menuzoom %d\n", g_menu_zoom);
-    std::fprintf(f, "autosave %d\n", g_autosave ? 1 : 0);
-    std::fprintf(f, "subtitles %d\n", g_subtitles ? 1 : 0);
-    std::fprintf(f, "fpscounter %d\n", g_fps_counter ? 1 : 0);
-    std::fprintf(f, "texreplace %d\n", g_tex_replace ? 1 : 0);
-    std::fprintf(f, "fullscreen %d\n", g_fullscreen ? 1 : 0);
-    std::fprintf(f, "aa %d\n", g_gfx.aa);
-    std::fprintf(f, "msaa %d\n", g_gfx.msaa);
-    std::fprintf(f, "renderer %s\n", g_gfx.vulkan ? "vulkan" : "opengl");
-    if (!g_input.empty()) std::fprintf(f, "input %s\n", g_input.c_str());
-    if (g_key_custom) {
-        std::fprintf(f, "keys");
-        for (int i = 0; i < 16; i++)
-            if (g_keys[i] != SDL_SCANCODE_UNKNOWN) std::fprintf(f, " %d=%d", i, (int)g_keys[i]);
-        std::fprintf(f, "\n");
-    }
-    for (auto& [guid, lay] : g_layouts) {
-        std::fprintf(f, "pad %s", guid.c_str());
-        for (int i = 0; i < 16; i++) {
-            const Bind& b = lay.bind[i];
-            if (b.kind == Bind::Button) std::fprintf(f, " %d=b%d", i, b.index);
-            if (b.kind == Bind::Hat) std::fprintf(f, " %d=h%d:%d", i, b.index, b.value);
-            if (b.kind == Bind::Axis) std::fprintf(f, " %d=a%d%c", i, b.index, b.value > 0 ? '+' : '-');
-        }
-        std::fprintf(f, "\n");
-    }
-    const bool ok = std::fflush(f) == 0 && !std::ferror(f);
-#ifdef _WIN32
-    if (ok) _commit(_fileno(f));
-#else
-    if (ok) fsync(fileno(f));
-#endif
-    std::fclose(f);
-#ifdef _WIN32
-    if (ok) MoveFileExA(tmp.c_str(), settings_file(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-#else
-    if (ok) std::rename(tmp.c_str(), settings_file());
-#endif
-}
-
-void load_settings() {
-    FILE* f = std::fopen(settings_file(), "r");
-    if (!f) return;
-    char line[1024];
-    while (std::fgets(line, sizeof line, f)) {
-        int sc, as, crt, filt, fps, smooth;
-        int got = std::sscanf(line, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d", &sc, &as, &crt, &filt, &fps);
-        if (got >= 4) {
-            g_gfx.scale = std::clamp(sc, 0, 9);
-            g_gfx.aspect = (Aspect)std::clamp(as, 0, 5);
-            g_gfx.crt = crt != 0;
-            g_gfx.texture_filter = filt != 0;
-            if (got == 5) g_gfx.fps = fps == 30 ? 30 : 60;
-            else if (std::sscanf(line, "gfx scale=%*d aspect=%*d crt=%*d filter=%*d smooth=%d", &smooth) == 1)
-                g_gfx.fps = smooth ? 0 : 30;  // older settings file
-            continue;
-        }
-        if (char rn[16]; std::sscanf(line, "renderer %15s", rn) == 1) {
-            g_gfx.vulkan = std::strcmp(rn, "vulkan") == 0;
-            continue;
-        }
-        if (int ms; std::sscanf(line, "msaa %d", &ms) == 1) {
-            g_gfx.msaa = ms >= 8 ? 8 : ms >= 4 ? 4 : ms >= 2 ? 2 : 1;
-            continue;
-        }
-        if (int aa; std::sscanf(line, "aa %d", &aa) == 1) {
-            g_gfx.aa = std::clamp(aa, 0, 3);
-            continue;
-        }
-        if (int fs; std::sscanf(line, "fullscreen %d", &fs) == 1) {
-            g_fullscreen = fs != 0;
-            continue;
-        }
-        if (int sf; std::sscanf(line, "font %d", &sf) == 1) {
-            g_smooth_font = sf != 0;
-            continue;
-        }
-        if (int tr; std::sscanf(line, "texreplace %d", &tr) == 1) g_tex_replace = tr != 0;
-        if (int fc; std::sscanf(line, "fpscounter %d", &fc) == 1) {
-            g_fps_counter = fc != 0;
-            continue;
-        }
-        if (int st; std::sscanf(line, "subtitles %d", &st) == 1) {
-            g_subtitles = st != 0;
-            continue;
-        }
-        if (int as; std::sscanf(line, "autosave %d", &as) == 1) {
-            g_autosave = as != 0;
-            continue;
-        }
-        if (int mz; std::sscanf(line, "menuzoom %d", &mz) == 1) {
-            g_menu_zoom = std::clamp(mz, 30, 80);
-            continue;
-        }
-        if (int pr; std::sscanf(line, "precise %d", &pr) == 1) {
-            g_gte_precise = pr != 0;
-            continue;
-        }
-        if (int gf; std::sscanf(line, "gamefont %d", &gf) == 1) {
-            g_game_font = gf != 0;
-            continue;
-        }
-        if (int dd; std::sscanf(line, "drawdist %d", &dd) == 1) {
-            g_draw_distance = std::clamp(dd, 100, 400);
-            continue;
-        }
-        if (int sim; std::sscanf(line, "sim %d", &sim) == 1) {
-            g_sim60_setting = std::clamp(sim, 0, 2);
-            continue;
-        }
-        if (char in[64]; std::sscanf(line, "input %63s", in) == 1) {
-            g_input = in;
-            continue;
-        }
-        if (std::strncmp(line, "keys", 4) == 0) {
-            g_key_custom = true;
-            const char* p = line + 4;
-            int bit, sc, used;
-            while (std::sscanf(p, " %d=%d%n", &bit, &sc, &used) == 2) {
-                if (bit >= 0 && bit < 16) g_keys[bit] = (SDL_Scancode)sc;
-                p += used;
-            }
-            continue;
-        }
-        char guid[64];
-        int n = 0;
-        if (std::sscanf(line, "pad %63s%n", guid, &n) != 1) continue;
-        Layout lay;
-        const char* p = line + n;
-        int bit, idx, val, used;
-        char kind, sign;
-        while (true) {
-            while (*p == ' ') p++;
-            if (std::sscanf(p, "%d=%c%n", &bit, &kind, &used) != 2 || bit < 0 || bit > 15) break;
-            p += used;
-            Bind b;
-            if (kind == 'b' && std::sscanf(p, "%d%n", &idx, &used) == 1) b = {Bind::Button, (uint8_t)idx, 0};
-            else if (kind == 'h' && std::sscanf(p, "%d:%d%n", &idx, &val, &used) == 2) b = {Bind::Hat, (uint8_t)idx, (int8_t)val};
-            else if (kind == 'a' && std::sscanf(p, "%d%c%n", &idx, &sign, &used) == 2) b = {Bind::Axis, (uint8_t)idx, (int8_t)(sign == '+' ? 1 : -1)};
-            else break;
-            p += used;
-            lay.bind[bit] = b;
-        }
-        g_layouts[guid] = lay;
-    }
-    std::fclose(f);
-}
-
-void add_device(SDL_JoystickID id) {
-    for (auto& d : g_devices)
-        if (d.id == id) return;
-    InputDevice d{id};
-    if (SDL_IsGamepad(id)) {
-        d.pad = SDL_OpenGamepad(id);
-        if (!d.pad) return;
-        log_msg(LogCat::Host, "controller connected: %s", SDL_GetGamepadName(d.pad));
-    } else {
-        d.joy = SDL_OpenJoystick(id);
-        if (!d.joy) return;
-        log_msg(LogCat::Host,
-                "controller connected: %s (no SDL mapping, using a generic layout; a line for it in "
-                "gamecontrollerdb.txt gives exact buttons)",
-                SDL_GetJoystickName(d.joy));
-    }
-    g_devices.push_back(d);
-}
-
-void remove_device(SDL_JoystickID id) {
-    for (auto it = g_devices.begin(); it != g_devices.end(); ++it) {
-        if (it->id != id) continue;
-        if (it->pad) SDL_CloseGamepad(it->pad);
-        if (it->joy) SDL_CloseJoystick(it->joy);
-        g_devices.erase(it);
+    if (g_display_flips != g_last_image) g_images++;
+    g_last_image = g_display_flips;
+    // 15-bit images drawn by the hardware renderer are shown straight from its VRAM; 24-bit
+    // movie frames (and the software renderer) go through the CPU copy.
+    if (d.enabled && !d.rgb24 && hw_active()) {
+        int px, py, pw, ph;
+        const unsigned vram = hw_display_texture(d.x, d.y, w, h, &px, &py, &pw, &ph);
+        const int cs = crop * hw_scale();
+        present_game_texture(vram, 1024 * hw_scale(), 512 * hw_scale(), px, py + cs, pw, ph - 2 * cs, h - 2 * crop, opt);
+        finish_frame(true);
         return;
     }
+    g_pixels.resize((size_t)w * h);
+    if (d.enabled) {
+        for (int y = 0; y < h; y++) {
+            uint32_t* row = &g_pixels[(size_t)y * w];
+            const int vy = (d.y + y) & 511;
+            if (d.rgb24) {
+                const uint8_t* src = (const uint8_t*)&d.vram[vy * 1024];
+                for (int x = 0; x < w; x++) {
+                    const int bx = (d.x * 2 + x * 3) % 2048;
+                    const uint8_t r = src[bx], g = src[(bx + 1) % 2048], b = src[(bx + 2) % 2048];
+                    row[x] = (uint32_t)r << 16 | (uint32_t)g << 8 | b;
+                }
+            } else {
+                for (int x = 0; x < w; x++) {
+                    const uint16_t p = d.vram[vy * 1024 + ((d.x + x) & 1023)];
+                    const uint32_t r = (p & 31) << 3, g = ((p >> 5) & 31) << 3, b = ((p >> 10) & 31) << 3;
+                    row[x] = (r | r >> 5) << 16 | (g | g >> 5) << 8 | (b | b >> 5);
+                }
+            }
+        }
+    } else {
+        std::fill(g_pixels.begin(), g_pixels.end(), 0);
+    }
+    present_game_pixels(g_pixels.data() + (size_t)crop * w, w, h - 2 * crop, opt);
+    finish_frame(true);  // (the title screen's moving background is a 24-bit movie too)
 }
 
-}  // namespace
+// Once a second: the frame rate in the title (and FPS counter) and, with --log host, frame
+// times and audio health; once a minute in every log: the frame rate and slow moments.
+void frame_stats() {
+    static uint64_t fps_t0 = SDL_GetTicksNS(), fps_frames = 0, fps_images0 = 0, last_present = 0, dt_min = ~0ull,
+                    dt_max = 0, dt_max_seen = 0;
+    static int slow_seen = 0;
+    const uint64_t t_now = SDL_GetTicksNS();
+    if (last_present) {
+        dt_min = std::min(dt_min, t_now - last_present);
+        dt_max = std::max(dt_max, t_now - last_present);
+        dt_max_seen = std::max(dt_max_seen, t_now - last_present);
+        if (t_now - last_present > 50'000'000ull) slow_seen++;
+    }
+    last_present = t_now;
+    if (++fps_frames < 60) return;
+    const uint64_t now = SDL_GetTicksNS();
+    const double secs = (double)(now - fps_t0) / 1e9;
+    const double fps = 60.0 / secs, images = (double)(g_images - fps_images0) / secs;
+    g_fps_shown = images;
+    LOG(Host, "frame times: min %.2f ms, max %.2f ms; audio: queue min %d, underruns %d, drops %d",
+        dt_min / 1e6, dt_max / 1e6, g_audio_min_queued, g_audio_underruns, g_audio_drops);
+    g_audio_min_queued = 1 << 30;
+    dt_min = ~0ull;
+    dt_max = 0;
+    char title[96];
+    std::snprintf(title, sizeof title, "Repocalypse %s - %.0f fps%s", kVersion, images, g_turbo ? " (fast-forward)" : "");
+    // only when it changes: renaming the window goes through Windows' window manager and
+    // could hold the frame up by several ms (a hiccup every second)
+    static std::string shown_title;
+    if (shown_title != title) {
+        shown_title = title;
+        SDL_SetWindowTitle(g_window, title);
+    }
+    LOG(Host, "frame %llu: %.1f Hz emulated, %.1f images/s", (unsigned long long)g_frame, fps, images);
+    static uint64_t minute_t0 = now, minute_images = g_images, minute_worst = 0;
+    static int minute_slow = 0;
+    minute_worst = std::max(minute_worst, dt_max_seen);
+    minute_slow += slow_seen;
+    dt_max_seen = 0;
+    slow_seen = 0;
+    if (now - minute_t0 >= 60'000'000'000ull) {
+        const double m = (double)(now - minute_t0) / 1e9;
+        log_msg(LogCat::Host, "performance: %.1f fps, slowest frame %.0f ms, %d frames over 50 ms (frame %llu)",
+                (double)(g_images - minute_images) / m, minute_worst / 1e6, minute_slow, (unsigned long long)g_frame);
+        minute_t0 = now;
+        minute_images = g_images;
+        minute_worst = 0;
+        minute_slow = 0;
+    }
+    fps_t0 = now;
+    fps_frames = 0;
+    fps_images0 = g_images;
+}
+
+// ================================================================ start-up
 
 // Some OpenGL drivers crash while SDL sets up an OpenGL window (seen on a PC with DisplayLink USB
 // display adapters next to its AMD GPU; every build closed there without a word). On Windows the
 // crash is caught, but SDL is left broken by it (the game then hung on a black screen), so the
 // renderer setting is switched to Vulkan and the game starts again as a new process.
-[[maybe_unused]] static bool g_gl_crashed = false;
-static SDL_Window* create_window(const char* title, int w, int h, SDL_WindowFlags flags) {
+[[maybe_unused]] bool g_gl_crashed = false;
+SDL_Window* create_window(const char* title, int w, int h, SDL_WindowFlags flags) {
 #ifdef _WIN32
     __try {
         return SDL_CreateWindow(title, w, h, flags);
@@ -518,7 +266,7 @@ static SDL_Window* create_window(const char* title, int w, int h, SDL_WindowFlag
 
 #ifdef _WIN32
 // Starts this exe again with the same command line (and standard handles), then ends this one.
-[[noreturn]] static void restart_self() {
+[[noreturn]] void restart_self() {
     wchar_t exe[MAX_PATH];
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     std::wstring cmd = GetCommandLineW();
@@ -564,6 +312,35 @@ void report_header() {
     }
 }
 
+}  // namespace
+
+// The mouse pointer hides after 2 s without mouse use and shows again when it is used.
+void mouse_autohide(const SDL_Event* e) {
+    static uint64_t used = SDL_GetTicks();
+    if (e && (e->type == SDL_EVENT_MOUSE_MOTION || e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_WHEEL)) {
+        used = SDL_GetTicks();
+        if (!SDL_CursorVisible()) SDL_ShowCursor();
+    }
+    if (!e && SDL_CursorVisible() && SDL_GetTicks() - used > 2000) SDL_HideCursor();
+}
+
+PresentOptions present_options() {
+    PresentOptions o;
+    o.aspect = g_gfx.aspect;
+    // the disc's own full-screen pictures keep their 4:3 (replacements are fitted to the screen)
+    if (o.aspect != Aspect::A4_3 && !gpu_movie_playing() && replace_original_picture_shown(gpu_display().y))
+        o.aspect = Aspect::A4_3;
+    // movies on ultra-wide screens: shaped as in 16:9, with bars at the sides
+    if ((o.aspect == Aspect::A21_9 || o.aspect == Aspect::A32_9) && gpu_movie_playing()) o.aspect = Aspect::A16_9;
+    o.crt = g_gfx.crt;
+    o.fxaa = g_gfx.aa & 1;
+    return o;
+}
+
+}  // namespace host
+
+using namespace host;
+
 bool host_init(const char* title, int scale) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
         log_msg(LogCat::Host, "SDL_Init failed: %s", SDL_GetError());
@@ -574,24 +351,25 @@ bool host_init(const char* title, int scale) {
         log_msg(LogCat::Host, "loaded extra controller mappings from gamecontrollerdb.txt");
     load_settings();
     report_header();
-    // Fullscreen (on the desktop's own mode) unless the player chose a window with F11. The
-    // window, for then: shaped like the picture; `scale` N asks for 240*N lines; 0 (the
-    // default) asks for 1080: a 1080p window if the desktop has room, else the largest that fits.
+    // Fullscreen (on the desktop's own mode) unless the player chose a window. The window, for
+    // then: shaped like the picture; `scale` N asks for 240*N lines; 0 (the default) asks for
+    // 1080: a 1080p window if the desktop has room, else the largest that fits.
     const float ratio = aspect_ratio(g_gfx.aspect) > 0 ? aspect_ratio(g_gfx.aspect) : 4.0f / 3;
     int win_h = scale > 0 ? 240 * scale : 1080;
-    const bool fullscreen = g_fullscreen;
-    SDL_DisplayID display = SDL_GetPrimaryDisplay();
+    const SDL_DisplayID display = SDL_GetPrimaryDisplay();
     SDL_Rect usable{};
     const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display);
     if (SDL_GetDisplayUsableBounds(display, &usable)) {
         const int frame = 40;  // title bar and borders
-        int fit_h = std::min(usable.h - frame, (int)((float)(usable.w - 16) / ratio));
+        const int fit_h = std::min(usable.h - frame, (int)((float)(usable.w - 16) / ratio));
         if (win_h > fit_h) win_h = std::max(240, fit_h);
     }
-    int win_w = (int)((float)win_h * ratio + 0.5f);
+    const int win_w = (int)((float)win_h * ratio + 0.5f);
     if (desktop)
         log_msg(LogCat::Host, "desktop %dx%d; window %dx%d%s", desktop->w, desktop->h, win_w, win_h,
-                fullscreen ? " (fullscreen)" : "");
+                g_fullscreen ? " (fullscreen)" : "");
+    // APOC_BACKGROUND (test runs): the window opens behind the others, without focus.
+    const bool background = std::getenv("APOC_BACKGROUND") != nullptr;
     // The renderer: Vulkan if chosen (and it starts), otherwise OpenGL.
     auto open_window = [&](Backend b) {
         render_select(b);
@@ -601,13 +379,13 @@ bool host_init(const char* title, int scale) {
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
             SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
         }
-        if (std::getenv("APOC_BACKGROUND")) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+        if (background) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
         g_window = create_window(title, win_w, win_h,
                                  SDL_WINDOW_RESIZABLE | (b == Backend::Vulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL) |
-                                     (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+                                     (g_fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
         if (!g_window) return false;
 #ifdef _WIN32
-        if (std::getenv("APOC_BACKGROUND"))  // test runs: open behind the other windows, without focus
+        if (background)
             SetWindowPos((HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr),
                          HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 #endif
@@ -618,12 +396,12 @@ bool host_init(const char* title, int scale) {
         return false;
     };
     const bool want_vulkan = g_renderer_override >= 0 ? g_renderer_override == 1 : g_gfx.vulkan;
-    g_gl_ok = want_vulkan && open_window(Backend::Vulkan);
-    if (want_vulkan && !g_gl_ok) {
+    g_video_ok = want_vulkan && open_window(Backend::Vulkan);
+    if (want_vulkan && !g_video_ok) {
         log_msg(LogCat::Host, "Vulkan did not start; using OpenGL");
         host_toast("Vulkan unavailable - using OpenGL");
     }
-    if (!g_gl_ok) g_gl_ok = open_window(Backend::OpenGL);
+    if (!g_video_ok) g_video_ok = open_window(Backend::OpenGL);
 #ifdef _WIN32
     if (g_gl_crashed && !want_vulkan && g_renderer_override != 0) {  // (not when --renderer opengl asks for it)
         log_msg(LogCat::Host, "the OpenGL driver crashed while opening the window: switching to Vulkan and restarting");
@@ -633,21 +411,20 @@ bool host_init(const char* title, int scale) {
         restart_self();
     }
 #endif
-    if (!g_gl_ok && !want_vulkan) {  // OpenGL failed: Vulkan instead
+    if (!g_video_ok && !want_vulkan) {  // OpenGL failed: Vulkan instead
         log_msg(LogCat::Host, "OpenGL did not start; using Vulkan");
-        g_gl_ok = open_window(Backend::Vulkan);
-        if (g_gl_ok) host_toast("OpenGL unavailable - using Vulkan");
+        g_video_ok = open_window(Backend::Vulkan);
+        if (g_video_ok) host_toast("OpenGL unavailable - using Vulkan");
     }
-    if (!g_gl_ok) fatal("Could not start the graphics: this needs OpenGL 3.3 or Vulkan 1.3.");
+    if (!g_video_ok) fatal("Could not start the graphics: this needs OpenGL 3.3 or Vulkan 1.3.");
     log_msg(LogCat::Host, "renderer: %s", render_backend_name(render_backend()));
-    // On a ~60 Hz display, pace the emulation by vsync: one emulated frame per refresh
-    // gives perfectly even frame times (the game's 30 fps then shows each frame for
-    // exactly two refreshes). Other refresh rates fall back to a timer.
+    // On a ~60 Hz display, pace the emulation by vsync: one emulated frame per refresh gives
+    // perfectly even frame times (the game's 30 fps then shows each frame for exactly two
+    // refreshes). Other refresh rates fall back to a timer.
     if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_window))) {
         if (mode->refresh_rate > 0) g_refresh_hz = mode->refresh_rate;
         g_vsync_pacing = g_refresh_hz > 58.5f && g_refresh_hz < 61.5f;
-        log_msg(LogCat::Host, "display refresh %.2f Hz: %s", g_refresh_hz,
-                g_vsync_pacing ? "pacing by vsync" : "pacing by timer");
+        log_msg(LogCat::Host, "display refresh %.2f Hz: %s", g_refresh_hz, g_vsync_pacing ? "pacing by vsync" : "pacing by timer");
     }
     present_set_vsync(g_vsync_pacing);
     g_vsync_active = g_vsync_pacing;
@@ -668,1088 +445,36 @@ void host_shutdown() {
     SDL_Quit();
 }
 
-static void run_settings_menu();
-
-// The mouse pointer hides after 2 s without mouse use and shows again when it is used.
-// Called with every event (null = no event, just the timer) by both event loops.
-static void mouse_autohide(const SDL_Event* e) {
-    static uint64_t used = SDL_GetTicks();
-    if (e && (e->type == SDL_EVENT_MOUSE_MOTION || e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_WHEEL)) {
-        used = SDL_GetTicks();
-        if (!SDL_CursorVisible()) SDL_ShowCursor();
-    }
-    if (!e && SDL_CursorVisible() && SDL_GetTicks() - used > 2000) SDL_HideCursor();
-}
-
 void host_poll() {
-    bool open_menu = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         mouse_autohide(&e);
-        switch (e.type) {
-            case SDL_EVENT_QUIT: g_quit = true; break;
-            case SDL_EVENT_KEY_DOWN:
-                if (e.key.scancode == SDL_SCANCODE_ESCAPE) g_quit = true;
-                break;
-            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: apply_graphics(); break;
-            // JOYSTICK_ADDED fires for every device (gamepads included); add_device
-            // decides between the gamepad and raw-joystick paths and ignores repeats.
-            case SDL_EVENT_JOYSTICK_ADDED: add_device(e.jdevice.which); break;
-            case SDL_EVENT_GAMEPAD_ADDED: add_device(e.gdevice.which); break;
-            case SDL_EVENT_JOYSTICK_REMOVED: remove_device(e.jdevice.which); break;
-            case SDL_EVENT_GAMEPAD_REMOVED: remove_device(e.gdevice.which); break;
-        }
+        if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_ESCAPE)) g_quit = true;
+        if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) apply_graphics();
+        device_event(e);
     }
-    const bool* keys = SDL_GetKeyboardState(nullptr);
-    g_turbo = g_force_turbo || keys[SDL_SCANCODE_TAB];
-
+    g_turbo = g_force_turbo || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_TAB];
     // Holding SELECT + START for ~1.5 s opens the settings from a controller.
     static int combo_frames = 0;
-    uint16_t held = (uint16_t)~host_pad(0).buttons;
+    const uint16_t held = (uint16_t)~host_pad(0).buttons;
     combo_frames = ((held & B_SELECT) && (held & B_START)) ? combo_frames + 1 : 0;
-    if (combo_frames == 90) open_menu = true;
     mouse_autohide(nullptr);
-    if (open_menu && g_gl_ok) run_settings_menu();
+    if (combo_frames == 90 && g_video_ok) run_settings_menu();
 }
 
 void host_set_turbo(bool on) { g_force_turbo = on; }
-
 bool host_quit_requested() { return g_quit; }
 void host_request_quit() { g_quit = true; }
-
-// Button name as in --press ("SQUARE") -> pad bit, 0 if unknown.
-static uint16_t button_bit(const std::string& name) {
-    static const struct { const char* name; uint16_t bit; } names[] = {
-        {"SELECT", B_SELECT}, {"START", B_START}, {"UP", B_UP}, {"RIGHT", B_RIGHT}, {"DOWN", B_DOWN},
-        {"LEFT", B_LEFT}, {"L2", B_L2}, {"R2", B_R2}, {"L1", B_L1}, {"R1", B_R1},
-        {"TRIANGLE", B_TRIANGLE}, {"CIRCLE", B_CIRCLE}, {"CROSS", B_CROSS}, {"SQUARE", B_SQUARE},
-    };
-    for (auto& n : names)
-        if (name == n.name) return n.bit;
-    return 0;
-}
-
-// "--press START@1200+10,CROSS@1500" : button@frame[+duration frames, default 6]
-bool host_parse_press_script(const char* spec) {
-    std::string s(spec);
-    size_t pos = 0;
-    while (pos < s.size()) {
-        size_t end = s.find(',', pos);
-        if (end == std::string::npos) end = s.size();
-        std::string item = s.substr(pos, end - pos);
-        pos = end + 1;
-        size_t at = item.find('@');
-        if (at == std::string::npos) return false;
-        std::string name = item.substr(0, at);
-        uint64_t from = std::strtoull(item.c_str() + at + 1, nullptr, 10), len = 6;
-        if (size_t plus = item.find('+'); plus != std::string::npos) len = std::strtoull(item.c_str() + plus + 1, nullptr, 10);
-        const uint16_t bit = button_bit(name);
-        if (!bit) return false;
-        g_script.push_back({bit, from, from + len});
-    }
-    return true;
-}
-
 uint64_t host_frame_count() { return g_frame; }
-
-namespace {
-
-// Default keyboard layout (used until the keyboard is remapped in the settings screen).
-// WASD/arrows move; I/J/K/L are the shape buttons laid out like the pad (aim/fire).
-const struct { SDL_Scancode sc; uint16_t bit; } kDefaultKeys[] = {
-    {SDL_SCANCODE_UP, B_UP}, {SDL_SCANCODE_DOWN, B_DOWN}, {SDL_SCANCODE_LEFT, B_LEFT}, {SDL_SCANCODE_RIGHT, B_RIGHT},
-    {SDL_SCANCODE_W, B_UP}, {SDL_SCANCODE_S, B_DOWN}, {SDL_SCANCODE_A, B_LEFT}, {SDL_SCANCODE_D, B_RIGHT},
-    {SDL_SCANCODE_I, B_TRIANGLE}, {SDL_SCANCODE_L, B_CIRCLE}, {SDL_SCANCODE_K, B_CROSS}, {SDL_SCANCODE_J, B_SQUARE},
-    {SDL_SCANCODE_Q, B_L1}, {SDL_SCANCODE_E, B_R1}, {SDL_SCANCODE_Z, B_L2}, {SDL_SCANCODE_C, B_R2},
-    {SDL_SCANCODE_RETURN, B_START}, {SDL_SCANCODE_BACKSPACE, B_SELECT},
-};
-
-uint8_t to8(int v) { return (uint8_t)std::clamp((v + 32768) >> 8, 0, 255); }
-
-// Sticks of an SDL gamepad. In digital mode the left stick doubles as the d-pad and the
-// right stick aims: it presses the shape button(s) in its direction (twin-stick style).
-uint16_t gamepad_sticks(SDL_Gamepad* p, bool analog, PadState& s) {
-    uint16_t pressed = 0;
-    int lx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
-    int rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY);
-    if (!s.has_sticks) {  // first gamepad provides the analog values
-        s.has_sticks = true;
-        s.lx = to8(lx); s.ly = to8(ly); s.rx = to8(rx); s.ry = to8(ry);
-    }
-    if (analog) return 0;
-    if (lx < -16000) pressed |= B_LEFT;
-    if (lx > 16000) pressed |= B_RIGHT;
-    if (ly < -16000) pressed |= B_UP;
-    if (ly > 16000) pressed |= B_DOWN;
-    if ((int64_t)rx * rx + (int64_t)ry * ry > 20000LL * 20000) {
-        if (ry < -12000) pressed |= B_TRIANGLE;
-        if (ry > 12000) pressed |= B_CROSS;
-        if (rx < -12000) pressed |= B_SQUARE;
-        if (rx > 12000) pressed |= B_CIRCLE;
-    }
-    return pressed;
-}
-
-// Mouse: holding the left button fires toward the cursor (the shape button(s) in the
-// direction from the screen centre, where the player usually is); right button = R1.
-uint16_t mouse_buttons() {
-    if (!g_window || !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS)) return 0;
-    float wx, wy;
-    SDL_MouseButtonFlags b = SDL_GetMouseState(&wx, &wy);
-    uint16_t pressed = 0;
-    if (b & SDL_BUTTON_RMASK) pressed |= B_R1;
-    if (b & SDL_BUTTON_LMASK) {
-        float x, y;
-        present_window_to_game(wx, wy, &x, &y);  // 640x480 space over the game image
-        float dx = x - 320.0f, dy = y - 270.0f;
-        float len = std::sqrt(dx * dx + dy * dy);
-        if (len > 8.0f) {
-            if (dy < -0.38f * len) pressed |= B_TRIANGLE;
-            if (dy > 0.38f * len) pressed |= B_CROSS;
-            if (dx < -0.38f * len) pressed |= B_SQUARE;
-            if (dx > 0.38f * len) pressed |= B_CIRCLE;
-        }
-    }
-    return pressed;
-}
-
-// Free aim: the exact direction of the right stick, or of the cursor while the left mouse
-// button is held (x right, y down). False when neither is aiming.
-bool free_aim(float& x, float& y) {
-    for (auto& dev : g_devices) {
-        if (!dev.pad) continue;
-        int rx = SDL_GetGamepadAxis(dev.pad, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(dev.pad, SDL_GAMEPAD_AXIS_RIGHTY);
-        if ((int64_t)rx * rx + (int64_t)ry * ry > 20000LL * 20000) {  // same threshold as gamepad_sticks
-            x = (float)rx; y = (float)ry;
-            return true;
-        }
-    }
-    if (!g_window || !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS)) return false;
-    float wx, wy;
-    if (!(SDL_GetMouseState(&wx, &wy) & SDL_BUTTON_LMASK)) return false;
-    present_window_to_game(wx, wy, &x, &y);
-    x -= 320.0f; y -= 270.0f;  // ponytail: assumes the player is near screen centre, like mouse_buttons()
-    return x * x + y * y > 64.0f;
-}
-
-}  // namespace
-
-constexpr int kAimDeadband = 16;        // 4096ths of a turn (1.4 degrees): smaller stick changes are noise
-constexpr int kStanceHysteresis = 96;   // 8.4 degrees past a stance border before the stance changes
-
-// The game turns the fire buttons into a vector (+471 y, +472 x, signed bytes, +-127 per
-// button) and aims at its atan2 (+476), so the buttons give only 8 directions. When the
-// game registered a fire direction, replace it by the exact stick / cursor direction; the
-// game's own code then does the rest (upper-body pose within each 45-degree sector, auto
-// aim, fire rate).
-extern "C" void psx_hook_aim(R3000* c) {
-    static int last = -1;  // game angle last written (-1: not firing)
-    const uint32_t p = c->r[16];
-    float x, y;
-    if (!(MEM_R8(c, p + 471) | MEM_R8(c, p + 472)) || !free_aim(x, y)) {
-        last = -1;
-        return;
-    }
-    // the game's angle: (1024 - atan2(-y, x)) in 4096ths of a turn, 0 = up the screen
-    constexpr double kUnit = 6.283185307179586 / 4096;
-    int a = (1024 - (int)std::lround(std::atan2(-y, x) / kUnit)) & 4095;
-    if (last >= 0) {
-        auto diff = [](int u, int v) { return ((u - v + 2048) & 4095) - 2048; };
-        if (std::abs(diff(a, last)) < kAimDeadband) a = last;  // stick noise: keep the aim still
-        // The player's stance is one of 8 (45 degrees each, centred on 0, 512, ...: see
-        // 80060834); near a border noise flipped it every tick, so stay until clearly past it.
-        const int centre = ((last + 256) & 4095) & ~511, d = diff(a, centre);
-        if (std::abs(d) > 255 && std::abs(d) <= 255 + kStanceHysteresis) a = (centre + (d > 0 ? 255 : -255)) & 4095;
-    }
-    last = a;
-    const double t = (1024 - a) * kUnit;
-    MEM_W8(c, p + 471, (uint8_t)(int8_t)std::lround(-std::sin(t) * 127));
-    MEM_W8(c, p + 472, (uint8_t)(int8_t)std::lround(std::cos(t) * 127));
-}
-
-// Whether every device drives player 1 (the "All" choice, or the chosen controller is unplugged).
-static bool input_all() {
-    if (g_input.empty()) return true;
-    if (g_input == "keyboard") return false;
-    for (auto& d : g_devices)
-        if (device_guid(d) == g_input) return false;
-    return true;
-}
-
-PadState host_pad(int port, bool analog) {
-    uint16_t pressed = 0;
-    PadState s;
-    const bool all = input_all();
-    if (port == 0 && (all || g_input == "keyboard")) {
-        const bool* k = SDL_GetKeyboardState(nullptr);
-        if (g_key_custom) {
-            for (int i = 0; i < 16; i++)
-                if (g_keys[i] != SDL_SCANCODE_UNKNOWN && k[g_keys[i]]) pressed |= (uint16_t)(1u << i);
-        } else {
-            for (auto& m : kDefaultKeys)
-                if (k[m.sc]) pressed |= m.bit;
-        }
-        pressed |= mouse_buttons();
-    }
-    for (auto& dev : g_devices) {
-        if (port != 0) break;
-        if (!all && device_guid(dev) != g_input) continue;
-        if (auto it = g_layouts.find(device_guid(dev)); it != g_layouts.end()) {
-            SDL_Joystick* j = device_joystick(dev);
-            for (int i = 0; i < 16; i++)
-                if (bind_active(j, it->second.bind[i])) pressed |= (uint16_t)(1u << i);
-            if (dev.pad) pressed |= gamepad_sticks(dev.pad, analog, s);
-            continue;
-        }
-        if (SDL_Joystick* j = dev.joy) {
-            // Generic DirectInput-style layout: hat = d-pad, left stick = d-pad,
-            // buttons 0-3 = face buttons, 4-7 = shoulders, 8/9 = select/start.
-            static const uint16_t btn_map[] = {B_CROSS, B_CIRCLE, B_SQUARE, B_TRIANGLE, B_L1, B_R1,
-                                               B_L2, B_R2, B_SELECT, B_START, B_L3, B_R3};
-            int nb = SDL_GetNumJoystickButtons(j);
-            for (int b = 0; b < nb && b < (int)(sizeof btn_map / sizeof *btn_map); b++)
-                if (SDL_GetJoystickButton(j, b)) pressed |= btn_map[b];
-            if (SDL_GetNumJoystickHats(j) > 0) {
-                Uint8 h = SDL_GetJoystickHat(j, 0);
-                if (h & SDL_HAT_UP) pressed |= B_UP;
-                if (h & SDL_HAT_DOWN) pressed |= B_DOWN;
-                if (h & SDL_HAT_LEFT) pressed |= B_LEFT;
-                if (h & SDL_HAT_RIGHT) pressed |= B_RIGHT;
-            }
-            if (SDL_GetNumJoystickAxes(j) >= 2) {
-                int x = SDL_GetJoystickAxis(j, 0), y = SDL_GetJoystickAxis(j, 1);
-                if (x < -16000) pressed |= B_LEFT;
-                if (x > 16000) pressed |= B_RIGHT;
-                if (y < -16000) pressed |= B_UP;
-                if (y > 16000) pressed |= B_DOWN;
-            }
-            continue;
-        }
-        SDL_Gamepad* p = dev.pad;
-        struct { SDL_GamepadButton b; uint16_t bit; } map[] = {
-            {SDL_GAMEPAD_BUTTON_DPAD_UP, B_UP}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN, B_DOWN},
-            {SDL_GAMEPAD_BUTTON_DPAD_LEFT, B_LEFT}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, B_RIGHT},
-            {SDL_GAMEPAD_BUTTON_SOUTH, B_CROSS}, {SDL_GAMEPAD_BUTTON_EAST, B_CIRCLE},
-            {SDL_GAMEPAD_BUTTON_WEST, B_SQUARE}, {SDL_GAMEPAD_BUTTON_NORTH, B_TRIANGLE},
-            {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, B_L1}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, B_R1},
-            {SDL_GAMEPAD_BUTTON_START, B_START}, {SDL_GAMEPAD_BUTTON_BACK, B_SELECT},
-            {SDL_GAMEPAD_BUTTON_LEFT_STICK, B_L3}, {SDL_GAMEPAD_BUTTON_RIGHT_STICK, B_R3},
-        };
-        for (auto& m : map)
-            if (SDL_GetGamepadButton(p, m.b)) pressed |= m.bit;
-        if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) pressed |= B_L2;
-        if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) pressed |= B_R2;
-        pressed |= gamepad_sticks(p, analog, s);
-    }
-    if (port == 0)
-        for (auto& sp : g_script)
-            if (g_frame >= sp.from && g_frame < sp.to) pressed |= sp.bit;
-    s.buttons = (uint16_t)~pressed;
-    s.connected = port == 0;
-    return s;
-}
-
-void host_rumble(int port, uint8_t small_motor, uint8_t large_motor) {
-    if (port != 0) return;
-    static uint8_t last_small = 0, last_large = 0;
-    static uint64_t last_ns = 0;
-    uint64_t now = SDL_GetTicksNS();
-    // refresh at least every 50 ms so a held rumble keeps going (each call lasts 100 ms)
-    if (small_motor == last_small && large_motor == last_large && now - last_ns < 50000000ull) return;
-    last_small = small_motor;
-    last_large = large_motor;
-    last_ns = now;
-    Uint16 low = (Uint16)(large_motor * 257), high = (Uint16)(small_motor ? 0xFFFF : 0);
-    for (auto& d : g_devices)
-        if (d.pad) SDL_RumbleGamepad(d.pad, low, high, (low || high) ? 100 : 0);
-}
-
-std::vector<uint64_t> g_shot_frames;  // --screenshot F1,F2,... PREFIX
-std::string g_shot_prefix;
-int g_start_state = -1;  // --chapter: the state slot loaded at frame 30
-
-static void maybe_screenshot() {
-    for (uint64_t f : g_shot_frames)
-        if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
-}
-
-uint64_t g_images = 0;      // distinct images shown (for the fps in the title)
-uint64_t g_last_image = ~0ull;
-
-// Lines to cut off at the top and at the bottom of an image `h` lines high: in widescreen a
-// movie (made for 4:3, with black bands in the picture) is enlarged to the full width, keeping
-// its proportions, and loses what no longer fits (1/8 at each edge for 16:9).
-static int movie_crop(int h) {
-    if (g_gfx.aspect == Aspect::A4_3 || g_gfx.aspect == Aspect::Stretch || !gpu_movie_playing()) return 0;
-    return (int)((float)h * (1.0f - std::max(g_gte_widescreen, 0.75f)) * 0.5f);  // (ultra-wide: as 16:9)
-}
-
-// Draws the game image, then swaps.
-static void draw_game(const GpuDisplay& d) {
-    int w = std::clamp(d.w, 1, 1024), h = std::clamp(d.h, 1, 512);
-    PresentOptions opt = present_options();
-    const int crop = movie_crop(h);
-    // A replacement movie (movie.cpp) in place of the game's own movie picture, cropped like it.
-    if (int mw = 0, mh = 0; d.enabled && d.rgb24 && gpu_movie_playing()) {
-        if (const uint32_t* px = movie_picture(&mw, &mh)) {
-            const int mc = (int)((int64_t)crop * mh / h);
-            present_game_pixels(px + (size_t)mc * mw, mw, mh - 2 * mc, opt);
-            if (g_last_image != (uint64_t)(uintptr_t)px) g_images++;  // (each new movie frame)
-            g_last_image = (uint64_t)(uintptr_t)px;
-            maybe_screenshot();
-            draw_toast();
-            draw_fps_counter();
-            present_swap();
-            return;
-        }
-    }
-    // 15-bit images drawn by the hardware renderer are shown straight from its VRAM; 24-bit
-    // movie frames (and the software renderer) go through the CPU copy.
-    if (d.enabled && !d.rgb24 && hw_active()) {
-        int px, py, pw, ph;
-        unsigned vram = hw_display_texture(d.x, d.y, w, h, &px, &py, &pw, &ph);
-        const int cs = crop * hw_scale();
-        present_game_texture(vram, 1024 * hw_scale(), 512 * hw_scale(), px, py + cs, pw, ph - 2 * cs, h - 2 * crop, opt);
-        if (g_display_flips != g_last_image) g_images++;
-        g_last_image = g_display_flips;
-        maybe_screenshot();  // before the toasts: the picture is the game alone
-        draw_toast();
-        draw_version();
-        draw_fps_counter();
-        present_swap();
-        return;
-    }
-    if (g_display_flips != g_last_image) g_images++;
-    g_last_image = g_display_flips;
-    g_pixels.resize((size_t)w * h);
-    if (d.enabled) {
-        for (int y = 0; y < h; y++) {
-            uint32_t* row = &g_pixels[(size_t)y * w];
-            int vy = (d.y + y) & 511;
-            if (d.rgb24) {
-                const uint8_t* src = (const uint8_t*)&d.vram[vy * 1024];
-                for (int x = 0; x < w; x++) {
-                    int bx = (d.x * 2 + x * 3) % 2048;
-                    uint8_t r = src[bx], g = src[(bx + 1) % 2048], b = src[(bx + 2) % 2048];
-                    row[x] = (uint32_t)r << 16 | (uint32_t)g << 8 | b;
-                }
-            } else {
-                for (int x = 0; x < w; x++) {
-                    uint16_t p = d.vram[vy * 1024 + ((d.x + x) & 1023)];
-                    uint32_t r = (p & 31) << 3, g = ((p >> 5) & 31) << 3, b = ((p >> 10) & 31) << 3;
-                    row[x] = (r | r >> 5) << 16 | (g | g >> 5) << 8 | (b | b >> 5);
-                }
-            }
-        }
-    } else {
-        std::fill(g_pixels.begin(), g_pixels.end(), 0);
-    }
-    present_game_pixels(g_pixels.data() + (size_t)crop * w, w, h - 2 * crop, opt);
-    maybe_screenshot();
-    draw_toast();
-    draw_version();  // (the title screen's moving background is a 24-bit movie too)
-    draw_fps_counter();
-    present_swap();
-}
 
 void host_present(const GpuDisplay& d) {
     g_frame++;
     movie_vblank(d.enabled && d.rgb24 && gpu_movie_playing());
     if (g_start_state >= 0 && g_frame == 30) state_request_load(g_start_state);
     state_poll_load(g_cpu);
-    if (!g_gl_ok) return;
-    static uint64_t fps_t0 = SDL_GetTicksNS(), fps_frames = 0, fps_images0 = 0, last_present = 0, dt_min = ~0ull,
-                    dt_max = 0;
-    uint64_t t_now = SDL_GetTicksNS();
-    static uint64_t dt_max_seen = 0;
-    static int slow_seen = 0;
-    if (last_present) {
-        dt_min = std::min(dt_min, t_now - last_present);
-        dt_max = std::max(dt_max, t_now - last_present);
-        dt_max_seen = std::max(dt_max_seen, t_now - last_present);
-        if (t_now - last_present > 50'000'000ull) slow_seen++;
-    }
-    last_present = t_now;
-    if (++fps_frames == 60) {
-        uint64_t now = SDL_GetTicksNS();
-        double secs = (double)(now - fps_t0) / 1e9;
-        double fps = 60.0 / secs, images = (double)(g_images - fps_images0) / secs;
-        g_fps_shown = images;
-        LOG(Host, "frame times: min %.2f ms, max %.2f ms; audio: queue min %d, underruns %d, drops %d",
-            dt_min / 1e6, dt_max / 1e6, g_audio_min_queued, g_audio_underruns, g_audio_drops);
-        g_audio_min_queued = 1 << 30;
-        dt_min = ~0ull;
-        dt_max = 0;
-        char title[96];
-        std::snprintf(title, sizeof title, "Repocalypse %s - %.0f fps%s", kVersion, images,
-                      g_turbo ? " (fast-forward)" : "");
-        // only when it changes: renaming the window goes through Windows' window manager and
-        // could hold the frame up by several ms (a hiccup every second)
-        static std::string shown_title;
-        if (shown_title != title) {
-            shown_title = title;
-            SDL_SetWindowTitle(g_window, title);
-        }
-        LOG(Host, "frame %llu: %.1f Hz emulated, %.1f images/s", (unsigned long long)g_frame, fps, images);
-        // once a minute in every log: the frame rate and slow moments of that minute
-        static uint64_t minute_t0 = now, minute_images = g_images, minute_worst = 0;
-        static int minute_slow = 0;
-        minute_worst = std::max(minute_worst, dt_max_seen);
-        minute_slow += slow_seen;
-        dt_max_seen = 0;
-        slow_seen = 0;
-        if (now - minute_t0 >= 60'000'000'000ull) {
-            const double m = (double)(now - minute_t0) / 1e9;
-            log_msg(LogCat::Host, "performance: %.1f fps, slowest frame %.0f ms, %d frames over 50 ms (frame %llu)",
-                    (double)(g_images - minute_images) / m, minute_worst / 1e6, minute_slow, (unsigned long long)g_frame);
-            minute_t0 = now;
-            minute_images = g_images;
-            minute_worst = 0;
-            minute_slow = 0;
-        }
-        fps_t0 = now;
-        fps_frames = 0;
-        fps_images0 = g_images;
-    }
+    if (!g_video_ok) return;
+    frame_stats();
     draw_game(d);
-}
-
-// ================================================================ enhancement settings
-// Settings changed from the menus: the settings screen (F1 -> Enhancements, ids 0..5) and the
-// game's own Options -> Enhancements page (game_menu.cpp). Changes apply and save at once.
-
-// Font scaling of the game's menus (percent, game_menu.cpp).
-constexpr int kFontScaleChoices[] = {30, 40, 50, 60, 70, 80};
-// Frame rates offered in the menus (30 = the original).
-constexpr int kMenuFpsChoices[] = {30, 60};
-// Display choices: resolution and aspect ratio together (the game's Enhancements page).
-const struct { const char* name; int scale; Aspect aspect; } kDisplays[] = {
-    {"320x240 (Original)", 1, Aspect::A4_3},     {"960x720", 3, Aspect::A4_3},
-    {"1280x720 (Widescreen)", 3, Aspect::A16_9}, {"1280x800 (Steam Deck)", 4, Aspect::A16_10},
-    {"1440x1080", 5, Aspect::A4_3},              {"1920x1080 (Widescreen)", 5, Aspect::A16_9},
-    {"2560x1080 (Ultra-wide)", 5, Aspect::A21_9}, {"3840x1080 (Super ultra-wide)", 5, Aspect::A32_9},
-    {"2560x1440 (Widescreen)", 6, Aspect::A16_9}, {"3440x1440 (Ultra-wide)", 6, Aspect::A21_9},
-    {"5120x1440 (Super ultra-wide)", 6, Aspect::A32_9}, {"2880x2160", 9, Aspect::A4_3},
-    {"3840x2160 (4K)", 9, Aspect::A16_9},
-};
-
-// The Display choice for the current settings: same aspect ratio (16:10 for Stretch), the highest
-// resolution at or below the setting (8x on a 1080p screen shows as 1080).
-int display_choice() {
-    const Aspect a = g_gfx.aspect == Aspect::Stretch ? Aspect::A16_10 : g_gfx.aspect;
-    int k = -1;
-    for (int i = 0; i < (int)std::size(kDisplays); i++)
-        if (kDisplays[i].aspect == a && (k < 0 || kDisplays[i].scale <= g_gfx.scale)) k = i;
-    return std::max(k, 0);
-}
-
-const char* enh_name(int id) {
-    static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
-                                  "Font scaling", "Renderer", "Screen mode", "Display",
-                                  "Autosave", "One-liners", "Anti-aliasing", "Infinite health", "Infinite lives",
-                                  "All weapons", "Infinite ammo", "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font"};
-    return id >= 0 && id < (int)std::size(names) ? names[id] : "";
-}
-
-std::string enh_value(int id) {
-    switch (id) {
-        case E_FPS: return g_gfx.fps == 30 ? "30 (original)" : "60";
-        case E_SIM: return sim60_label();
-        case E_DRAWDIST: return drawdist_label();
-        case E_PRECISE: return g_gte_precise ? "On (no wobble)" : "Off (original)";
-        case E_SMOOTH_FONT: return g_smooth_font ? "On" : "Off (original)";
-        case E_FONT_SCALE: return std::to_string(g_menu_zoom) + "%";
-        case E_RENDERER:
-            return std::string(g_gfx.vulkan ? "Vulkan" : "OpenGL") +
-                   ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)");
-        case E_SCREEN: return g_fullscreen ? "Full" : "Window";
-        case E_DISPLAY: return kDisplays[display_choice()].name;
-        case E_AUTOSAVE: return g_autosave ? "On" : "Off";
-        case E_SUBTITLES: return g_subtitles ? "On" : "Off";
-        case E_AA: return kAaNames[std::clamp(g_gfx.aa, 0, 3)];
-        case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
-        case E_GAME_FONT: {
-            const std::string name = texreplace_font_name();
-            if (name.empty()) return "Original (no font in assets/fonts)";
-            return g_game_font ? name : "Original";
-        }
-        case E_CRT: return g_gfx.crt ? "On" : "Off";
-        case E_CHEAT_HEALTH:
-        case E_CHEAT_LIVES:
-        case E_CHEAT_WEAPONS:
-        case E_CHEAT_AMMO:
-        case E_CHEAT_BOMBS:
-        case E_CHEAT_ONEHIT: return cheat_on(id - E_CHEAT_HEALTH) ? "On" : "Off";
-    }
-    return "";
-}
-
-// The next (dir 1) or previous (dir -1) choice of setting `id`.
-void enh_change(int id, int dir) {
-    auto cycle = [dir](const int* list, int n, int cur) {
-        int k = 0;
-        while (k < n && list[k] != cur) k++;
-        if (k == n) return list[dir > 0 ? 0 : n - 1];  // not one of the choices: start at an end
-        return list[(k + dir + n) % n];
-    };
-    switch (id) {
-        case E_FPS: g_gfx.fps = cycle(kMenuFpsChoices, (int)std::size(kMenuFpsChoices), g_gfx.fps); break;
-        case E_SIM: {  // 60 Hz simulation (sim60.cpp)
-            static const int order[] = {1, 0, 2};  // level 1, off, all levels
-            g_sim60_setting = cycle(order, 3, g_sim60_setting);
-            sim60_apply();
-            break;
-        }
-        case E_DRAWDIST: g_draw_distance = cycle(kDrawDistChoices, (int)std::size(kDrawDistChoices), g_draw_distance); break;
-        case E_PRECISE: g_gte_precise = !g_gte_precise; break;  // gte.cpp
-        case E_SMOOTH_FONT: g_smooth_font = !g_smooth_font; break;  // gpu.cpp
-        case E_FONT_SCALE: g_menu_zoom = cycle(kFontScaleChoices, (int)std::size(kFontScaleChoices), g_menu_zoom); break;  // game_menu.cpp
-        case E_RENDERER: g_gfx.vulkan = !g_gfx.vulkan; break;  // takes effect when the game is started again
-        case E_SCREEN:
-            g_fullscreen = !g_fullscreen;
-            if (g_window) SDL_SetWindowFullscreen(g_window, g_fullscreen);
-            break;
-        case E_AUTOSAVE: g_autosave = !g_autosave; break;  // savestate.cpp
-        case E_SUBTITLES: g_subtitles = !g_subtitles; break;  // subtitles.cpp
-        case E_AA: g_gfx.aa = (g_gfx.aa + dir + 4) % 4; break;
-        case E_FPS_COUNTER: g_fps_counter = !g_fps_counter; break;
-        case E_CRT: g_gfx.crt = !g_gfx.crt; break;  // present.cpp / present_vk.cpp
-        case E_GAME_FONT:  // texreplace.cpp
-            g_game_font = !g_game_font;
-            texreplace_font_changed();
-            break;
-        case E_CHEAT_HEALTH:
-        case E_CHEAT_LIVES:
-        case E_CHEAT_WEAPONS:
-        case E_CHEAT_AMMO:
-        case E_CHEAT_BOMBS:
-        case E_CHEAT_ONEHIT:  // cheats.cpp; never saved
-            cheat_set(id - E_CHEAT_HEALTH, !cheat_on(id - E_CHEAT_HEALTH));
-            return;
-        case E_DISPLAY: {  // (supersampling, which renders more, is the Anti-aliasing row's)
-            const int n = (int)std::size(kDisplays), k = (display_choice() + dir + n) % n;
-            g_gfx.scale = kDisplays[k].scale;
-            g_gfx.aspect = kDisplays[k].aspect;
-            break;
-        }
-        default: return;
-    }
-    log_msg(LogCat::Host, "setting changed: %s = %s", enh_name(id), enh_value(id).c_str());
-    apply_graphics();
-    save_settings();
-}
-
-// ================================================================ settings screen (F1)
-
-namespace {
-
-// Snapshot of a joystick's inputs, used to detect "the next thing the user pressed".
-struct JoySnapshot {
-    std::vector<bool> buttons;
-    std::vector<Uint8> hats;
-    std::vector<Sint16> axes;
-};
-
-JoySnapshot snapshot(SDL_Joystick* j) {
-    JoySnapshot s;
-    for (int i = 0; i < SDL_GetNumJoystickButtons(j); i++) s.buttons.push_back(SDL_GetJoystickButton(j, i));
-    for (int i = 0; i < SDL_GetNumJoystickHats(j); i++) s.hats.push_back(SDL_GetJoystickHat(j, i));
-    for (int i = 0; i < SDL_GetNumJoystickAxes(j); i++) s.axes.push_back(SDL_GetJoystickAxis(j, i));
-    return s;
-}
-
-// Returns true and fills `out` when something changed from `base` to a new press.
-bool detect_press(SDL_Joystick* j, const JoySnapshot& base, Bind* out) {
-    for (int i = 0; i < (int)base.buttons.size(); i++)
-        if (!base.buttons[i] && SDL_GetJoystickButton(j, i)) { *out = {Bind::Button, (uint8_t)i, 0}; return true; }
-    for (int i = 0; i < (int)base.hats.size(); i++) {
-        Uint8 h = SDL_GetJoystickHat(j, i);
-        for (Uint8 dir : {SDL_HAT_UP, SDL_HAT_DOWN, SDL_HAT_LEFT, SDL_HAT_RIGHT})
-            if ((h & dir) && !(base.hats[i] & dir)) { *out = {Bind::Hat, (uint8_t)i, (int8_t)dir}; return true; }
-    }
-    for (int i = 0; i < (int)base.axes.size(); i++) {
-        int v = SDL_GetJoystickAxis(j, i);
-        if (std::abs(v - base.axes[i]) > 20000 && std::abs(v) > 16000) {
-            *out = {Bind::Axis, (uint8_t)i, (int8_t)(v > 0 ? 1 : -1)};
-            return true;
-        }
-    }
-    return false;
-}
-
-bool any_input_held(SDL_Joystick* j) {
-    for (int i = 0; i < SDL_GetNumJoystickButtons(j); i++)
-        if (SDL_GetJoystickButton(j, i)) return true;
-    for (int i = 0; i < SDL_GetNumJoystickHats(j); i++)
-        if (SDL_GetJoystickHat(j, i) != SDL_HAT_CENTERED) return true;
-    return false;
-}
-
-// A centred menu box over the game. lines[0] is the title; a '	' splits a line into
-// a label and a value column. Sizes are in the overlay's 640x480 units.
-void draw_panel(const std::vector<std::string>& lines, int highlight) {
-    constexpr float kLine = 15.0f, kTitle = 21.0f, kPad = 12.0f, kGap = 26.0f;
-    SDL_Renderer* r = present_overlay_begin();
-    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-
-    const int n = (int)lines.size();
-    float label_w = 0, value_w = 0, whole_w = n ? ui_text_width(r, lines[0].c_str(), kTitle) : 0;
-    for (int i = 1; i < n; i++) {
-        const size_t tab = lines[i].find('	');
-        if (tab == std::string::npos) {
-            whole_w = std::max(whole_w, ui_text_width(r, lines[i].c_str(), kLine));
-        } else {
-            label_w = std::max(label_w, ui_text_width(r, lines[i].substr(0, tab).c_str(), kLine));
-            value_w = std::max(value_w, ui_text_width(r, lines[i].c_str() + tab + 1, kLine));
-        }
-    }
-    const float col = label_w > 0 ? label_w + kGap : 0;
-    const float w = std::min(620.0f, std::max({whole_w, col + value_w, 300.0f}) + 2 * kPad);
-    const float h = kPad + kTitle + 8 + kLine * (float)std::max(0, n - 1) + kPad;
-    const float x0 = std::round((640 - w) * 0.5f), y0 = std::round(std::max(4.0f, (480 - h) * 0.5f));
-
-    SDL_FRect box{x0, y0, w, h};
-    SDL_SetRenderDrawColor(r, 14, 10, 8, 235);
-    SDL_RenderFillRect(r, &box);
-    SDL_SetRenderDrawColor(r, 200, 60, 20, 255);
-    SDL_RenderRect(r, &box);
-    if (n) {
-        SDL_SetRenderDrawColor(r, 255, 170, 90, 255);
-        ui_text(r, x0 + (w - ui_text_width(r, lines[0].c_str(), kTitle)) * 0.5f, y0 + kPad - 4, lines[0].c_str(), kTitle);
-        SDL_SetRenderDrawColor(r, 200, 60, 20, 160);
-        SDL_FRect rule{x0 + kPad, y0 + kPad + kTitle, w - 2 * kPad, 1};
-        SDL_RenderFillRect(r, &rule);
-    }
-    for (int i = 1; i < n; i++) {
-        const float y = y0 + kPad + kTitle + 8 + kLine * (float)(i - 1);
-        if (i == highlight) {
-            SDL_SetRenderDrawColor(r, 200, 60, 20, 255);
-            SDL_FRect bar{x0 + kPad - 6, y, w - 2 * kPad + 12, kLine};
-            SDL_RenderFillRect(r, &bar);
-        }
-        SDL_SetRenderDrawColor(r, 255, 230, 180, 255);
-        const size_t tab = lines[i].find('	');
-        ui_text(r, x0 + kPad, y, lines[i].substr(0, tab).c_str(), kLine);
-        if (tab != std::string::npos) ui_text(r, x0 + kPad + col, y, lines[i].c_str() + tab + 1, kLine);
-    }
-    present_redraw(present_options());
-    present_overlay_end();
-    present_swap();
-}
-
-enum class MenuResult { Continue, Close, Quit };
-
-// Pumps events for the settings screen; returns key presses as SDL scancodes.
-MenuResult pump_menu_events(std::vector<SDL_Scancode>& keys) {
-    SDL_Event e;
-    mouse_autohide(nullptr);
-    while (SDL_PollEvent(&e)) {
-        mouse_autohide(&e);
-        switch (e.type) {
-            case SDL_EVENT_QUIT: return MenuResult::Quit;
-            case SDL_EVENT_KEY_DOWN: keys.push_back(e.key.scancode); break;
-            case SDL_EVENT_JOYSTICK_ADDED: add_device(e.jdevice.which); break;
-            case SDL_EVENT_GAMEPAD_ADDED: add_device(e.gdevice.which); break;
-            case SDL_EVENT_JOYSTICK_REMOVED: remove_device(e.jdevice.which); break;
-            case SDL_EVENT_GAMEPAD_REMOVED: remove_device(e.gdevice.which); break;
-        }
-    }
-    return MenuResult::Continue;
-}
-
-// Walks the user through pressing each PS1 button on `dev`. Returns false if cancelled.
-bool remap_device(const InputDevice& dev, Layout* out, bool* quit) {
-    SDL_Joystick* j = device_joystick(dev);
-    Layout lay;
-    const int total = (int)(sizeof kRemapOrder / sizeof *kRemapOrder);
-    for (int step = 0; step < total; step++) {
-        // wait until everything is released so one press is not taken twice
-        while (any_input_held(j)) {
-            std::vector<SDL_Scancode> keys;
-            if (pump_menu_events(keys) == MenuResult::Quit) { *quit = true; return false; }
-            SDL_Delay(10);
-        }
-        JoySnapshot base = snapshot(j);
-        for (;;) {
-            std::vector<SDL_Scancode> keys;
-            if (pump_menu_events(keys) == MenuResult::Quit) { *quit = true; return false; }
-            bool skip = false;
-            for (auto k : keys) {
-                if (k == SDL_SCANCODE_ESCAPE) return false;
-                if (k == SDL_SCANCODE_BACKSPACE || k == SDL_SCANCODE_DELETE) skip = true;
-            }
-            if (skip) break;
-            Bind b;
-            if (detect_press(j, base, &b)) {
-                lay.bind[bit_index(kRemapOrder[step].bit)] = b;
-                break;
-            }
-            char progress[48];
-            std::snprintf(progress, sizeof progress, "Step %d of %d", step + 1, total);
-            draw_panel({"CONTROLLER SETUP", std::string(device_name(dev)).substr(0, 36), "", progress, "",
-                        "Press the button for:", "", std::string("   ") + kRemapOrder[step].name, "", "",
-                        "Backspace: skip this button", "Esc: cancel"},
-                       -1);
-            SDL_Delay(10);
-        }
-    }
-    *out = lay;
-    return true;
-}
-
-// Keyboard version of remap_device: the next key pressed is taken for each button.
-// Delete skips a button (keeps it unbound), Esc cancels.
-bool remap_keyboard(SDL_Scancode* out, bool* quit) {
-    SDL_Scancode keys_out[16] = {};
-    const int total = (int)(sizeof kRemapOrder / sizeof *kRemapOrder);
-    for (int step = 0; step < total; step++) {
-        for (bool got = false; !got;) {
-            std::vector<SDL_Scancode> keys;
-            if (pump_menu_events(keys) == MenuResult::Quit) { *quit = true; return false; }
-            for (auto k : keys) {
-                if (k == SDL_SCANCODE_ESCAPE) return false;
-                if (k == SDL_SCANCODE_DELETE) { got = true; break; }
-                keys_out[bit_index(kRemapOrder[step].bit)] = k;
-                got = true;
-                break;
-            }
-            if (got) break;
-            char progress[48];
-            std::snprintf(progress, sizeof progress, "Step %d of %d", step + 1, total);
-            draw_panel({"KEYBOARD SETUP", "", progress, "", "Press the key for:", "",
-                        std::string("   ") + kRemapOrder[step].name, "", "", "Delete: leave unbound",
-                        "Esc: cancel"},
-                       -1);
-            SDL_Delay(10);
-        }
-    }
-    std::memcpy(out, keys_out, sizeof keys_out);
-    return true;
-}
-
-}  // namespace
-
-// A pad press as a menu key. The default keyboard keys also drive the pad (arrows = d-pad),
-// so a key already seen as a key event this pass is not added again (it would move twice).
-static void push_pad_key(std::vector<SDL_Scancode>& keys, SDL_Scancode k) {
-    if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
-}
-
-// The chapter list (F1 -> Chapter, Enter): every chapter kept so far, in the order reached.
-// Up/down move, left/right jump to the previous/next level, Enter loads, Esc goes back.
-// Returns true (with the chosen index in *chapter) to load it.
-static bool pick_chapter(const std::vector<std::string>& chapters, int* chapter, bool* quit) {
-    const int n = (int)chapters.size();
-    auto level_of = [&](int i) {  // "12: Rat (sewr)" -> "(sewr)"
-        const size_t o = chapters[i].rfind('(');
-        return o == std::string::npos ? std::string() : chapters[i].substr(o);
-    };
-    auto level_start = [&](int i) {
-        while (i > 0 && level_of(i - 1) == level_of(i)) i--;
-        return i;
-    };
-    int cur = std::clamp(*chapter, 0, n - 1);
-    uint16_t prev_pad = host_pad(0).buttons;
-    for (;;) {
-        std::vector<SDL_Scancode> keys;
-        if (pump_menu_events(keys) == MenuResult::Quit) {
-            *quit = true;
-            return false;
-        }
-        const uint16_t pad = host_pad(0).buttons, pressed = (uint16_t)(prev_pad & ~pad);
-        prev_pad = pad;
-        if (pressed & B_UP) push_pad_key(keys, SDL_SCANCODE_UP);
-        if (pressed & B_DOWN) push_pad_key(keys, SDL_SCANCODE_DOWN);
-        if (pressed & (B_LEFT | B_L1)) push_pad_key(keys, SDL_SCANCODE_LEFT);
-        if (pressed & (B_RIGHT | B_R1)) push_pad_key(keys, SDL_SCANCODE_RIGHT);
-        if (pressed & (B_CROSS | B_START)) push_pad_key(keys, SDL_SCANCODE_RETURN);
-        if (pressed & B_CIRCLE) push_pad_key(keys, SDL_SCANCODE_ESCAPE);
-        for (auto k : keys) {
-            if (k == SDL_SCANCODE_ESCAPE) return false;
-            if (k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER) {
-                *chapter = cur;
-                return true;
-            }
-            if (k == SDL_SCANCODE_UP) cur = (cur + n - 1) % n;
-            if (k == SDL_SCANCODE_DOWN) cur = (cur + 1) % n;
-            if (k == SDL_SCANCODE_RIGHT) {  // the first chapter of the next level (after the last: the first)
-                int i = cur;
-                while (i < n && level_of(i) == level_of(cur)) i++;
-                cur = i < n ? i : 0;
-            }
-            if (k == SDL_SCANCODE_LEFT) {  // the start of this level, or of the one before
-                const int s0 = level_start(cur);
-                cur = cur != s0 ? s0 : level_start(s0 > 0 ? s0 - 1 : n - 1);
-            }
-        }
-        constexpr int kShown = 16;
-        const int first = std::clamp(cur - kShown / 2, 0, std::max(0, n - kShown));
-        std::vector<std::string> lines = {"CHAPTERS", ""};
-        for (int i = first; i < std::min(n, first + kShown); i++) lines.push_back(" " + chapters[i].substr(0, 35));
-        lines.push_back("");
-        lines.push_back("Up/Down: choose  Left/Right: level");
-        lines.push_back("Enter/X: load    Esc/O: back");
-        draw_panel(lines, 2 + cur - first);
-        SDL_Delay(10);
-    }
-}
-
-static int g_chapter_sel = 0;  // the chapter last chosen
-
-struct MenuOpen {  // (core.cpp watchdog: the game stops on purpose while a menu is open)
-    MenuOpen() { g_host_menu_open = true; }
-    ~MenuOpen() { g_host_menu_open = false; }
-};
-
-// Modal settings screen. The game is paused while it is open (this runs inside the
-// emulated VBlank), and audio is paused with it.
-static void run_settings_menu() {
-    MenuOpen open_flag;
-    if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    enum Row { R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
-               R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
-               R_FPS, R_SIM, R_DRAWDIST, R_PRECISE, R_FONT, R_MENU_SIZE, R_FPS_COUNTER, R_GAME_FONT, R_ENH_BACK };  // R_FPS.. = EnhSetting E_FPS..
-    // the main page, and the Enhancements page (what goes beyond the original game)
-    static const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA,
-                                               R_ASPECT, R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
-    static const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK};
-    bool enh_page = false;
-    static int slot = 1;
-    int& chapter = g_chapter_sel;
-    const std::vector<std::string> chapters = state_chapter_names();
-    if (chapter >= (int)chapters.size()) chapter = 0;
-    size_t dev_index = 0;  // the Controls row: 0 = all, 1 = keyboard & mouse, 2.. = controllers
-    if (g_input == "keyboard") dev_index = 1;
-    for (size_t i = 0; i < g_devices.size(); i++)
-        if (!g_input.empty() && device_guid(g_devices[i]) == g_input) dev_index = 2 + i;
-    int sel = 0;
-    std::string status;
-    // buttons held when the menu opens (e.g. SELECT+START) must not count as presses
-    uint16_t prev_pad = host_pad(0).buttons;
-    bool quit = false;
-    static const char* kAspect[] = {"4:3", "16:9", "16:10", "Stretch", "21:9", "32:9"};
-    for (bool open = true; open && !quit;) {
-        std::vector<SDL_Scancode> keys;
-        if (pump_menu_events(keys) == MenuResult::Quit) { quit = true; break; }
-        // controller navigation (edge-triggered) using the current layout
-        uint16_t pad = host_pad(0).buttons, pressed = (uint16_t)(prev_pad & ~pad);
-        prev_pad = pad;
-        if (pressed & B_UP) push_pad_key(keys, SDL_SCANCODE_UP);
-        if (pressed & B_DOWN) push_pad_key(keys, SDL_SCANCODE_DOWN);
-        if (pressed & B_LEFT) push_pad_key(keys, SDL_SCANCODE_LEFT);
-        if (pressed & B_RIGHT) push_pad_key(keys, SDL_SCANCODE_RIGHT);
-        if (pressed & (B_CROSS | B_START)) push_pad_key(keys, SDL_SCANCODE_RETURN);
-        if (pressed & B_CIRCLE) push_pad_key(keys, SDL_SCANCODE_ESCAPE);
-
-        const size_t entries = 2 + g_devices.size();
-        if (dev_index >= entries) dev_index = 0;
-        const bool is_all = dev_index == 0, is_keyboard = dev_index == 1;
-        bool gfx_changed = false;
-        auto open_page = [&](bool enh) {  // back to the main page lands on "Enhancements"
-            sel = enh ? 0 : (int)(std::find(kMainRows.begin(), kMainRows.end(), R_ENHANCE) - kMainRows.begin());
-            enh_page = enh;
-            status = "";
-        };
-        for (auto k : keys) {
-            const std::vector<Row>& rows = enh_page ? kEnhRows : kMainRows;
-            const int count = (int)rows.size();
-            int dir = k == SDL_SCANCODE_LEFT ? -1 : k == SDL_SCANCODE_RIGHT ? 1 : 0;
-            if (k == SDL_SCANCODE_UP) sel = (sel + count - 1) % count;
-            if (k == SDL_SCANCODE_DOWN) sel = (sel + 1) % count;
-            if (k == SDL_SCANCODE_ESCAPE) {
-                if (enh_page) open_page(false);
-                else open = false;
-                continue;
-            }
-            bool enter = k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER;
-            const Row row = rows[sel];
-            if (dir || enter) {
-                int step = dir ? dir : 1;
-                switch (row) {
-                    case R_RES: g_gfx.scale = (g_gfx.scale + step + 10) % 10; gfx_changed = true; break;
-                    case R_AA: g_gfx.aa = (g_gfx.aa + step + 4) % 4; gfx_changed = true; break;
-                    case R_RENDERER:  // saved; takes effect when the game is started again
-                        g_gfx.vulkan = !g_gfx.vulkan;
-                        save_settings();
-                        status = "Renderer changes on the next start.";
-                        break;
-                    case R_MSAA: {
-                        static const int rates[] = {1, 2, 4, 8};
-                        int i = 0;
-                        while (i < 3 && rates[i] != g_gfx.msaa) i++;
-                        g_gfx.msaa = rates[(i + step + 4) % 4];
-                        gfx_changed = true;
-                        break;
-                    }
-                    case R_ASPECT: {  // 4:3, 16:9, 16:10, 21:9, 32:9, Stretch
-                        static const int order[] = {0, 1, 2, 4, 5, 3};
-                        int i = 0;
-                        while (order[i] != (int)g_gfx.aspect) i++;
-                        g_gfx.aspect = (Aspect)order[(i + step + 6) % 6];
-                        gfx_changed = true;
-                        break;
-                    }
-                    case R_CRT: g_gfx.crt = !g_gfx.crt; gfx_changed = true; break;
-                    case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
-                    case R_DUMP_TEX: g_tex_dump = !g_tex_dump; break;  // texdump.cpp (not saved)
-                    case R_TEX_REPLACE:  // texreplace.cpp: assets/replacements/textures
-                        g_tex_replace = !g_tex_replace;
-                        texreplace_vram_changed();
-                        save_settings();
-                        break;
-                    case R_FPS:
-                    case R_SIM:
-                    case R_DRAWDIST:
-                    case R_PRECISE:
-                    case R_FONT:
-                    case R_MENU_SIZE:
-                        enh_change(row - R_FPS, step);
-                        gfx_changed = true;
-                        break;
-                    case R_GAME_FONT:
-                        enh_change(E_GAME_FONT, step);
-                        break;
-                    case R_FPS_COUNTER:
-                        enh_change(E_FPS_COUNTER, step);
-                        gfx_changed = true;
-                        break;
-                    case R_CHAPTER:
-                        if (dir && !chapters.empty()) chapter = (chapter + step + (int)chapters.size()) % (int)chapters.size();
-                        break;
-                    case R_DEVICE:
-                        dev_index = (dev_index + entries + step) % entries;
-                        g_input = dev_index == 0 ? "" : dev_index == 1 ? "keyboard" : device_guid(g_devices[dev_index - 2]);
-                        save_settings();
-                        break;
-                    case R_SAVE:
-                    case R_LOAD:
-                        if (dir) slot = (slot - 1 + step + kStateSlots) % kStateSlots + 1;
-                        break;
-                    default: break;
-                }
-            }
-            if (!enter) continue;
-            if (row == R_BACK) {
-                open = false;
-            } else if (row == R_ENHANCE || row == R_ENH_BACK) {
-                open_page(row == R_ENHANCE);
-            } else if (row == R_SAVE) {
-                state_request_save(slot);  // taken at the next frame, once the menu closes
-                open = false;
-            } else if (row == R_LOAD || row == R_LOAD_AUTO) {
-                int s = row == R_LOAD ? slot : kAutoSlot;
-                if (state_slot_exists(s)) {
-                    state_request_load(s);
-                    open = false;
-                } else {
-                    status = "That slot is empty.";
-                }
-            } else if (row == R_CHAPTER) {
-                if (chapters.empty()) {
-                    status = "Chapters appear as you reach checkpoints.";
-                } else if (pick_chapter(chapters, &chapter, &quit)) {
-                    state_request_load(kChapterBase + chapter);
-                    open = false;
-                }
-                prev_pad = host_pad(0).buttons;
-            } else if ((row == R_REMAP || row == R_RESET) && is_all) {
-                status = "Pick the keyboard or a controller first.";
-            } else if (row == R_REMAP && is_keyboard) {
-                SDL_Scancode keys_new[16];
-                if (remap_keyboard(keys_new, &quit)) {
-                    std::memcpy(g_keys, keys_new, sizeof g_keys);
-                    g_key_custom = true;
-                    save_settings();
-                    status = "Saved. This layout is used every time.";
-                } else if (!quit) {
-                    status = "Cancelled, layout unchanged.";
-                }
-                prev_pad = host_pad(0).buttons;
-            } else if (row == R_REMAP) {
-                InputDevice dev = g_devices[dev_index - 2];
-                Layout lay;
-                if (remap_device(dev, &lay, &quit)) {
-                    g_layouts[device_guid(dev)] = lay;
-                    save_settings();
-                    status = "Saved. This layout is used every time.";
-                } else if (!quit) {
-                    status = "Cancelled, layout unchanged.";
-                }
-                prev_pad = host_pad(0).buttons;
-            } else if (row == R_RESET) {
-                if (is_keyboard) g_key_custom = false;
-                else g_layouts.erase(device_guid(g_devices[dev_index - 2]));
-                save_settings();
-                status = "Restored the default layout.";
-            }
-        }
-        if (gfx_changed) {
-            apply_graphics();
-            save_settings();
-            if (g_gfx.scale > 0 && g_active_scale == 0) status = "Hardware renderer unavailable.";
-            else status = "";
-        }
-        if (!open || quit) break;
-
-        std::string res = g_gfx.scale == 0 ? std::string("Original (software)")
-                                           : std::to_string(g_gfx.scale) + "x  (" + std::to_string(240 * g_gfx.scale) +
-                                                 " lines)";
-        if (g_gfx.scale > 0 && g_active_scale > g_gfx.scale)
-            res = std::to_string(g_gfx.scale) + "x, SSAA: " + std::to_string(g_active_scale) + "x";
-        std::string dev_line = is_all        ? std::string("All (keyboard + controllers)")
-                               : is_keyboard ? std::string("Keyboard & mouse")
-                                             : std::string(device_name(g_devices[dev_index - 2])).substr(0, 22);
-        bool custom = is_all ? false : is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 2])) > 0;
-        auto choice = [](const char* label, const std::string& value) { return std::string(label) + "\t< " + value + " >"; };
-        std::string slot_line = std::to_string(slot) + ": " + state_slot_label(slot);
-        auto line = [&](Row r) -> std::string {
-            switch (r) {
-                case R_SAVE: return choice("Save state", slot_line);
-                case R_LOAD: return choice("Load state", slot_line);
-                case R_LOAD_AUTO: return choice("Load auto-save", state_slot_label(kAutoSlot));
-                case R_CHAPTER: return choice("Chapter", chapters.empty() ? std::string("none yet") : chapters[chapter].substr(0, 26));
-                case R_RENDERER:
-                    return choice("Renderer", std::string(g_gfx.vulkan ? "Vulkan" : "OpenGL") +
-                                                  ((g_gfx.vulkan == (render_backend() == Backend::Vulkan)) ? "" : " (restart)"));
-                case R_RES: return choice("Resolution", res);
-                case R_AA: return choice("Anti-aliasing", kAaNames[g_gfx.aa]);
-                case R_MSAA: return choice("AA rate (MSAA)", msaa_label());
-                case R_ASPECT: return choice("Aspect ratio", kAspect[(int)g_gfx.aspect]);
-                case R_CRT: return choice(enh_name(E_CRT), enh_value(E_CRT));
-                case R_FILTER: return choice("Smooth textures", g_gfx.texture_filter ? "On" : "Off");
-                case R_DUMP_TEX: return choice("Dump textures", g_tex_dump ? "On (assets/dumps/textures)" : "Off");
-                case R_TEX_REPLACE: return choice("Texture replacements", g_tex_replace ? "[x] On" : "[ ] Off (original)");
-                case R_ENHANCE: return "Recomp Enhancements\t>";
-                case R_DEVICE: return choice("Controls", dev_line);
-                case R_REMAP: return std::string("Set up buttons\t") + (is_all ? "" : custom ? "(custom)" : "(default)");
-                case R_RESET: return "Reset buttons to default";
-                case R_BACK: return "Back to game";
-                case R_FPS:
-                case R_SIM:
-                case R_DRAWDIST:
-                case R_PRECISE:
-                case R_FONT:
-                case R_MENU_SIZE: return choice(enh_name(r - R_FPS), enh_value(r - R_FPS));
-                case R_FPS_COUNTER: return choice(enh_name(E_FPS_COUNTER), enh_value(E_FPS_COUNTER));
-                case R_GAME_FONT: return choice(enh_name(E_GAME_FONT), enh_value(E_GAME_FONT));
-                case R_ENH_BACK: return "Back";
-            }
-            return "";
-        };
-        std::vector<std::string> lines = {enh_page ? "RECOMP ENHANCEMENTS" : "SETTINGS"};
-        for (Row r : enh_page ? kEnhRows : kMainRows) lines.push_back(line(r));
-        lines.push_back(status);
-        if (enh_page) {
-            lines.push_back("Beyond the original game. Also in the game's");
-            lines.push_back("own main menu: Recomp Enhancements.");
-        }
-        lines.push_back("Arrows: change   Enter: pick   Esc: back");
-        draw_panel(lines, 1 + sel);
-        SDL_Delay(15);
-    }
-    if (quit) g_quit = true;
-    if (g_audio) SDL_ResumeAudioStreamDevice(g_audio);
-    g_next_frame_ns = SDL_GetTicksNS();  // don't try to "catch up" the paused time
 }
 
 void host_throttle_frame() {
@@ -1775,29 +500,29 @@ void host_throttle_frame() {
 
 void host_audio_push(const int16_t* stereo, int frames) {
     if (!g_audio || g_turbo) return;
-    // Emulated time now follows the display (vsync), which is never exactly the PS1's
-    // 59.94 Hz, so audio is produced slightly faster or slower than it plays. Nudge the
-    // playback rate (<=0.5%, inaudible) to hold the queue near 60 ms instead of letting
-    // it underrun (clicks) or overflow (dropped chunks).
+    // Emulated time follows the display (vsync), which is never exactly the PS1's 59.94 Hz, so
+    // audio is produced slightly faster or slower than it plays. Nudge the playback rate (<=0.5%,
+    // inaudible) to hold the queue near 60 ms instead of letting it underrun (clicks) or
+    // overflow (dropped chunks).
     const int target = 44100 * 60 / 1000;
-    int queued = SDL_GetAudioStreamQueued(g_audio) / 4;
+    const int queued = SDL_GetAudioStreamQueued(g_audio) / 4;
     g_audio_min_queued = std::min(g_audio_min_queued, queued);
     if (queued == 0) g_audio_underruns++;  // the device ran dry since the last push: a gap
     if (queued > target * 4) {  // way behind (after a stall): drop rather than lag
         g_audio_drops++;
         return;
     }
-    float ratio = 1.0f + 0.005f * std::clamp((float)(queued - target) / (float)target, -1.0f, 1.0f);
+    const float ratio = 1.0f + 0.005f * std::clamp((float)(queued - target) / (float)target, -1.0f, 1.0f);
     SDL_SetAudioStreamFrequencyRatio(g_audio, ratio);
     SDL_PutAudioStreamData(g_audio, stereo, frames * 4);
+}
+
+void host_audio_clear() {
+    if (g_audio) SDL_ClearAudioStream(g_audio);
 }
 
 void host_toast(const std::string& text) {
     g_toast = text;
     g_toast_until = SDL_GetTicksNS() + 2500000000ull;
     log_msg(LogCat::Host, "%s", text.c_str());
-}
-
-void host_audio_clear() {
-    if (g_audio) SDL_ClearAudioStream(g_audio);
 }
