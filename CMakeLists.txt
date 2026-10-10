@@ -118,6 +118,7 @@ add_executable(repocalypse
     runtime/src/render/gpu_gl.cpp
     runtime/src/render/gpu_vk.cpp
     runtime/src/render/hw_common.cpp
+    runtime/src/render/present_common.cpp
     runtime/src/render/present_gl.cpp
     runtime/src/render/present_vk.cpp
     runtime/src/render/render_backend.cpp

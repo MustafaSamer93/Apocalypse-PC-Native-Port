@@ -1,6 +1,7 @@
 #include "core/psx.h"
 #include "render/gl_api.h"
 #include "render/present.h"
+#include "render/present_common.h"
 #include "render/render_backend.h"
 #include "render/ui_text.h"
 
@@ -13,7 +14,8 @@
 
 namespace {
 
-SDL_Window* g_win = nullptr;
+using namespace pres;
+
 SDL_GLContext g_ctx = nullptr;
 GLuint g_prog_plain, g_prog_crt, g_prog_fxaa, g_vao, g_vbo;
 GLuint g_aa_tex = 0, g_aa_fbo = 0;  // the scaled image, for the FXAA pass
@@ -21,18 +23,6 @@ int g_aa_w = 0, g_aa_h = 0;
 GLuint g_sw_tex = 0;
 int g_sw_w = 0, g_sw_h = 0;
 
-// last game image, for redraws
-struct Last {
-    bool valid = false;
-    unsigned tex = 0;
-    int tex_w = 0, tex_h = 0, x = 0, y = 0, w = 0, h = 0, native_h = 240;
-} g_last;
-
-// where the game image went on the last frame (window pixels, y down)
-float g_cx = 0, g_cy = 0, g_cw = 1, g_ch = 1;
-
-SDL_Surface* g_ov_surf = nullptr;
-SDL_Renderer* g_ov_ren = nullptr;
 GLuint g_ov_tex = 0;
 GLuint g_prog_overlay = 0;
 
@@ -147,11 +137,6 @@ GLuint make_texture(int w, int h, GLint filter) {
     return t;
 }
 
-float aspect_value(Aspect a, int w, int h) {
-    const float r = aspect_ratio(a);
-    return r > 0 ? r : (float)w / (float)std::max(h, 1);
-}
-
 void draw_quad() {
     glBindVertexArray(g_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -167,13 +152,8 @@ void draw_image(unsigned tex, int tex_w, int tex_h, int x, int y, int w, int h, 
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    float ar = aspect_value(o.aspect, ww, wh);
-    float cw = (float)ww, ch = cw / ar;
-    if (ch > (float)wh) { ch = (float)wh; cw = ch * ar; }
-    g_cx = ((float)ww - cw) * 0.5f;
-    g_cy = ((float)wh - ch) * 0.5f;
-    g_cw = cw;
-    g_ch = ch;
+    fit_image(o.aspect, ww, wh);
+    const float cw = g_cw, ch = g_ch;
     glViewport((GLint)g_cx, (GLint)g_cy, (GLsizei)cw, (GLsizei)ch);
 
     // FXAA: draw the scaled image into a target the size of the picture, then filter that
@@ -251,9 +231,7 @@ bool gl_present_init(SDL_Window* window) {
 }
 
 void gl_present_shutdown() {
-    ui_text_reset(g_ov_ren);
-    if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren), g_ov_ren = nullptr;
-    if (g_ov_surf) SDL_DestroySurface(g_ov_surf), g_ov_surf = nullptr;
+    overlay_shutdown();
     if (g_ctx) SDL_GL_DestroyContext(g_ctx);
 }
 
@@ -293,38 +271,27 @@ void gl_present_redraw(const PresentOptions& o) {
 }
 
 SDL_Renderer* gl_present_overlay_begin() {
-    int ww, wh, ow, oh;
-    SDL_GetWindowSizeInPixels(g_win, &ww, &wh);
-    present_overlay_size(ww, wh, &ow, &oh);
-    if (!g_ov_surf || g_ov_surf->w != ow || g_ov_surf->h != oh) {  // (re)made at the window's size
-        ui_text_reset(g_ov_ren);
-        if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren);
-        if (g_ov_surf) SDL_DestroySurface(g_ov_surf);
+    bool remade;
+    SDL_Renderer* r = overlay_begin(&remade);
+    if (remade) {
         if (g_ov_tex) glDeleteTextures(1, &g_ov_tex);
-        g_ov_surf = SDL_CreateSurface(ow, oh, SDL_PIXELFORMAT_ARGB8888);
-        g_ov_ren = SDL_CreateSoftwareRenderer(g_ov_surf);
-        g_ov_tex = make_texture(ow, oh, GL_LINEAR);
+        g_ov_tex = make_texture(g_ov_surf->w, g_ov_surf->h, GL_LINEAR);
     }
-    SDL_SetRenderScale(g_ov_ren, (float)oh / 480.0f, (float)oh / 480.0f);
-    SDL_SetRenderDrawColor(g_ov_ren, 0, 0, 0, 0);
-    SDL_SetRenderDrawBlendMode(g_ov_ren, SDL_BLENDMODE_NONE);
-    SDL_RenderClear(g_ov_ren);
-    return g_ov_ren;
+    return r;
 }
 
 void gl_present_overlay_end() {
-    SDL_RenderPresent(g_ov_ren);  // software renderer: flushes into the surface
+    overlay_flush();
     glBindTexture(GL_TEXTURE_2D, g_ov_tex);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, g_ov_surf->pitch / 4);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_ov_surf->w, g_ov_surf->h, GL_BGRA, GL_UNSIGNED_BYTE, g_ov_surf->pixels);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     int ww, wh;
     SDL_GetWindowSizeInPixels(g_win, &ww, &wh);
-    // the overlay covers the whole window, keeping 4:3
-    float ch = (float)wh, cw = ch * 4.0f / 3.0f;
-    if (cw > (float)ww) { cw = (float)ww; ch = cw * 0.75f; }
+    float ox, oy, cw, ch;
+    overlay_area((float)ww, (float)wh, &ox, &oy, &cw, &ch);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport((GLint)(((float)ww - cw) * 0.5f), (GLint)(((float)wh - ch) * 0.5f), (GLsizei)cw, (GLsizei)ch);
+    glViewport((GLint)ox, (GLint)oy, (GLsizei)cw, (GLsizei)ch);
     glEnable(GL_BLEND);
     glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
@@ -379,49 +346,9 @@ void gl_present_save_bmp(const char* path) {
     save_bmp_bgrx(flipped.data(), w, h, path);
 }
 
-// 24-bit, so the window's alpha (0 in the GL back buffer) cannot make viewers show it
-// transparent or blank.
-bool save_bmp_bgrx(const uint8_t* px, int w, int h, const char* path) {
-    const uint32_t row = ((uint32_t)w * 3 + 3) & ~3u, size = 54 + row * (uint32_t)h;
-    uint8_t hdr[54] = {'B', 'M'};
-    auto put32 = [&](int off, uint32_t v) { for (int i = 0; i < 4; i++) hdr[off + i] = (uint8_t)(v >> (8 * i)); };
-    put32(2, size);
-    put32(10, 54);
-    put32(14, 40);
-    put32(18, (uint32_t)w);
-    put32(22, (uint32_t)-h);  // top-down rows
-    hdr[26] = 1;
-    hdr[28] = 24;
-    put32(34, row * (uint32_t)h);
-    FILE* f = std::fopen(path, "wb");
-    bool ok = f && std::fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr;
-    std::vector<uint8_t> line(row, 0);
-    for (int y = 0; ok && y < h; y++) {
-        const uint8_t* src = px + (size_t)y * w * 4;
-        for (int x = 0; x < w; x++) std::memcpy(&line[(size_t)x * 3], src + (size_t)x * 4, 3);
-        ok = std::fwrite(line.data(), 1, row, f) == row;
-    }
-    if (f && std::fclose(f) != 0) ok = false;
-    if (ok) log_msg(LogCat::Host, "screenshot saved to %s", path);
-    else log_msg(LogCat::Host, "screenshot %s failed", path);
-    return ok;
-}
-
 void gl_present_swap() {
     SDL_GL_SwapWindow(g_win);
     // Waits until the swap is done: the driver otherwise queues 1-2 more frames ahead of the
     // display, each one refresh of input lag.
     glFinish();
-}
-
-bool gl_present_window_to_game(float wx, float wy, float* x, float* y) {
-    // SDL reports window coordinates; the viewport was set in pixels
-    int ww, wh, pw, ph;
-    SDL_GetWindowSize(g_win, &ww, &wh);
-    SDL_GetWindowSizeInPixels(g_win, &pw, &ph);
-    float sx = ww ? (float)pw / (float)ww : 1.0f, sy = wh ? (float)ph / (float)wh : 1.0f;
-    float px = wx * sx, py = wy * sy;
-    *x = (px - g_cx) / g_cw * 640.0f;
-    *y = (py - g_cy) / g_ch * 480.0f;
-    return *x >= 0 && *x < 640 && *y >= 0 && *y < 480;
 }

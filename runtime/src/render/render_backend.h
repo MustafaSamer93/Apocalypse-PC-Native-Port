@@ -40,8 +40,7 @@
     X(void, present_badge, (int slot, const uint32_t* px, int w, int h, int x, int margin, bool changed),     \
       (slot, px, w, h, x, margin, changed))                                                                    \
     X(void, present_swap, (), ())                                                                              \
-    X(void, present_save_bmp, (const char* path), (path))                                                      \
-    X(bool, present_window_to_game, (float wx, float wy, float* x, float* y), (wx, wy, x, y))
+    X(void, present_save_bmp, (const char* path), (path))
 
 #define RENDER_DECLARE(ret, name, params, args) ret gl_##name params; ret vk_##name params;
 RENDER_FUNCS(RENDER_DECLARE)

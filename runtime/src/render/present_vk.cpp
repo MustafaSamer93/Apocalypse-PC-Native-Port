@@ -9,6 +9,7 @@
 
 #include "core/psx.h"
 #include "render/present.h"
+#include "render/present_common.h"
 #include "render/render_backend.h"
 #include "render/ui_text.h"
 #include "render/vk_context.h"
@@ -21,7 +22,7 @@
 
 namespace {
 
-SDL_Window* g_win = nullptr;
+using namespace pres;
 
 VkSwapchainKHR g_swap = VK_NULL_HANDLE;
 VkFormat g_swap_format = VK_FORMAT_B8G8R8A8_UNORM;
@@ -42,8 +43,6 @@ VkImg g_aa;       // the scaled image, for the FXAA pass
 VkImg g_sw;       // the software renderer's picture
 VkImg g_ov_img;   // the overlay (present_overlay_size)
 VkImg g_badge[kBadgeSlots];  // present_badge's images
-SDL_Surface* g_ov_surf = nullptr;
-SDL_Renderer* g_ov_ren = nullptr;
 
 struct ImagePush {
     float rect[4];
@@ -53,22 +52,7 @@ struct ImagePush {
     float time;  // the CRT filter's (crt.frag)
 };
 
-// last game image, for redraws (menus draw it under the overlay)
-struct Last {
-    bool valid = false;
-    unsigned tex = 0;
-    int tex_w = 0, tex_h = 0, x = 0, y = 0, w = 0, h = 0, native_h = 240;
-} g_last;
-
-// where the game image went (window pixels, y down)
-float g_cx = 0, g_cy = 0, g_cw = 1, g_ch = 1;
-
 VkCommandBuffer cb() { return vkc::cmd(); }
-
-float aspect_value(Aspect a, int w, int h) {
-    const float r = aspect_ratio(a);
-    return r > 0 ? r : (float)w / (float)std::max(h, 1);
-}
 
 void destroy_swapchain() {
     for (VkImg& img : g_swap_imgs) vkc::destroy_image(img);
@@ -216,13 +200,8 @@ void draw_image(VkImg& tex, int tex_w, int tex_h, int x, int y, int w, int h, in
     VkImg* target = frame();
     if (!target) return;
     const int ww = target->w, wh = target->h;
-    float ar = aspect_value(o.aspect, ww, wh);
-    float cw = (float)ww, ch = cw / ar;
-    if (ch > (float)wh) { ch = (float)wh; cw = ch * ar; }
-    g_cx = ((float)ww - cw) * 0.5f;
-    g_cy = ((float)wh - ch) * 0.5f;
-    g_cw = cw;
-    g_ch = ch;
+    fit_image(o.aspect, ww, wh);
+    const float cw = g_cw, ch = g_ch;
     ImagePush pc{{(float)x, (float)y, (float)w, (float)h}, {(float)tex_w, (float)tex_h}, {cw, ch}, (float)crt_lines(native_h), crt_time()};
     // the source is sampled: make sure it is readable (it is outside any rendering then)
     vkc::end_rendering();
@@ -296,12 +275,10 @@ void vk_present_shutdown() {
         if (*m) vkDestroyShaderModule(vkc::device, *m, nullptr), *m = VK_NULL_HANDLE;
     for (VkSemaphore& s : g_acquired)
         if (s) vkDestroySemaphore(vkc::device, s, nullptr), s = VK_NULL_HANDLE;
-    ui_text_reset(g_ov_ren);
-    if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren), g_ov_ren = nullptr;
-    if (g_ov_surf) SDL_DestroySurface(g_ov_surf), g_ov_surf = nullptr;
+    overlay_shutdown();
     vkc::shutdown();
     g_have_image = false;
-    g_last = Last{};
+    g_last = LastImage{};
 }
 
 void vk_present_set_vsync(bool on) {
@@ -348,25 +325,12 @@ void vk_present_redraw(const PresentOptions& o) {
 }
 
 SDL_Renderer* vk_present_overlay_begin() {
-    int ww, wh, ow, oh;
-    SDL_GetWindowSizeInPixels(g_win, &ww, &wh);
-    present_overlay_size(ww, wh, &ow, &oh);
-    if (!g_ov_surf || g_ov_surf->w != ow || g_ov_surf->h != oh) {  // (re)made at the window's size
-        ui_text_reset(g_ov_ren);
-        if (g_ov_ren) SDL_DestroyRenderer(g_ov_ren);
-        if (g_ov_surf) SDL_DestroySurface(g_ov_surf);
-        g_ov_surf = SDL_CreateSurface(ow, oh, SDL_PIXELFORMAT_ARGB8888);
-        g_ov_ren = SDL_CreateSoftwareRenderer(g_ov_surf);
-    }
-    SDL_SetRenderScale(g_ov_ren, (float)oh / 480.0f, (float)oh / 480.0f);
-    SDL_SetRenderDrawColor(g_ov_ren, 0, 0, 0, 0);
-    SDL_SetRenderDrawBlendMode(g_ov_ren, SDL_BLENDMODE_NONE);
-    SDL_RenderClear(g_ov_ren);
-    return g_ov_ren;
+    bool remade;  // (the image follows the surface's size in vk_present_overlay_end)
+    return overlay_begin(&remade);
 }
 
 void vk_present_overlay_end() {
-    SDL_RenderPresent(g_ov_ren);  // software renderer: flushes into the surface
+    overlay_flush();
     VkImg* target = frame();
     if (!target) return;
     const int ow = g_ov_surf->w, oh = g_ov_surf->h;
@@ -386,12 +350,10 @@ void vk_present_overlay_end() {
     bic.imageExtent = {(uint32_t)ow, (uint32_t)oh, 1};
     vkCmdCopyBufferToImage(cb(), st.buffer, g_ov_img.image, g_ov_img.layout, 1, &bic);
     vkc::transition(g_ov_img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    // the overlay covers the whole window, keeping 4:3
-    float ww = (float)target->w, wh = (float)target->h;
-    float ch = wh, cw = ch * 4.0f / 3.0f;
-    if (cw > ww) { cw = ww; ch = cw * 0.75f; }
+    float ox, oy, cw, ch;
+    overlay_area((float)target->w, (float)target->h, &ox, &oy, &cw, &ch);
     vkc::begin_rendering(*target);
-    viewport((ww - cw) * 0.5f, (wh - ch) * 0.5f, cw, ch);
+    viewport(ox, oy, cw, ch);
     draw_quad(g_overlay, g_layout, g_ov_img, nullptr, 0);
 }
 
@@ -462,15 +424,4 @@ void vk_present_save_bmp(const char* path) {
     save_bmp_bgrx(px.data(), w, h, path);
     // drawing can continue on this image (the overlay, for one)
     vkc::begin_rendering(*target);
-}
-
-bool vk_present_window_to_game(float wx, float wy, float* x, float* y) {
-    int ww, wh, pw, ph;
-    SDL_GetWindowSize(g_win, &ww, &wh);
-    SDL_GetWindowSizeInPixels(g_win, &pw, &ph);
-    float sx = ww ? (float)pw / (float)ww : 1.0f, sy = wh ? (float)ph / (float)wh : 1.0f;
-    float px = wx * sx, py = wy * sy;
-    *x = (px - g_cx) / g_cw * 640.0f;
-    *y = (py - g_cy) / g_ch * 480.0f;
-    return *x >= 0 && *x < 640 && *y >= 0 && *y < 480;
 }
