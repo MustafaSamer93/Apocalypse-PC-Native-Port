@@ -133,6 +133,7 @@ void save_settings() {
     std::fprintf(f, "drawdist %d\n", g_draw_distance);
     std::fprintf(f, "gamefont %d\n", g_game_font ? 1 : 0);
     std::fprintf(f, "precise %d\n", g_gte_precise ? 1 : 0);
+    std::fprintf(f, "native3d %d\n", g_native_3d ? 1 : 0);
     std::fprintf(f, "font %d\n", g_smooth_font ? 1 : 0);
     std::fprintf(f, "menuzoom %d\n", g_menu_zoom);
     std::fprintf(f, "autosave %d\n", g_autosave ? 1 : 0);
@@ -181,7 +182,7 @@ void load_settings() {
     const struct { const char* name; bool* flag; int* value; int lo, hi; } kSimple[] = {
         {"fullscreen", &g_fullscreen}, {"font", &g_smooth_font}, {"texreplace", &g_tex_replace},
         {"fpscounter", &g_fps_counter}, {"subtitles", &g_subtitles}, {"autosave", &g_autosave},
-        {"precise", &g_gte_precise}, {"gamefont", &g_game_font},
+        {"precise", &g_gte_precise}, {"gamefont", &g_game_font}, {"native3d", &g_native_3d},
         {"menuzoom", nullptr, &g_menu_zoom, 30, 80}, {"drawdist", nullptr, &g_draw_distance, 100, 400},
         {"sim", nullptr, &g_sim60_setting, 0, 2}, {"aa", nullptr, &g_gfx.aa, 0, 3},
     };
@@ -262,8 +263,8 @@ const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
                                   "Font scaling", "Renderer", "Screen mode", "Display", "Autosave", "One-liners",
                                   "Anti-aliasing", "Infinite health", "Infinite lives", "All weapons", "Infinite ammo",
-                                  "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font"};
-    static_assert(std::size(names) == E_GAME_FONT + 1, "one name per EnhSetting");
+                                  "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font", "Native 3D"};
+    static_assert(std::size(names) == E_NATIVE_3D + 1, "one name per EnhSetting");
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -273,6 +274,7 @@ std::string enh_value(int id) {
         case E_SIM: return sim60_label();
         case E_DRAWDIST: return drawdist_label();
         case E_PRECISE: return g_gte_precise ? "On (no wobble)" : "Off (original)";
+        case E_NATIVE_3D: return !g_native_3d ? "Off" : g_gte_precise ? "On" : "On (needs Precise 3D)";
         case E_SMOOTH_FONT: return g_smooth_font ? "On" : "Off (original)";
         case E_FONT_SCALE: return std::to_string(g_menu_zoom) + "%";
         case E_RENDERER:
@@ -317,6 +319,7 @@ void enh_change(int id, int dir) {
         }
         case E_DRAWDIST: g_draw_distance = cycle(kDrawDistChoices, (int)std::size(kDrawDistChoices), g_draw_distance); break;
         case E_PRECISE: g_gte_precise = !g_gte_precise; break;
+        case E_NATIVE_3D: g_native_3d = !g_native_3d; break;
         case E_SMOOTH_FONT: g_smooth_font = !g_smooth_font; break;
         case E_FONT_SCALE: g_menu_zoom = cycle(kFontScaleChoices, (int)std::size(kFontScaleChoices), g_menu_zoom); break;
         case E_RENDERER: g_gfx.vulkan = !g_gfx.vulkan; break;  // takes effect when the game is started again

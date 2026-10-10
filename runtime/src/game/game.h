@@ -18,6 +18,10 @@ extern bool g_sim60_demo;
 void sim60_apply();
 void sim60_note_file(const std::string& file);
 
+// ---------------------------------------------------------------- native 3D (mesh.cpp)
+
+extern bool g_native_3d;  // setting: the level mesh drawn natively, with float geometry (needs precise 3D)
+
 // ---------------------------------------------------------------- draw distance (drawdist.cpp)
 
 extern int g_draw_distance;  // percent of the game's own view distance (100 = original)

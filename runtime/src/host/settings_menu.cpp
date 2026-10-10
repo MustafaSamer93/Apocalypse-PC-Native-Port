@@ -267,11 +267,11 @@ enum Row {
     R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
     R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
     // the Enhancements page: rows of enhancement settings (enh_of)
-    R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK,
+    R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_NATIVE_3D, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK,
 };
 const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT,
                                     R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
-const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK};
+const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_NATIVE_3D, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK};
 
 // The enhancement setting a row shows (-1: none).
 int enh_of(Row r) {
@@ -281,6 +281,7 @@ int enh_of(Row r) {
         case R_SIM: return E_SIM;
         case R_DRAWDIST: return E_DRAWDIST;
         case R_PRECISE: return E_PRECISE;
+        case R_NATIVE_3D: return E_NATIVE_3D;
         case R_GAME_FONT: return E_GAME_FONT;
         case R_FONT: return E_SMOOTH_FONT;
         case R_MENU_SIZE: return E_FONT_SCALE;
