@@ -1,16 +1,15 @@
 // Entry point: loads the game's executable from the user's disc image into emulated RAM,
 // brings up the hardware and jumps to the recompiled entry point.
-#include <algorithm>
-#include <cstring>
-#include <chrono>
-#include <ctime>
 #include <sys/stat.h>
+
+#include <algorithm>
+#include <csetjmp>
+#include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
-
-#include <csetjmp>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>  // the Windows entry point for a windowed (non-console) exe
@@ -52,7 +51,7 @@ void usage() {
         "  --cue PATH         disc image .cue or .bin (default: the image in assets/image)\n"
         "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
-        "  --sim60            60 Hz simulation in every level (default: levels 1-4 only; F1 menu)\n"
+        "  --sim60            60 Hz simulation in every level (default: levels 1-4; Recomp Enhancements)\n"
         "  --chapter N        start at chapter N (saves/chapters; Settings -> Chapter lists them)\n"
         "  --renderer R       opengl or vulkan (default: the saved setting)\n"
         "  --turbo            run as fast as possible (also: hold Tab)\n"
@@ -270,7 +269,7 @@ int main(int argc, char** argv) {
         const char* msg =
             "The game disc was not found.\n\nPut your own copy of Apocalypse (USA) in the \"assets\\image\" "
             "folder next to repocalypse.exe: its .cue and .bin files (any names), or just the .bin files.\n\n"
-            "Everything else in assets (BIOS, replacements) is optional.";
+            "Everything else in assets (replacements, fonts) is optional.";
         std::fprintf(stderr, "%s\n", msg);
         if (!std::getenv("APOC_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Repocalypse", msg, nullptr);
         return 1;
