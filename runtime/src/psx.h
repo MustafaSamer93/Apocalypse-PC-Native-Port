@@ -119,7 +119,7 @@ extern int g_menu_zoom;     // setting: the game's menus at this percent of thei
 // Enhancement settings, shared by F1 and the game's Options -> Enhancements (host_sdl.cpp).
 enum EnhSetting { E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_RES, E_ASPECT, E_DISPLAY, E_AUTOSAVE, E_SUBTITLES, E_AA,
                    E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT,
-                   E_FPS_COUNTER, E_CRT, E_GAME_FONT, E_NATIVE_3D };
+                   E_FPS_COUNTER, E_CRT, E_GAME_FONT };
 const char* enh_name(int id);
 std::string enh_value(int id);
 void enh_change(int id, int dir);
@@ -173,7 +173,6 @@ void texreplace_vram_written(int x, int y, int w, int h);  // any upload or copy
 // 0 = the game's texture, 1 = its replacement, 2 = with a letter drawn in the game font (no game texels show through)
 int texreplace_find(int page_x, int page_y, int depth, int clut_x, int clut_y, float u0, float v0, float u1,
                     float v1, const int tw[4], const uint16_t* vram);
-extern bool g_native_3d;  // setting: level geometry drawn by the native renderer (mesh.cpp)
 extern bool g_game_font;            // setting: the game's letters in assets/fonts' font (texreplace.cpp)
 void texreplace_font_changed();     // ... after changing it
 std::string texreplace_font_name(); // that font's name ("" = none in assets/fonts)  // the title screen (PRESS START) is up
