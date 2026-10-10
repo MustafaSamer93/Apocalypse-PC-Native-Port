@@ -30,7 +30,6 @@
 constexpr const char* kVersion = "v1.0";
 void host_toast(const std::string& text);
 int g_renderer_override = -1;  // --renderer opengl|vulkan: 0 / 1, -1 = the saved setting
-float g_refresh_override = 0;  // --refresh HZ: assume this display refresh rate
 
 namespace {
 
@@ -94,9 +93,6 @@ struct ScriptedPress {
 };
 std::vector<ScriptedPress> g_script;
 uint64_t g_frame = 0;
-// APOC_BOT=DIR (bot_step): buttons the AI tester holds until frame g_bot_until.
-uint16_t g_bot_buttons = 0;
-uint64_t g_bot_until = 0;
 
 // PS1 pad bits (active low in the wire format; here 1 = pressed)
 enum : uint16_t {
@@ -266,7 +262,7 @@ bool g_key_custom = false;
 // "keyboard" = keyboard & mouse only, else one controller's GUID. A chosen controller that is not
 // connected falls back to all, so a missing pad never leaves the game without input.
 std::string g_input;
-bool g_fullscreen = true;  // start in fullscreen (F11 switches; saved as "fullscreen N")
+bool g_fullscreen = true;  // start in fullscreen (saved as "fullscreen N")
 
 // Order the settings screen asks for buttons in.
 const struct { uint16_t bit; const char* name; } kRemapOrder[] = {
@@ -646,7 +642,6 @@ bool host_init(const char* title, int scale) {
     // exactly two refreshes). Other refresh rates fall back to a timer.
     if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_window))) {
         if (mode->refresh_rate > 0) g_refresh_hz = mode->refresh_rate;
-        if (g_refresh_override > 0) g_refresh_hz = g_refresh_override;
         g_vsync_pacing = g_refresh_hz > 58.5f && g_refresh_hz < 61.5f;
         log_msg(LogCat::Host, "display refresh %.2f Hz: %s", g_refresh_hz,
                 g_vsync_pacing ? "pacing by vsync" : "pacing by timer");
@@ -671,8 +666,6 @@ void host_shutdown() {
 }
 
 static void run_settings_menu();
-static void run_chapter_menu();
-static bool g_shot_key = false;  // F12: save the next frame to debug/ (maybe_screenshot)
 
 // The mouse pointer hides after 2 s without mouse use and shows again when it is used.
 // Called with every event (null = no event, just the timer) by both event loops.
@@ -686,7 +679,7 @@ static void mouse_autohide(const SDL_Event* e) {
 }
 
 void host_poll() {
-    bool open_menu = false, open_chapters = false;
+    bool open_menu = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         mouse_autohide(&e);
@@ -694,31 +687,6 @@ void host_poll() {
             case SDL_EVENT_QUIT: g_quit = true; break;
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) g_quit = true;
-                // F keys (settings, chapters, states, issue marker, screenshot, fullscreen) are off
-                // in the game; APOC_DEV_KEYS=1 turns them on for development
-                static const bool dev_keys = std::getenv("APOC_DEV_KEYS") != nullptr;
-                if (!dev_keys) break;
-                if (e.key.scancode == SDL_SCANCODE_F1 && !e.key.repeat) open_menu = true;
-                if (e.key.scancode == SDL_SCANCODE_F2 && !e.key.repeat) open_chapters = true;
-                if (e.key.scancode == SDL_SCANCODE_F5 && !e.key.repeat) state_request_save(1);
-                if (e.key.scancode == SDL_SCANCODE_F9 && !e.key.repeat) state_request_load(1);
-                if (e.key.scancode == SDL_SCANCODE_F8 && !e.key.repeat) {  // issue marker + state saves/slot1NN.state
-                    // ponytail: numbering restarts each launch, so older issue states get overwritten
-                    static int issue = 0;
-                    extern std::string g_sim60_level;
-                    extern int psx_opt_sim60;
-                    issue++;
-                    log_msg(LogCat::Host, "===== F8 issue #%d: frame %llu, level \"%s\", sim60 %d, state saves/slot%d.state =====",
-                            issue, (unsigned long long)g_frame, g_sim60_level.c_str(), psx_opt_sim60, 100 + issue);
-                    std::fflush(stderr);
-                    state_request_save(100 + issue);
-                }
-                if (e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) g_shot_key = true;
-                if (e.key.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
-                    g_fullscreen = !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN);
-                    SDL_SetWindowFullscreen(g_window, g_fullscreen);
-                    save_settings();  // the next start opens the same way
-                }
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: apply_graphics(); break;
             // JOYSTICK_ADDED fires for every device (gamepads included); add_device
@@ -737,10 +705,8 @@ void host_poll() {
     uint16_t held = (uint16_t)~host_pad(0).buttons;
     combo_frames = ((held & B_SELECT) && (held & B_START)) ? combo_frames + 1 : 0;
     if (combo_frames == 90) open_menu = true;
-    if (static const char* t = std::getenv("APOC_MENU_AT"); t && g_frame == std::strtoull(t, nullptr, 10)) open_menu = true;  // tests
     mouse_autohide(nullptr);
     if (open_menu && g_gl_ok) run_settings_menu();
-    else if (open_chapters && g_gl_ok) run_chapter_menu();
 }
 
 void host_set_turbo(bool on) { g_force_turbo = on; }
@@ -922,26 +888,6 @@ PadState host_pad(int port, bool analog) {
         }
         pressed |= mouse_buttons();
     }
-    if (port == 0) {
-        // Debug: APOC_PAD_SCRIPT=FRAME:BUTTON[:FRAMES],... presses a button (start, select, x, o,
-        // t = triangle, sq = square, up, down, left, right, lone/rone/ltwo/rtwo = L1/R1/L2/R2) from
-        // each FRAME, for FRAMES frames (6 if not given).
-        static const char* script = std::getenv("APOC_PAD_SCRIPT");
-        for (const char* p = script; p && *p;) {
-            unsigned long long f = 0, len = 6;
-            char name[16] = "";
-            if (std::sscanf(p, "%llu:%15[a-z]:%llu", &f, name, &len) < 2) break;
-            static const std::pair<const char*, uint16_t> kNames[] = {
-                {"start", B_START}, {"x", B_CROSS}, {"o", B_CIRCLE}, {"t", B_TRIANGLE}, {"sq", B_SQUARE},
-                {"up", B_UP}, {"down", B_DOWN}, {"left", B_LEFT}, {"right", B_RIGHT}, {"select", B_SELECT},
-                {"lone", B_L1}, {"rone", B_R1}, {"ltwo", B_L2}, {"rtwo", B_R2}};
-            if (g_frame >= f && g_frame < f + len)
-                for (auto& [n, bit] : kNames)
-                    if (!std::strcmp(n, name)) pressed |= bit;
-            p = std::strchr(p, ',');
-            if (p) p++;
-        }
-    }
     for (auto& dev : g_devices) {
         if (port != 0) break;
         if (!all && device_guid(dev) != g_input) continue;
@@ -995,7 +941,6 @@ PadState host_pad(int port, bool analog) {
     if (port == 0)
         for (auto& sp : g_script)
             if (g_frame >= sp.from && g_frame < sp.to) pressed |= sp.bit;
-    if (port == 0 && g_frame < g_bot_until) pressed |= g_bot_buttons;
     s.buttons = (uint16_t)~pressed;
     s.connected = port == 0;
     return s;
@@ -1016,86 +961,13 @@ void host_rumble(int port, uint8_t small_motor, uint8_t large_motor) {
         if (d.pad) SDL_RumbleGamepad(d.pad, low, high, (low || high) ? 100 : 0);
 }
 
-// --dump-vram FRAME PATH : writes all of VRAM (1024x512, 15-bit -> 24-bit) as a BMP.
 std::vector<uint64_t> g_shot_frames;  // --screenshot F1,F2,... PREFIX
 std::string g_shot_prefix;
-
-// --states save1@4000,load1@4600 : scripted save/load requests (testing)
-std::vector<std::pair<uint64_t, int>> g_state_script;  // frame -> +slot (save) / -slot-1 (load)
-
-static void run_state_script() {
-    for (auto& [f, op] : g_state_script) {
-        if (f != g_frame) continue;
-        if (op >= 0) state_request_save(op);
-        else state_request_load(-op - 1);
-    }
-}
-
-bool host_parse_state_script(const char* spec) {
-    std::string s(spec);
-    for (size_t p = 0; p < s.size();) {
-        size_t e = s.find(',', p);
-        if (e == std::string::npos) e = s.size();
-        std::string item = s.substr(p, e - p);
-        p = e + 1;
-        int slot;
-        unsigned long long frame;
-        if (std::sscanf(item.c_str(), "save%d@%llu", &slot, &frame) == 2) g_state_script.push_back({frame, slot});
-        else if (std::sscanf(item.c_str(), "load%d@%llu", &slot, &frame) == 2) g_state_script.push_back({frame, -slot - 1});
-        else return false;
-    }
-    return true;
-}
+int g_start_state = -1;  // --chapter: the state slot loaded at frame 30
 
 static void maybe_screenshot() {
     for (uint64_t f : g_shot_frames)
         if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
-    if (!g_shot_key) return;
-    g_shot_key = false;
-    // debug/shot_<date>_<time>.bmp (a second one within the same second gets _2, _3...)
-    std::error_code ec;
-    std::filesystem::create_directories("debug", ec);
-    const std::time_t now = std::time(nullptr);
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &now);
-#else
-    localtime_r(&now, &tm);
-#endif
-    char stamp[32];
-    std::strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm);
-    std::string path = std::string("debug/shot_") + stamp + ".bmp";
-    for (int n = 2; std::filesystem::exists(path, ec); n++)
-        path = std::string("debug/shot_") + stamp + "_" + std::to_string(n) + ".bmp";
-    present_save_bmp(path.c_str());
-    log_msg(LogCat::Host, "===== F12 screenshot %s: frame %llu =====", path.c_str(), (unsigned long long)g_frame);
-    host_toast("Screenshot saved: " + path);
-}
-
-uint64_t g_dump_vram_frame = 0;
-std::string g_dump_vram_path;
-
-static void write_vram_bmp(const uint16_t* vram, const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return;
-    const int w = 1024, h = 512, row = w * 3;
-    uint32_t file_size = 54 + row * h;
-    uint8_t hdr[54] = {'B', 'M'};
-    auto put32 = [&](int off, uint32_t v) { for (int i = 0; i < 4; i++) hdr[off + i] = (uint8_t)(v >> (8 * i)); };
-    put32(2, file_size); put32(10, 54); put32(14, 40); put32(18, w); put32(22, h);
-    hdr[26] = 1; hdr[28] = 24; put32(34, row * h);
-    std::fwrite(hdr, 1, 54, f);
-    std::vector<uint8_t> line(row);
-    for (int y = h - 1; y >= 0; y--) {
-        for (int x = 0; x < w; x++) {
-            uint16_t p = vram[y * 1024 + x];
-            line[x * 3 + 0] = (uint8_t)(((p >> 10) & 31) << 3);
-            line[x * 3 + 1] = (uint8_t)(((p >> 5) & 31) << 3);
-            line[x * 3 + 2] = (uint8_t)((p & 31) << 3);
-        }
-        std::fwrite(line.data(), 1, row, f);
-    }
-    std::fclose(f);
 }
 
 GpuDisplay g_last_display{};
@@ -1178,66 +1050,11 @@ static void draw_game(const GpuDisplay& d) {
     present_swap();
 }
 
-// Test (APOC_BOT=DIR, tools/bot.py): an AI tester plays in steps. At the end of each step the
-// game stops, DIR/state.txt says where the player is (the step's picture is DIR/shot_FRAME.bmp)
-// and it waits for DIR/cmd.txt: "UP+SQUARE 30" = hold those buttons for 30 frames ("- 30" = none).
-static void bot_step() {
-    static const char* dir = std::getenv("APOC_BOT");
-    if (!dir || g_frame < g_bot_until || g_frame < 60) return;
-    const std::string d = dir;
-    if (g_bot_until) {  // report the step that just ended
-        auto ram_str = [](uint32_t a, size_t max) {  // progress record, see savestate.cpp
-            std::string s;
-            for (size_t i = 0; i < max && psx_ram[(a + i) & (PSX_RAM_SIZE - 1)]; i++) s += (char)psx_ram[(a + i) & (PSX_RAM_SIZE - 1)];
-            return s;
-        };
-        const std::string level = ram_str(0x800A53D8, 9), restart = ram_str(0x800A53E1, 24);
-        const uint32_t p = MEM_R32(g_cpu, 0x800FF5A0);  // the player object
-        if (FILE* f = std::fopen((d + "/state.tmp").c_str(), "w")) {
-            std::fprintf(f, "frame %llu\nshot %s/shot_%llu.bmp\nlevel %s\ncheckpoint %s\nlives %d\n",
-                         (unsigned long long)g_frame, dir, (unsigned long long)g_frame, level.c_str(), restart.c_str(),
-                         (int)MEM_R32(g_cpu, 0x800FF874));
-            if ((p & 0xFF000000u) == 0x80000000u)
-                std::fprintf(f, "health %d\npos %d %d %d\n", (int16_t)MEM_R16(g_cpu, p + 0xDA), (int32_t)MEM_R32(g_cpu, p + 4),
-                             (int32_t)MEM_R32(g_cpu, p + 8), (int32_t)MEM_R32(g_cpu, p + 12));
-            std::fclose(f);
-            std::error_code ec;  // (replaces state.txt)
-            std::filesystem::rename(d + "/state.tmp", d + "/state.txt", ec);
-        }
-    }
-    const std::string cmd = d + "/cmd.txt";
-    for (;;) {
-        SDL_PumpEvents();  // stay responsive while the tester thinks
-        if (FILE* f = std::fopen(cmd.c_str(), "r")) {
-            char buttons[128] = "";
-            int frames = 0;
-            const int n = std::fscanf(f, "%127s %d", buttons, &frames);
-            std::fclose(f);
-            std::remove(cmd.c_str());
-            if (n >= 1 && !std::strcmp(buttons, "quit")) std::exit(0);
-            if (n < 2 || frames < 1) continue;
-            g_bot_buttons = 0;
-            for (char* t = std::strtok(buttons, "+"); t; t = std::strtok(nullptr, "+")) g_bot_buttons |= button_bit(t);
-            g_bot_until = g_frame + (uint64_t)frames;
-            g_shot_frames.push_back(g_bot_until);
-            g_shot_prefix = d + "/shot";
-            return;
-        }
-        SDL_Delay(10);
-    }
-}
-
 void host_present(const GpuDisplay& d) {
-    bot_step();
     g_frame++;
     movie_vblank(d.enabled && d.rgb24 && gpu_movie_playing());
-    run_state_script();
+    if (g_start_state >= 0 && g_frame == 30) state_request_load(g_start_state);
     state_poll_load(g_cpu);
-    if (g_dump_vram_frame && g_frame == g_dump_vram_frame) {
-        write_vram_bmp(d.vram, g_dump_vram_path);
-        log_msg(LogCat::Host, "VRAM dumped to %s (display at %d,%d %dx%d%s)", g_dump_vram_path.c_str(), d.x, d.y,
-                d.w, d.h, d.rgb24 ? " 24-bit" : "");
-    }
     if (!g_gl_ok) return;
     static uint64_t fps_t0 = SDL_GetTicksNS(), fps_frames = 0, fps_images0 = 0, last_present = 0, dt_min = ~0ull,
                     dt_max = 0;
@@ -1294,10 +1111,6 @@ void host_present(const GpuDisplay& d) {
         fps_images0 = g_images;
     }
     g_last_display = d;
-    if (render_backend() == Backend::Vulkan) {
-        void vk_profile_frame(uint64_t frame);
-        vk_profile_frame(g_frame);
-    }
     draw_game(d);
 }
 
@@ -1554,14 +1367,6 @@ void draw_panel(const std::vector<std::string>& lines, int highlight) {
     }
     present_redraw(present_options());
     present_overlay_end();
-    // tests: APOC_MENU_SHOT=path.bmp saves menu image number APOC_MENU_SHOT_N (default the first)
-    if (static const char* shot = std::getenv("APOC_MENU_SHOT"); shot && *shot) {
-        static int n = 0, want = std::getenv("APOC_MENU_SHOT_N") ? std::atoi(std::getenv("APOC_MENU_SHOT_N")) : 0;
-        if (n++ == want) {
-            present_save_bmp(shot);
-            shot = "";
-        }
-    }
     present_swap();
 }
 
@@ -1569,13 +1374,6 @@ enum class MenuResult { Continue, Close, Quit };
 
 // Pumps events for the settings screen; returns key presses as SDL scancodes.
 MenuResult pump_menu_events(std::vector<SDL_Scancode>& keys) {
-    // tests: APOC_MENU_KEYS="d,d,d,e,r,e" (up/down/left/right/enter/x = escape), one key per pass
-    if (static const char* mk = std::getenv("APOC_MENU_KEYS"); mk && *mk) {
-        const char k = *mk;
-        mk += mk[1] == ',' ? 2 : 1;
-        keys.push_back(k == 'u' ? SDL_SCANCODE_UP : k == 'd' ? SDL_SCANCODE_DOWN : k == 'l' ? SDL_SCANCODE_LEFT
-                       : k == 'r' ? SDL_SCANCODE_RIGHT : k == 'x' ? SDL_SCANCODE_ESCAPE : SDL_SCANCODE_RETURN);
-    }
     SDL_Event e;
     mouse_autohide(nullptr);
     while (SDL_PollEvent(&e)) {
@@ -1644,7 +1442,6 @@ bool remap_keyboard(SDL_Scancode* out, bool* quit) {
             for (auto k : keys) {
                 if (k == SDL_SCANCODE_ESCAPE) return false;
                 if (k == SDL_SCANCODE_DELETE) { got = true; break; }
-                if (k == SDL_SCANCODE_F1) continue;
                 keys_out[bit_index(kRemapOrder[step].bit)] = k;
                 got = true;
                 break;
@@ -1701,7 +1498,7 @@ static bool pick_chapter(const std::vector<std::string>& chapters, int* chapter,
         if (pressed & (B_CROSS | B_START)) push_pad_key(keys, SDL_SCANCODE_RETURN);
         if (pressed & B_CIRCLE) push_pad_key(keys, SDL_SCANCODE_ESCAPE);
         for (auto k : keys) {
-            if (k == SDL_SCANCODE_ESCAPE || k == SDL_SCANCODE_F1 || k == SDL_SCANCODE_F2) return false;
+            if (k == SDL_SCANCODE_ESCAPE) return false;
             if (k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER) {
                 *chapter = cur;
                 return true;
@@ -1730,26 +1527,12 @@ static bool pick_chapter(const std::vector<std::string>& chapters, int* chapter,
     }
 }
 
-static int g_chapter_sel = 0;  // the chapter last chosen (shared by F1 -> Chapter and F2)
+static int g_chapter_sel = 0;  // the chapter last chosen
 
-// F2: the chapter list on its own, straight from the game. Paused like the settings screen.
 struct MenuOpen {  // (core.cpp watchdog: the game stops on purpose while a menu is open)
     MenuOpen() { g_host_menu_open = true; }
     ~MenuOpen() { g_host_menu_open = false; }
 };
-
-static void run_chapter_menu() {
-    MenuOpen open_flag;
-    const std::vector<std::string> chapters = state_chapter_names();
-    if (chapters.empty()) return;
-    if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
-    if (g_chapter_sel >= (int)chapters.size()) g_chapter_sel = 0;
-    bool quit = false;
-    if (pick_chapter(chapters, &g_chapter_sel, &quit)) state_request_load(kChapterBase + g_chapter_sel);
-    if (quit) g_quit = true;
-    if (g_audio) SDL_ResumeAudioStreamDevice(g_audio);
-    g_next_frame_ns = SDL_GetTicksNS();  // don't try to "catch up" the paused time
-}
 
 // Modal settings screen. The game is paused while it is open (this runs inside the
 // emulated VBlank), and audio is paused with it.
@@ -1806,7 +1589,6 @@ static void run_settings_menu() {
             int dir = k == SDL_SCANCODE_LEFT ? -1 : k == SDL_SCANCODE_RIGHT ? 1 : 0;
             if (k == SDL_SCANCODE_UP) sel = (sel + count - 1) % count;
             if (k == SDL_SCANCODE_DOWN) sel = (sel + 1) % count;
-            if (k == SDL_SCANCODE_F1) open = false;
             if (k == SDL_SCANCODE_ESCAPE) {
                 if (enh_page) open_page(false);
                 else open = false;
@@ -1995,7 +1777,6 @@ static void run_settings_menu() {
             lines.push_back("own main menu: Recomp Enhancements.");
         }
         lines.push_back("Arrows: change   Enter: pick   Esc: back");
-        if (!enh_page) lines.push_back("F2: chapters   F5/F9: save/load");
         draw_panel(lines, 1 + sel);
         SDL_Delay(15);
     }
@@ -2004,30 +1785,7 @@ static void run_settings_menu() {
     g_next_frame_ns = SDL_GetTicksNS();  // don't try to "catch up" the paused time
 }
 
-static uint64_t g_prof_sleep_ns = 0;  // pacing sleeps (APOC_FRAME_TIMES)
-static void sleep_ns(uint64_t ns) {
-    const uint64_t t0 = SDL_GetTicksNS();
-    SDL_DelayPrecise(ns);
-    g_prof_sleep_ns += SDL_GetTicksNS() - t0;
-}
-
 void host_throttle_frame() {
-    if (static const bool on = std::getenv("APOC_FRAME_TIMES") != nullptr; on) {  // debug: frames over N ms (default 20)
-        // with where the time went: waiting for the display (acquire/present), waiting for the
-        // GPU (fences), GPU work (Vulkan timestamps); the rest is the game's code and ours
-        extern uint64_t g_prof_fence_ns, g_prof_present_ns, g_prof_gpu_ns;
-        static uint64_t last = 0, p0 = 0, f0 = 0, g0 = 0, s0 = 0;
-        const uint64_t now = SDL_GetTicksNS();
-        auto d = [](uint64_t v, uint64_t v0) { return v >= v0 ? (double)(v - v0) / 1e6 : 0.0; };  // (reset by APOC_PROFILE)
-        static const uint64_t limit = (uint64_t)(std::max(0.0, std::atof(std::getenv("APOC_FRAME_TIMES"))) * 1e6) ?: 20000000ull;
-        if (last && now - last > limit) {
-            const double total = (double)(now - last) / 1e6, pr = d(g_prof_present_ns, p0), fe = d(g_prof_fence_ns, f0);
-            const double sl = d(g_prof_sleep_ns, s0);
-            std::fprintf(stderr, "SLOW frame %llu: %.1f ms (display %.1f, GPU wait %.1f, GPU work %.1f, sleep %.1f, CPU %.1f)\n",
-                         (unsigned long long)g_frame, total, pr, fe, d(g_prof_gpu_ns, g0), sl, total - pr - fe - sl);
-        }
-        last = now, p0 = g_prof_present_ns, f0 = g_prof_fence_ns, g0 = g_prof_gpu_ns, s0 = g_prof_sleep_ns;
-    }
     // vsync on (no tearing); a ~60 Hz display paces the frames itself (the swap waits), others
     // by our clock at the PS1's 59.94 Hz
     const bool want_vsync = !g_turbo;
@@ -2042,49 +1800,16 @@ void host_throttle_frame() {
     const uint64_t now = SDL_GetTicksNS();
     g_next_frame_ns += FRAME_NS;
     if (g_next_frame_ns > now) {
-        sleep_ns(g_next_frame_ns - now);
+        SDL_DelayPrecise(g_next_frame_ns - now);
     } else if (now - g_next_frame_ns > FRAME_NS * 4) {
         g_next_frame_ns = now;  // fell far behind (debugger, window drag): resync
     }
-}
-
-// --wav PATH: also write everything the SPU produces to a 44.1 kHz stereo WAV file.
-FILE* g_wav = nullptr;
-uint32_t g_wav_bytes = 0;
-
-static void wav_header(FILE* f, uint32_t data_bytes) {
-    auto w32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
-    auto w16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
-    std::fseek(f, 0, SEEK_SET);
-    std::fwrite("RIFF", 1, 4, f); w32(36 + data_bytes); std::fwrite("WAVEfmt ", 1, 8, f);
-    w32(16); w16(1); w16(2); w32(44100); w32(44100 * 4); w16(4); w16(16);
-    std::fwrite("data", 1, 4, f); w32(data_bytes);
-}
-
-bool host_open_wav(const char* path) {
-    g_wav = std::fopen(path, "wb");
-    if (!g_wav) return false;
-    wav_header(g_wav, 0);
-    return true;
-}
-
-void host_close_wav() {
-    if (!g_wav) return;
-    wav_header(g_wav, g_wav_bytes);
-    std::fclose(g_wav);
-    g_wav = nullptr;
 }
 
 // playback health, reported with the frame times (--log host)
 int g_audio_underruns = 0, g_audio_drops = 0, g_audio_min_queued = 1 << 30;
 
 void host_audio_push(const int16_t* stereo, int frames) {
-    if (g_wav) {
-        std::fwrite(stereo, 4, (size_t)frames, g_wav);
-        g_wav_bytes += (uint32_t)frames * 4;
-        wav_header(g_wav, g_wav_bytes);  // keep the file valid if the process is killed
-        std::fseek(g_wav, 0, SEEK_END);
-    }
     if (!g_audio || g_turbo) return;
     // Emulated time now follows the display (vsync), which is never exactly the PS1's
     // 59.94 Hz, so audio is produced slightly faster or slower than it plays. Nudge the

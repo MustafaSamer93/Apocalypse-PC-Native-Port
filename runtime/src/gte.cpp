@@ -663,9 +663,6 @@ void op_nc(int n, const Cmd& c, int kind) {
 
 // ================================================================ register interface
 
-extern uint64_t g_gte_dump_frame;
-static int g_gte_dumped;
-
 extern "C" uint32_t gte_read_data(R3000* c, int r) {
     C = c;
     switch (r) {
@@ -725,8 +722,6 @@ extern "C" uint32_t gte_read_ctrl(R3000* c, int r) {
 
 extern "C" void gte_write_ctrl(R3000* c, int r, uint32_t v) {
     C = c;
-    if (g_gte_dump_frame && host_frame_count() == g_gte_dump_frame && r <= 7 && g_gte_dumped < 12)
-        log_msg(LogCat::Gpu, "ctc2 %d = %08X (ra=%08X a0=%08X)", r, v, c->r[31], c->r[4]);
     if (r >= 5 && r <= 7) g_tr_loaded = true;  // a new pose-blend segment
     switch (r) {
         case 4: case 12: case 20: case 26: case 27: case 29: case 30:
@@ -767,43 +762,10 @@ void gte_frame_stats() {
     g_nclip_pos = g_nclip_neg = g_nclip_zero = g_rtp_err = g_rtp_divov = 0;
 }
 
-uint64_t g_gte_dump_frame = 0;  // --gte-dump FRAME: detailed log of RTPS/RTPT on that frame
-
-static void dump_rtp_state(const char* when, R3000* c) {
-    auto d = [&](int r) { return c->gte_data[r]; };
-    auto k = [&](int r) { return c->gte_ctrl[r]; };
-    if (when[0] == 'i') {
-        log_msg(LogCat::Gpu,
-                "  in : V0=(%d,%d,%d) V1=(%d,%d,%d) V2=(%d,%d,%d) RT=[%d %d %d|%d %d %d|%d %d %d] TR=(%d,%d,%d) "
-                "OF=(%d,%d) H=%u",
-                (int16_t)d(0), (int16_t)(d(0) >> 16), (int16_t)d(1), (int16_t)d(2), (int16_t)(d(2) >> 16),
-                (int16_t)d(3), (int16_t)d(4), (int16_t)(d(4) >> 16), (int16_t)d(5), (int16_t)k(0),
-                (int16_t)(k(0) >> 16), (int16_t)k(1), (int16_t)(k(1) >> 16), (int16_t)k(2), (int16_t)(k(2) >> 16),
-                (int16_t)k(3), (int16_t)(k(3) >> 16), (int16_t)k(4), k(5), k(6), k(7), k(24) >> 16, k(25) >> 16,
-                (uint16_t)k(26));
-    } else {
-        log_msg(LogCat::Gpu, "  out: MAC=(%d,%d,%d) SZ=(%d,%d,%d) SXY0=(%d,%d) SXY1=(%d,%d) SXY2=(%d,%d) FLAG=%08X",
-                d(25), d(26), d(27), d(17), d(18), d(19), (int16_t)d(12), (int16_t)(d(12) >> 16), (int16_t)d(13),
-                (int16_t)(d(13) >> 16), (int16_t)d(14), (int16_t)(d(14) >> 16), (uint32_t)k(31));
-    }
-}
-
 extern "C" void gte_command(R3000* c, uint32_t cmd) {
     C = c;
     if ((cmd & 0x3F) != 0x3D) g_mac_exact_ok = false;  // set by MVMVA, kept through GPF
     g_gte_counts[cmd & 0x3F]++;
-    bool dump = g_gte_dump_frame && host_frame_count() == g_gte_dump_frame && g_gte_dumped < 12 &&
-                ((cmd & 0x3F) == 0x01 || (cmd & 0x3F) == 0x30);
-    if (dump) {
-        g_gte_dumped++;
-        log_msg(LogCat::Gpu, "%s cmd=%07X", (cmd & 0x3F) == 1 ? "RTPS" : "RTPT", cmd);
-        dump_rtp_state("in", c);
-    }
-    struct Post { R3000* c; bool on; ~Post() { if (on) dump_rtp_state("out", c); } } post{c, dump};
-    if (g_gte_dump_frame && host_frame_count() == g_gte_dump_frame && (cmd & 0x3F) == 0x0C) {
-        log_msg(LogCat::Gpu, "OP cmd=%07X D=(%d,%d,%d) IR=(%d,%d,%d) ctrl0=%08X ctrl2=%08X ctrl4=%08X ra=%08X", cmd,
-                M(0, 0, 0), M(0, 1, 1), M(0, 2, 2), IR(1), IR(2), IR(3), K(0), K(2), K(4), c->r[31]);
-    }
     if (!g_unr_init) init_unr();
     FLAG() = 0;
     Cmd k;

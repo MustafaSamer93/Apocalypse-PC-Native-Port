@@ -853,18 +853,6 @@ void upload_word(uint32_t v) {
                 texdump_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (g_upload.x + g_upload.w > 512 && g_upload.h > 1) texreplace_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 texreplace_vram_written(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
-                if (static const char* dir = std::getenv("APOC_UPLOAD_DUMP"); dir) {  // raw uploads (tools/extract_textures.py)
-                    char name[512];
-                    static int seq = 0;
-                    std::snprintf(name, sizeof name, "%s/%05d_%06llu_%d_%d_%dx%d.bin", dir, seq++, (unsigned long long)host_frame_count(),
-                                  g_upload.x, g_upload.y, g_upload.w, g_upload.h);
-                    if (FILE* f = std::fopen(name, "wb")) {
-                        for (int r = 0; r < g_upload.h; r++)
-                            for (int q = 0; q < g_upload.w; q++)
-                                std::fwrite(&g_vram[((g_upload.y + r) & 511) * 1024 + ((g_upload.x + q) & 1023)], 2, 1, f);
-                        std::fclose(f);
-                    }
-                }
                 if (g_upload.h >= 200) g_picture_frame = host_frame_count(), core_early_cancel();  // (gpu_drawn_display)
                 replace_note_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 // a whole picture: replace it now, before the game draws on it in the same

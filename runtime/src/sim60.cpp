@@ -294,31 +294,30 @@ std::vector<std::pair<uint32_t, uint32_t>> g_effect_words_before;  // address, v
 struct MidWord {
     uint32_t addr, before, after;
     Kind kind;
-    uint32_t owner, list, cls;  // the effect it belongs to (for APOC_SIM60_CHECK)
+    uint32_t owner, list, cls;  // the effect it belongs to
     uint32_t serial, size_word;  // the owner's heap block header (see heap_block)
 };
 std::vector<MidWord> g_mid_words;
 uint64_t g_effect_frames = 0, g_effect_words = 0;
 
-// APOC_SIM60_CHECK=1 (debugging): after each step, every small object the world update will
-// run (800372B8: not skipped by +0x3F) must have a class (+0x44) with an update (+0x14).
-void check_small(R3000* c, const char* where, bool force = false) {
-    static const bool on = std::getenv("APOC_SIM60_CHECK") != nullptr;
+// After half-way effect words broke an object list (the log of a bug report): every small object
+// the world update will run (800372B8: not skipped by +0x3F) must have a class (+0x44) with an
+// update (+0x14); the ones that do not are listed, with the half-way words written near them.
+void report_small_lists(R3000* c) {
     static int reports = 0;
-    if ((!on && !force) || reports > 20) return;
+    if (reports > 20) return;
     for (uint32_t head = kGp + 0x578; head <= kGp + 0x5A8; head += 4) {
         uint32_t o = MEM_R32(c, head), prev = head - 4;
         for (int n = 0; o && n < 2048; n++, prev = o, o = MEM_R32(c, o + 4)) {
             if (!valid_ptr(o)) {
-                log_msg(LogCat::Host, "CHECK %s f=%llu list %08X: bad link %08X", where, (unsigned long long)host_frame_count(), head, o);
+                log_msg(LogCat::Host, "  list %08X: bad link %08X", head, o);
                 reports++;
                 break;
             }
             if (class_ok(c, head, o)) continue;
             const uint32_t cls = MEM_R32(c, o + 0x44);
-            log_msg(LogCat::Host, "CHECK %s f=%llu list %08X obj %08X cls %08X fn %08X draw %08X", where,
-                    (unsigned long long)host_frame_count(), head, o, cls, valid_ptr(cls) ? MEM_R32(c, cls + 0x14) : 0,
-                    valid_ptr(cls) ? MEM_R32(c, cls + 0x1C) : 0);
+            log_msg(LogCat::Host, "  list %08X obj %08X cls %08X fn %08X draw %08X", head, o, cls,
+                    valid_ptr(cls) ? MEM_R32(c, cls + 0x14) : 0, valid_ptr(cls) ? MEM_R32(c, cls + 0x1C) : 0);
             log_msg(LogCat::Host, "    reached from %08X (cls %08X)", prev, MEM_R32(c, prev + 0x44));
             for (const MidWord& m : g_mid_words)
                 if (m.addr >= prev && m.addr < prev + 0x100)
@@ -1259,7 +1258,7 @@ int sim60_render_lights_hidden(R3000* c) {
         if (told++ < 3) {
             log_msg(LogCat::Host, "sim60: half-way effect words broke an object list; undone (frame %llu)",
                     (unsigned long long)host_frame_count());
-            check_small(c, "mid words", true);
+            report_small_lists(c);
         }
         for (const MidWord* m : words) MEM_W32(c, m->addr, m->after);
         words.clear();
@@ -1280,17 +1279,14 @@ int sim60_render_lights_hidden(R3000* c) {
             MEM_W32(c, kTint + 4 * k, (uint32_t)(g_tint_before[k] + (g_tint_after[k] - g_tint_before[k]) / 2));
     const uint32_t ra = c->r[31], sp = c->r[29];
     g_in_render = true;
-    check_small(c, "mid words");
     // jointed models half way in both renders: they are drawn from their joints, not their
     // animation state, so the ghost render must draw the same pose (recording the pose after
     // the update pulled them on to 3/4 of the way, and their parts could not be paired)
     joints_mid(c);
     const bool split = joints_split(c);
     const bool blend = record_previous_pose(c, true, split);
-    check_small(c, "ghost render");
     gte_blend_begin(blend ? GteBlendMode::Blend : GteBlendMode::Off);
     call(c, kRender);
-    check_small(c, "mid render");
     gte_blend_begin(GteBlendMode::Off);
     joints_restore(c);
     g_in_render = false;
@@ -1317,7 +1313,6 @@ int sim60_render_lights_hidden(R3000* c) {
             if (turn && (int16_t)MEM_R16(c, a) == mid[k]) MEM_W16(c, a, (uint16_t)op->rot_after[k]);
         }
     }
-    check_small(c, "restore");
     return 1;
 }
 
@@ -1380,7 +1375,6 @@ extern "C" int psx_hook_tick(R3000* c) {
     if (g_in_tick) return 0;  // the game's own tick, run from below
     uint32_t t = MEM_R32(c, kHalfTicks);
     if (!psx_opt_sim60) return 0;
-    check_small(c, t & 1 ? "before odd tick" : "before world tick");
     repair_small_lists(c);
 
     const uint32_t ra = c->r[31], sp = c->r[29];
@@ -1455,7 +1449,6 @@ extern "C" int psx_hook_tick(R3000* c) {
         odd_lights_made(c, lights_before);
         zones_odd_tick(c);
         call(c, kUpdateCameras, MEM_R32(c, kCameraList));
-        check_small(c, "odd tick");
     }
     g_in_tick_any = false;
     retime(c, before, t & 1);

@@ -409,25 +409,10 @@ bool save_bmp_bgrx(const uint8_t* px, int w, int h, const char* path) {
 }
 
 void gl_present_swap() {
-    extern uint64_t g_prof_present_ns;  // (present_vk.cpp: time waiting for the display)
-    const uint64_t t0 = SDL_GetTicksNS();
     SDL_GL_SwapWindow(g_win);
     // Waits until the swap is done: the driver otherwise queues 1-2 more frames ahead of the
     // display, each one refresh of input lag.
     glFinish();
-    const uint64_t t1 = SDL_GetTicksNS();
-    g_prof_present_ns += t1 - t0;
-    // APOC_PROFILE: controller read -> its frame swapped (average over 120 frames)
-    extern uint64_t g_input_read_ns;
-    static const bool prof = std::getenv("APOC_PROFILE") != nullptr;
-    static uint64_t sum = 0, n = 0;
-    if (prof && g_input_read_ns && t1 > g_input_read_ns) {
-        sum += t1 - g_input_read_ns;
-        if (++n == 120) {
-            log_msg(LogCat::Host, "input to screen: %.1f ms", (double)sum / 1e6 / (double)n);
-            sum = n = 0;
-        }
-    }
 }
 
 bool gl_present_window_to_game(float wx, float wy, float* x, float* y) {

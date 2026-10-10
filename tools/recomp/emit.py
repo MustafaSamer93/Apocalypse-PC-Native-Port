@@ -101,11 +101,9 @@ INSN_HOOKS = {
 }
 
 # jal sites whose call can be switched off at runtime: address -> runtime flag name.
-# 80030BCC: the main loop's second VBlank wait (the game's 30 fps cap).
 # 80030B80 / 80030BBC: the loop's second tick and its extra VBlank wait (sim60.cpp:
 #   one tick and one render per VBlank).
 OPTIONAL_CALLS = {
-    0x80030BCC: "psx_opt_skip_frame_wait",
     0x80030B80: "psx_opt_sim60",
     0x80030BBC: "psx_opt_sim60",
     0x800145BC: "psx_opt_menu60",  # the front end's (menus) second VBlank wait

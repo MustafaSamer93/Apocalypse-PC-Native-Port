@@ -110,7 +110,6 @@ void walk(uint32_t lba, uint32_t size, int depth) {
 
 void scan() {
     g_scanned = true;
-    if (std::getenv("APOC_NO_MOVIE_REPLACE")) return;  // (tests: the disc's movies)
     uint8_t pvd[2048];
     if (!cdrom_read_sector_user(16, pvd)) return;
     uint32_t root, size;

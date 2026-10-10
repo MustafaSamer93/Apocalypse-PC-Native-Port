@@ -255,9 +255,6 @@ void psx_run_events(R3000* c) {
 static uint32_t g_scanline = 0;
 constexpr uint32_t VBLANK_START_LINE = 240;
 
-uint64_t g_dump_ram_at = 0;
-std::string g_dump_ram_path;
-
 // Presenting (scanline_event): whether this refresh still waits for its picture, and the frame
 // shown early (core_frame_drawn) until the game flips to it.
 static bool g_pending = false, g_flip_seen = false, g_early_valid = false;
@@ -266,15 +263,11 @@ static uint8_t g_flips = 0;  // one bit a frame: the game showed a new frame
 static GpuDisplay g_early{};
 
 static void present_frame(R3000* c, const GpuDisplay& d) {
-    static uint64_t last_read = 0;
-    extern uint64_t g_input_read_ns;  // APOC_PROFILE: the read the frame was made from (present_vk.cpp)
-    g_input_read_ns = last_read;
     g_pending = false;
     host_present(d);
     host_throttle_frame();
     host_poll();
     bios_pad_refresh(c);
-    last_read = SDL_GetTicksNS();
     if (host_quit_requested()) std::exit(0);
 }
 
@@ -303,15 +296,6 @@ void core_frame_drawn(R3000* c) {
 }
 
 static void scanline_event(R3000* c) {
-    if (g_dump_ram_at && c->cycles >= g_dump_ram_at) {
-        g_dump_ram_at = 0;
-        if (FILE* f = std::fopen(g_dump_ram_path.c_str(), "wb")) {
-            std::fwrite(psx_ram, 1, PSX_RAM_SIZE, f);
-            std::fclose(f);
-            log_msg(LogCat::Core, "RAM dumped to %s at cycle %llu", g_dump_ram_path.c_str(),
-                    (unsigned long long)c->cycles);
-        }
-    }
     g_scanline++;
     if (g_scanline >= SCANLINES_NTSC) g_scanline = 0;
     bool vbl_start = g_scanline == VBLANK_START_LINE;
@@ -567,24 +551,8 @@ RecompFuncPtr dispatch_lookup(uint32_t addr) {
     return it == g_funcs.end() ? nullptr : it->second;
 }
 
-int psx_opt_skip_frame_wait = 0;
-
-uint32_t g_trace_call_addr = 0;  // --trace-call: log calls to this function (interp mode)
-static int g_trace_call_count = 0;
-
 void call_indirect(R3000* c, uint32_t addr) {
     uint32_t p = addr & 0x1FFFFFFF;
-    if (g_trace_call_addr && canonical_code_addr(addr) == g_trace_call_addr && g_trace_call_count < 400) {
-        g_trace_call_count++;
-        log_msg(LogCat::Core, "call %08X a0=%08X a1=%08X a2=%08X a3=%08X ra=%08X frame=%llu", addr, c->r[4], c->r[5],
-                c->r[6], c->r[7], c->r[31], (unsigned long long)host_frame_count());
-        for (int a = 0; a < 2; a++) {
-            uint32_t p = c->r[4 + a];
-            if (!PSX_IS_RAM(p) || p < 0x80000000u) continue;
-            log_msg(LogCat::Core, "    [a%d] %08X %08X %08X %08X %08X %08X", a, MEM_R32(c, p), MEM_R32(c, p + 4),
-                    MEM_R32(c, p + 8), MEM_R32(c, p + 12), MEM_R32(c, p + 16), MEM_R32(c, p + 20));
-        }
-    }
     if (p == 0xA0) { bios_call_a0(c); return; }
     if (p == 0xB0) { bios_call_b0(c); return; }
     if (p == 0xC0) { bios_call_c0(c); return; }
@@ -629,22 +597,6 @@ void psx_sp_mismatch(R3000* c, uint32_t pc, uint32_t expected, uint32_t actual) 
     reported.push_back(pc);
     log_msg(LogCat::Core, "jr ra at %08X: sp=%08X but the function was entered with sp=%08X (ra=%08X cycles=%llu)",
             pc, actual, expected, c->r[31], (unsigned long long)c->cycles);
-}
-
-uint32_t psx_watch_addr = 0;
-
-void psx_watch_hit(R3000* c, uint32_t addr, uint32_t value, int size) {
-    log_msg(LogCat::Core, "watch: write%d %08X = %08X  (ra=%08X sp=%08X a0=%08X a1=%08X a2=%08X s0=%08X s1=%08X cycles=%llu)",
-            size * 8, addr, value, c->r[31], c->r[29], c->r[4], c->r[5], c->r[6], c->r[16], c->r[17],
-            (unsigned long long)c->cycles);
-}
-
-// DMA and other runtime-side writes to RAM report through here too.
-void psx_watch_dma(uint32_t phys, uint32_t len, const char* who) {
-    if (!psx_watch_addr) return;
-    if (psx_watch_addr >= (phys & 0x1FFFFC) && psx_watch_addr < (phys & 0x1FFFFC) + len)
-        log_msg(LogCat::Core, "watch: %s wrote %08X..%08X (cycles=%llu)", who, phys, phys + len,
-                (unsigned long long)g_cpu->cycles);
 }
 
 // ================================================================ save states

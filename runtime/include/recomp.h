@@ -47,15 +47,6 @@ extern int psx_cache_isolated;  // COP0 SR.IsC: stores go to the (unemulated) I-
 uint32_t mem_read_slow(R3000* c, uint32_t addr, int size);
 void mem_write_slow(R3000* c, uint32_t addr, uint32_t value, int size);
 
-// Debug write watchpoint (--watch): physical word address, 0 = off.
-extern uint32_t psx_watch_addr;
-void psx_watch_hit(R3000* c, uint32_t addr, uint32_t value, int size);
-#define PSX_WATCH_CHECK(c, a, v, n)                                                         \
-    do {                                                                                    \
-        if (RECOMP_UNLIKELY(psx_watch_addr) && (((a) & 0x1FFFFCu) == psx_watch_addr))      \
-            psx_watch_hit((c), (a), (v), (n));                                              \
-    } while (0)
-
 // RAM is 2 MB mirrored four times in the low 8 MB of each segment (KUSEG/KSEG0/KSEG1).
 #define PSX_IS_RAM(a) (((a) & 0x1F800000u) == 0)
 #define PSX_IS_SCRATCH(a) (((a) & 0x1FFFFC00u) == 0x1F800000u)
@@ -76,7 +67,6 @@ void psx_watch_hit(R3000* c, uint32_t addr, uint32_t value, int size);
 #define DEFINE_MEM_WRITE(bits, type)                                             \
     RECOMP_INLINE void MEM_W##bits(R3000* c, uint32_t a, uint32_t value) {       \
         type v = (type)value;                                                    \
-        PSX_WATCH_CHECK(c, a, value, bits / 8);                                  \
         if (RECOMP_LIKELY(PSX_IS_RAM(a) && !psx_cache_isolated)) {               \
             memcpy(psx_ram + (a & (PSX_RAM_SIZE - 1)), &v, sizeof v);            \
             return;                                                              \
@@ -268,7 +258,6 @@ void psx_hook_weapon_pickup(R3000* c);  // 8005E260 give a weapon (a0 player, a1
 void psx_hook_message(R3000* c);  // 8001B788 show a message (a0 text)
 
 // Runtime switches for patched call sites (see OPTIONAL_CALLS in tools/recomp/emit.py).
-extern int psx_opt_skip_frame_wait;  // 1 = skip the main loop's second VBlank wait (60 fps)
 extern int psx_opt_sim60;            // 1 = 60 Hz simulation prototype (sim60.cpp)
 extern int psx_opt_menu60;           // 1 = the front end (menus) runs at 60 Hz (game_menu.cpp)
 extern int psx_opt_menu_odd;         // 1 = this front end loop is an in-between one (60 Hz)

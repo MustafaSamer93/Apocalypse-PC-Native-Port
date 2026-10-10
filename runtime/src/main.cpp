@@ -42,8 +42,7 @@ bool host_init(const char* title, int scale);
 void host_shutdown();
 bool host_parse_press_script(const char* spec);
 void host_set_turbo(bool on);
-bool host_open_wav(const char* path);
-void host_close_wav();
+extern int g_start_state;
 
 namespace {
 
@@ -55,17 +54,18 @@ uint32_t fnv1a(const uint8_t* p, size_t n) {
 
 void usage() {
     std::printf(
-        "usage: repocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--log cats]\n"
+        "usage: repocalypse [options]\n"
         "  --cue PATH         disc image .cue or .bin (default: the image in assets/image)\n"
-        "  --memcard-dir DIR  where memory card images are kept (default: saves)\n"
         "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
-        "  --refresh HZ       display refresh rate to assume (if the detected one is wrong)\n"
         "  --sim60            60 Hz simulation in every level (default: levels 1-4 only; F1 menu)\n"
-        "  --chapter N        start at chapter N (saves/chapters; F2 or F1 -> Chapter lists them)\n"
-        "  --renderer R       opengl or vulkan (default: the F1 setting; at first OpenGL, Vulkan on Linux)\n"
-        "keys: arrows, Z=Cross X=Circle A=Square S=Triangle Q/W=L1/R1 1/2=L2/R2\n"
-        "      Enter=Start Backspace=Select Tab=fast-forward F2=chapters F11=fullscreen Esc=quit\n");
+        "  --chapter N        start at chapter N (saves/chapters; Settings -> Chapter lists them)\n"
+        "  --renderer R       opengl or vulkan (default: the saved setting)\n"
+        "  --turbo            run as fast as possible (also: hold Tab)\n"
+        "  --press LIST       scripted input: BUTTON@FRAME[+FRAMES],... (tests)\n"
+        "  --screenshot LIST PREFIX  save frames FRAME,FRAME,... as PREFIX_FRAME.bmp (tests)\n"
+        "keys: WASD/arrows move, J/K/L/I = Square/Cross/Circle/Triangle, Q/E = L1/R1, Z/C = L2/R2,\n"
+        "      Enter = Start, Backspace = Select, Tab = fast-forward, Esc = quit\n");
 }
 
 // The assets folder: the game disc (required) and the optional extras, made at start so the
@@ -229,9 +229,7 @@ int main(int argc, char** argv) {
         if (std::freopen("debug/repocalypse.log", "a", stderr)) std::setvbuf(stderr, nullptr, _IONBF, 0);
     }
     std::string cue;  // --cue, else find_disc()
-    std::string card_dir = "saves";
     int scale = 0;  // window: 0 = 1080 lines or as much as fits
-    bool interp_only = false;  // debugging: run everything in the interpreter
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -239,18 +237,9 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--cue") cue = next();
-        else if (a == "--memcard-dir") card_dir = next();
         else if (a == "--scale") scale = std::max(1, std::atoi(next().c_str()));
         else if (a == "--log") log_enable(next().c_str());
-        else if (a == "--dump-ram") {  // --dump-ram CYCLES PATH
-            extern uint64_t g_dump_ram_at;
-            extern std::string g_dump_ram_path;
-            g_dump_ram_at = std::strtoull(next().c_str(), nullptr, 10);
-            g_dump_ram_path = next();
-        }
         else if (a == "--turbo") host_set_turbo(true);
-        else if (a == "--interp") interp_only = true;
-        else if (a == "--fps60") psx_opt_skip_frame_wait = 1;
         else if (a == "--sim60") {  // 60 Hz simulation in any level (sim60.cpp)
             g_sim60_force = true;
             sim60_apply();
@@ -260,21 +249,10 @@ int main(int argc, char** argv) {
             std::string r = next();
             g_renderer_override = r == "vulkan" ? 1 : r == "opengl" ? 0 : -1;
         }
-        else if (a == "--refresh") {  // --refresh HZ: display refresh rate to assume
-            extern float g_refresh_override;
-            g_refresh_override = (float)std::atof(next().c_str());
-        }
         else if (a == "--chapter") {  // --chapter N: load chapter N (1 = the first) once running
-            extern bool host_parse_state_script(const char*);
             const int n = std::atoi(next().c_str());
-            if (n < 1 || !host_parse_state_script(("load" + std::to_string(kChapterBase + n - 1) + "@30").c_str())) {
-                usage();
-                return 1;
-            }
-        }
-        else if (a == "--states") {
-            extern bool host_parse_state_script(const char*);
-            if (!host_parse_state_script(next().c_str())) { usage(); return 1; }
+            if (n < 1) { usage(); return 1; }
+            g_start_state = kChapterBase + n - 1;
         }
         else if (a == "--screenshot") {  // --screenshot FRAME[,FRAME...] PREFIX
             extern std::vector<uint64_t> g_shot_frames;
@@ -288,27 +266,9 @@ int main(int argc, char** argv) {
             }
             g_shot_prefix = next();
         }
-        else if (a == "--wav") {
-            if (!host_open_wav(next().c_str())) { std::fprintf(stderr, "cannot write wav\n"); return 1; }
-        }
-        else if (a == "--trace-call") {
-            extern uint32_t g_trace_call_addr;
-            g_trace_call_addr = (uint32_t)std::strtoul(next().c_str(), nullptr, 16);
-        }
-        else if (a == "--gte-dump") {
-            extern uint64_t g_gte_dump_frame;
-            g_gte_dump_frame = std::strtoull(next().c_str(), nullptr, 10);
-        }
-        else if (a == "--dump-vram") {  // --dump-vram FRAME PATH
-            extern uint64_t g_dump_vram_frame;
-            extern std::string g_dump_vram_path;
-            g_dump_vram_frame = std::strtoull(next().c_str(), nullptr, 10);
-            g_dump_vram_path = next();
-        }
         else if (a == "--press") {
             if (!host_parse_press_script(next().c_str())) { usage(); return 1; }
         }
-        else if (a == "--watch") psx_watch_addr = (uint32_t)std::strtoul(next().c_str(), nullptr, 16) & 0x1FFFFC;
         else if (a == "--help" || a == "-h") { usage(); return 0; }
         else { usage(); return 1; }
     }
@@ -330,9 +290,9 @@ int main(int argc, char** argv) {
     g_cpu = &cpu;
 
     cdrom_init(cue);
-    std::filesystem::create_directories(card_dir);
-    memcard(0).load_or_create(card_dir + "/card1.mcr");
-    memcard(1).load_or_create(card_dir + "/card2.mcr");
+    std::filesystem::create_directories("saves");
+    memcard(0).load_or_create("saves/card1.mcr");
+    memcard(1).load_or_create("saves/card2.mcr");
 
     if (!host_init("Repocalypse", scale)) fatal("could not initialise the window/audio");
     watchdog_start();
@@ -344,7 +304,7 @@ int main(int argc, char** argv) {
     mdec_init();
     sio_init();
     bios_init(&cpu);
-    if (!interp_only) dispatch_register(main_func_table, main_func_count);
+    dispatch_register(main_func_table, main_func_count);
 
     uint32_t entry = load_exe_from_disc(&cpu);
     cpu.r[29] = 0x801FFF00;  // STACK from SYSTEM.CNF
@@ -372,7 +332,6 @@ int main(int argc, char** argv) {
     log_msg(LogCat::Core, "game returned from its entry point");
     memcard(0).flush();
     memcard(1).flush();
-    host_close_wav();
     host_shutdown();
     return 0;
 }

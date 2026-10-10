@@ -111,7 +111,6 @@ static void interp_loop(R3000* c, uint32_t pc, const uint32_t return_to);
 // jal sites switched off at runtime; keep in sync with OPTIONAL_CALLS in tools/recomp/emit.py
 static bool optional_call_skipped(uint32_t pc) {
     switch (pc) {
-        case 0x80030BCC: return psx_opt_skip_frame_wait != 0;
         case 0x80030B80:
         case 0x80030BBC: return psx_opt_sim60 != 0;
         case 0x800145BC: return psx_opt_menu60 != 0;

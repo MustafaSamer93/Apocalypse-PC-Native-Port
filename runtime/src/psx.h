@@ -271,4 +271,3 @@ inline uint8_t* ram_ptr(uint32_t addr) { return psx_ram + (addr & (PSX_RAM_SIZE 
 std::string ram_cstr(uint32_t addr, size_t max = 256);
 
 extern R3000* g_cpu;
-void psx_watch_dma(uint32_t phys, uint32_t len, const char* who);

@@ -107,15 +107,8 @@ void set_viewport_scissor(int sx, int sy, int sw, int sh) {
     vkCmdSetScissor(cb(), 0, 1, &sc);
 }
 
-// APOC_PROFILE: what the renderer did, logged every 2 seconds (vk_profile_frame).
-struct Prof {
-    uint64_t flushes, verts, syncs, sync_px, readbacks, read_px, uploads, up_px, copies, caps;
-} g_prof;
-
 void flush() {
     if (g_batch.empty()) return;
-    g_prof.flushes++;
-    g_prof.verts += g_batch.size();
     // textures come from `read`; once it is readable, batches follow each other in one rendering
     VkImg& tex = g_read;
     VkImg& hd = g_hd.image ? g_hd : tex;  // (set 1 must hold an image even with no replacements)
@@ -169,8 +162,6 @@ void flush() {
 void sync_read() {
     flush();
     if (!g_dirty) return;
-    g_prof.syncs++;
-    g_prof.sync_px += (uint64_t)(g_dx1 - g_dx0) * (g_dy1 - g_dy0);
     vkc::end_rendering();
     vkc::transition(g_draw, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     vkc::transition(g_read, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -495,8 +486,6 @@ void vk_hw_fill(int x, int y, int w, int h, uint16_t color) {
 }
 
 void vk_hw_upload(int x, int y, int w, int h, const uint16_t* vram) {
-    g_prof.uploads++;
-    g_prof.up_px += (uint64_t)w * h;
     flush();
     for (int yy = y; yy < y + h;) {  // the region may wrap around the edges of VRAM
         int ry = yy & 511, rh = std::min(y + h - yy, 512 - ry);
@@ -546,7 +535,6 @@ void vk_hw_draw_picture(int x, int y, int w, int h, const uint32_t* rgba) {
 }
 
 void vk_hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
-    g_prof.copies++;
     if (w <= 0 || h <= 0) return;
     if (overlaps_dirty(sx, sy, sx + w, sy + h)) sync_read();
     else flush();
@@ -562,8 +550,6 @@ void vk_hw_readback(int x, int y, int w, int h, uint16_t* vram) {
     w = std::min(w, 1024 - x);
     h = std::min(h, 512 - y);
     if (w <= 0 || h <= 0) return;
-    g_prof.readbacks++;
-    g_prof.read_px += (uint64_t)w * h;
     sync_read();
     vkc::end_rendering();
     // The GPU shrinks the area to native size first (one pixel of each S x S block), so only that
@@ -617,34 +603,4 @@ void vk_renderer_destroy() {
         if (*m) vkDestroyShaderModule(vkc::device, *m, nullptr), *m = VK_NULL_HANDLE;
     for (VkPipelineLayout* l : {&g_layout, &g_copy_layout})
         if (*l) vkDestroyPipelineLayout(vkc::device, *l, nullptr), *l = VK_NULL_HANDLE;
-}
-
-extern uint64_t g_prof_submits, g_prof_waits, g_prof_fence_ns, g_prof_present_ns, g_prof_gpu_ns;
-extern uint64_t g_prof_input_ns, g_prof_input_n;
-
-// APOC_PROFILE: logs the renderer's work per second every 120 frames (host_sdl.cpp).
-void vk_profile_frame(uint64_t frame) {
-    static const bool on = std::getenv("APOC_PROFILE") != nullptr;
-    if (!on || frame % 120 != 0) return;
-    const Prof& p = g_prof;
-    std::fprintf(stderr,
-                 "PROF frame %llu per s: %llu batches, %llu verts, %llu syncs (%llu kpx), %llu readbacks (%llu kpx), "
-                 "%llu uploads (%llu kpx), %llu copies, %llu captures, %llu submits, %llu GPU waits\n",
-                 (unsigned long long)frame, (unsigned long long)p.flushes / 2, (unsigned long long)p.verts / 2,
-                 (unsigned long long)p.syncs / 2, (unsigned long long)p.sync_px / 2000, (unsigned long long)p.readbacks / 2,
-                 (unsigned long long)p.read_px / 2000, (unsigned long long)p.uploads / 2, (unsigned long long)p.up_px / 2000,
-                 (unsigned long long)p.copies / 2, (unsigned long long)p.caps / 2, (unsigned long long)g_prof_submits / 2,
-                 (unsigned long long)g_prof_waits / 2);
-    static uint64_t last = 0;
-    const uint64_t now = SDL_GetTicksNS();
-    if (last)
-        std::fprintf(stderr, "PROF time: %.1f ms a frame; GPU busy %.1f ms; waiting for GPU %.1f ms, for the display %.1f ms; "
-                     "controller read to screen %.1f ms\n",
-                     (double)(now - last) / 120e6, (double)g_prof_gpu_ns / 120e6, (double)g_prof_fence_ns / 120e6, (double)g_prof_present_ns / 120e6,
-                     g_prof_input_n ? (double)g_prof_input_ns / 1e6 / (double)g_prof_input_n : 0.0);
-    last = now;
-    g_prof_input_ns = g_prof_input_n = 0;
-    g_prof_fence_ns = g_prof_present_ns = g_prof_gpu_ns = 0;
-    g_prof = Prof{};
-    g_prof_submits = g_prof_waits = 0;
 }

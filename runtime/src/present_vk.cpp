@@ -21,11 +21,6 @@
 
 void vk_renderer_destroy();
 
-uint64_t g_prof_present_ns = 0;  // time in acquire / present (APOC_PROFILE, gpu_vk.cpp)
-uint64_t g_prof_input_ns = 0, g_prof_input_n = 0;  // controller read -> its frame on screen
-uint64_t g_input_read_ns = 0;  // when the controller was read for the frame being shown (core.cpp)
-static uint64_t g_input_shown_from = 0;
-
 namespace {
 
 SDL_Window* g_win = nullptr;
@@ -183,14 +178,7 @@ VkImg* frame() {
     if (g_have_image) return &g_swap_imgs[g_index];
     for (int attempt = 0; attempt < 3; attempt++) {
         if ((g_swap_dirty || !g_swap) && !recreate_swapchain()) return nullptr;
-        const uint64_t t0 = SDL_GetTicksNS();
         VkResult r = vkAcquireNextImageKHR(vkc::device, g_swap, UINT64_MAX, g_acquired[vkc::frame_slot()], VK_NULL_HANDLE, &g_index);
-        g_prof_present_ns += SDL_GetTicksNS() - t0;
-        if (g_input_shown_from) {
-            g_prof_input_ns += SDL_GetTicksNS() - g_input_shown_from;
-            g_prof_input_n++;
-            g_input_shown_from = 0;
-        }
         if (r == VK_ERROR_OUT_OF_DATE_KHR) {
             g_swap_dirty = true;
             continue;
@@ -447,17 +435,12 @@ void vk_present_swap() {
     pi.swapchainCount = 1;
     pi.pSwapchains = &g_swap;
     pi.pImageIndices = &g_index;
-    const uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkQueuePresentKHR(vkc::queue, &pi);
-    g_prof_present_ns += SDL_GetTicksNS() - t0;
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) g_swap_dirty = true;
     g_have_image = false;
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(g_win, &pw, &ph);
     if (!g_swap_imgs.empty() && (pw != g_swap_imgs[0].w || ph != g_swap_imgs[0].h)) g_swap_dirty = true;
-    // APOC_PROFILE: the controller read this frame was made from, to the frame on the screen
-    // (with vsync, when the next image is free; it is acquired at the next present)
-    if (g_input_read_ns) g_input_shown_from = g_input_read_ns;
 }
 
 // --screenshot FRAME PATH support: saves the frame drawn so far as a BMP.

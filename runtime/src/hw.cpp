@@ -108,7 +108,6 @@ void dma_run(R3000* c, int ch) {
             addr = (addr - 4) & 0x1FFFFC;
         }
         LOG(Dma, "OTC %08X x%u", d.madr, n);
-        psx_watch_dma((d.madr - (n - 1) * 4) & 0x1FFFFC, n * 4, "OTC DMA");
         dma_finish(c, ch);
         return;
     }
@@ -153,10 +152,6 @@ void dma_run(R3000* c, int ch) {
         d.bcr &= 0xFFFF;  // block count reaches zero
     }
     LOG(Dma, "ch%d %s %u words", ch, from_ram ? "from RAM" : "to RAM", n);
-    if (!from_ram || ch == 1 || ch == 3) {
-        static const char* names[] = {"MDECin DMA", "MDECout DMA", "GPU DMA", "CD DMA", "SPU DMA", "PIO DMA", "OTC DMA"};
-        psx_watch_dma(step > 0 ? d.madr & 0x1FFFFC : (d.madr - (n - 1) * 4) & 0x1FFFFC, n * 4, names[ch]);
-    }
     delay = n;
     Ev ev = ch == 3 ? Ev::DmaCd : ch == 4 ? Ev::DmaSpu : (ch == 0 || ch == 1) ? Ev::DmaMdec : Ev::DmaGpu;
     if (ch == 0) {
