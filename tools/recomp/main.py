@@ -18,7 +18,7 @@ FUNCS_PER_FILE = 150
 
 
 def load_extra_seeds(path: Path) -> set[int]:
-    """Entry points the runtime found itself interpreting (see runtime/src/interp.cpp)."""
+    """Entry points the runtime found itself interpreting (see runtime/src/core/interp.cpp)."""
     if not path.exists():
         return set()
     seeds = set()
@@ -102,7 +102,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", default="extracted/SLUS_003.73")
     ap.add_argument("--out", default="generated")
-    ap.add_argument("--seeds", default="extra_seeds.txt",
+    ap.add_argument("--seeds", default=str(Path(__file__).with_name("extra_seeds.txt")),
                     help="extra function entry points, one hex address per line")
     ap.add_argument("--no-ra-check", action="store_true",
                     help="omit the debug check that jr ra returns to the caller")

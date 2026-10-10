@@ -10,7 +10,6 @@ REG_NAMES = [
     "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra",
 ]
 RA = 31
-SP = 29
 
 # Instruction kinds, used by analysis and the emitter.
 K_ALU = "alu"

@@ -120,7 +120,7 @@ def textures(b):
 
 def decode(entry, pals, all_pals):
     """One texture as RGBA bytes (None without its palette)."""
-    (flag, ncol, pid, idx, w, h, size), data = entry
+    (_flag, ncol, pid, _index, w, h, _size), data = entry
     pal = pals.get(pid) or all_pals.get(pid)
     if pal is None or len(pal) != ncol:
         return None

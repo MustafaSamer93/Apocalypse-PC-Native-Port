@@ -4,6 +4,7 @@
 // It runs one "function": it returns when execution jumps to the return address the
 // function was entered with. Calls it makes go back through call_indirect, so
 // recompiled code is used wherever it exists.
+#include <filesystem>
 #include <unordered_set>
 
 #include "core/psx.h"
@@ -14,15 +15,19 @@ uint32_t fetch(R3000* c, uint32_t pc) { return MEM_R32(c, pc); }
 
 int32_t simm(uint32_t w) { return (int16_t)(w & 0xFFFF); }
 
-// Called functions that were not recompiled are appended to extra_seeds.txt;
-// tools/recomp/main.py reads it so the next recompile makes them native. Jumps into the
-// middle of a function are only logged: they are not function entry points.
+// Called functions that were not recompiled are appended to tools/recomp/extra_seeds.txt (in a
+// source checkout: never in a player's game folder); tools/recomp/main.py reads it so the next
+// recompile makes them native. Jumps into the middle of a function are only logged: they are
+// not function entry points.
 void report_once(uint32_t pc, bool is_call) {
     static std::unordered_set<uint32_t> seen;
     if (!seen.insert(pc).second) return;
     log_msg(LogCat::Core, "interpreting unrecompiled code at %08X%s", pc, is_call ? "" : " (intra-function jump)");
     if (!is_call || (pc & 0x1FFFFFFF) < 0x10000) return;  // not code: a jump through a null pointer
-    if (FILE* f = std::fopen("extra_seeds.txt", "a")) {
+    constexpr const char* kSeeds = "tools/recomp/extra_seeds.txt";
+    std::error_code ec;
+    if (!std::filesystem::exists(kSeeds, ec)) return;
+    if (FILE* f = std::fopen(kSeeds, "a")) {
         std::fprintf(f, "%08X\n", pc);
         std::fclose(f);
     }
