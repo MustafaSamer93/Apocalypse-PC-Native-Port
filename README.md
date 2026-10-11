@@ -1,9 +1,9 @@
 # Project_Repocalypse
 
 A static recompilation of **Apocalypse** (PlayStation, Neversoft/Activision 1998, NTSC-U
-`SLUS-00373`) to native Windows code. The game's MIPS R3000A machine code is translated
-ahead of time into C, compiled with a normal compiler, and linked against a runtime that
-reimplements the PlayStation hardware and BIOS. There is no CPU emulator in the loop.
+`SLUS-00373`) to native Windows and Linux code. The game's MIPS R3000A machine code is
+translated ahead of time into C, compiled with a normal compiler, and linked against a runtime
+that reimplements the PlayStation hardware and BIOS. There is no CPU emulator in the loop.
 
 **No game data is included.** You need your own copy of the disc. The build reads the
 executable from your disc image, and the program reads everything else from it at runtime.
@@ -12,42 +12,41 @@ executable from your disc image, and the program reads everything else from it a
 
 | Area | State |
 |---|---|
-| Boot, BIOS (high-level reimplementation) | working |
-| FMV (MDEC + CD streaming) | working |
-| 2D (title, HUD, menus) | working |
-| 3D gameplay (GTE + hardware renderer, 1x-8x internal resolution) | working |
-| Renderers: OpenGL 3.3 and Vulkan 1.3 (setting "Renderer"; falls back to OpenGL if Vulkan cannot start) | working |
-| 4:3 / 16:9 / 16:10 (widescreen widens the 3D view; the HUD keeps its proportions in the screen corners, menu text and button icons keep their proportions too; movies fill the screen, trimmed at top and bottom), CRT filter, texture smoothing | working |
-| Anti-aliasing: supersampling (renders up to 8x, averaged down), FXAA, and MSAA 1x/2x/4x/8x ("AA rate") | working |
-| Keyboard + mouse, XInput gamepads (twin-stick aiming, rumble), in-game button remapping | working |
+| Boot, BIOS (high-level reimplementation), FMV (MDEC + CD streaming) | working |
+| 2D (title, HUD, menus) and 3D gameplay (GTE + hardware renderer) | working |
+| Renderers: OpenGL 3.3 and Vulkan 1.3 (falls back to the other if one cannot start); software renderer | working |
+| Resolution 1x-9x (up to 2160 lines), supersampling, FXAA, MSAA 1x-8x | working |
+| Aspect ratios 4:3, 16:9, 16:10, 21:9, 32:9 (the 3D view widens; HUD, menu text and icons keep their shape) | working |
+| Precise 3D: polygons at their exact positions, perspective-correct textures, Z-buffer (no wobble) | working |
+| 60 Hz simulation (levels 1-4 by default, every level optional) | working |
+| CRT filter, texture smoothing, FPS counter, draw distance up to 4x | working |
+| Replacement textures, full-screen pictures and movies; the game's font from a TrueType file | working |
+| Subtitles for the voice lines, cheats, auto-save at checkpoints, chapter list | working |
+| Keyboard + mouse, gamepads (twin-stick aiming, free aim, rumble), button remapping | working |
 | Sound effects, XA speech/music, CD audio, SPU reverb | working |
-| Memory card (`saves/card1.mcr`, emulator-compatible) | working |
-| Save states (5 slots) and auto-save (at each checkpoint and when a level is finished) | working |
-| Frame rate 30 / 60 / 90 / 120 / 150 fps, or Auto (match the display); setting "Frame rate" | working; the game still simulates at 30 Hz |
-| 60 Hz simulation in levels 1-4: player and camera update 60 times a second, everything moves every frame (setting "Simulation") | working in levels 1 to 4; other levels: optional, untested |
-| HD texture packs | not implemented |
-| Linux | deferred (the code is portable; build scripts are Windows-only for now) |
+| Memory card (`saves/card1.mcr`, emulator-compatible), save states (5 slots) | working |
 
-## Building (Windows)
+## Building
 
-Requirements: Visual Studio 2022+ with the C++ workload and the **C++ Clang tools**,
-Python 3.10+, Git (CMake fetches SDL3, the Vulkan headers, volk and glslang; no Vulkan SDK is
-needed, the Vulkan shaders are compiled during the build).
+Put your disc image (its `.cue` and `.bin` files, any names, or only the `.bin` files) in
+`assets/image/`; see `assets/README.txt` for the optional extras. Then:
 
-1. Put `Apocalypse (USA).cue` and its two `.bin` tracks in `assets\game disks\`. Optional:
-   a US PlayStation BIOS in `assets\bios\` (plays the boot sequence), HD textures in
-   `assets\replacements\textures\`.
-2. Run `build.bat`.
-3. Run `apocalypse.exe`, which the build puts in the project folder. It needs nothing else
-   installed: SDL and the C runtime are built in. It finds `assets\` next to itself, and
-   keeps `saves\` and `settings.ini` there too.
+- **Windows**: Visual Studio 2022+ with the C++ workload and the **C++ Clang tools**, Python
+  3.10+ and Git. Run `build.bat`.
+- **Linux**: cmake, ninja, clang or gcc, python3, git and SDL3's build dependencies (listed at
+  the top of `build.sh`). Run `./build.sh`; `tools/package_linux.sh` makes a portable build.
 
-What `build.bat` does:
+CMake fetches SDL3, the Vulkan headers, volk, glslang and stb; no Vulkan SDK is needed. The
+result, `repocalypse.exe` (Windows) or `repocalypse` (Linux), is made in the project folder and
+needs nothing else installed. It finds `assets/` next to itself and keeps `saves/` and
+`settings.ini` there.
+
+What the build does:
 
 ```
-python tools\discfs.py extract        # pull SLUS_003.73 (and CD.HED/WAD entries) off the disc
-python tools\recomp\main.py           # MIPS -> C: generated\main_*.c (~2,660 functions)
-cmake -B build-clang -G Ninja ...     # clang-cl; MSVC's optimizer crashed on the generated code
+python tools/discfs.py extract        # SLUS_003.73 and the CD.HED/CD.WAD entries off the disc
+python tools/recomp/main.py           # MIPS -> C: generated/main_*.c (~2,660 functions)
+cmake -B build-clang -G Ninja ...     # clang (MSVC's optimizer crashed on the generated code)
 cmake --build build-clang
 ```
 
@@ -61,61 +60,62 @@ cmake --build build-clang
 | Start / Select | Enter / Backspace | Start / Back |
 | fire toward a direction | left mouse button (toward the cursor) | right stick |
 
-F1 (or Select+Start held) = settings: save/load states, renderer, resolution, anti-aliasing, aspect ratio, CRT
-filter, texture smoothing, frame rate (original 30 fps or smooth), simulation (60 Hz in
-levels 1-4 by default), chapters (restart points reached so far), controller choice and button
-remapping.
-F2 = chapter list (load any restart point reached so far), F5 = quick save, F9 = quick load, Tab = fast-forward, F11 = fullscreen, Esc = quit.
+Hold **Select + Start** (Backspace + Enter) for the settings screen: save/load states, chapters
+(restart points reached so far), renderer, resolution, anti-aliasing, aspect ratio, CRT filter,
+texture smoothing, replacement textures, controller choice and button set-up, and the Recomp
+Enhancements page. The game's own main menu has Options -> Recomp Enhancements and Cheats.
+Tab = fast-forward, Esc = quit.
 
 ## Command line
 
 ```
-apocalypse [--cue PATH] [--memcard-dir DIR] [--scale N] [--renderer opengl|vulkan]
+repocalypse [--cue PATH] [--scale N] [--renderer opengl|vulkan] [--sim60] [--chapter N]
 ```
 
-Defaults: 16:9, rendered at 5x (1200 lines; supersampling raises it to about twice the window's
-lines, at most 8x), with SSAA + FXAA anti-aliasing, in a 1080-line window, or fullscreen on a 1080p
-screen. `--scale N` asks for a window 240*N lines high instead. `--renderer` overrides the
-saved renderer for this run.
+`--cue` picks a disc image other than the one in `assets/image`. `--scale N` asks for a window
+240*N lines high (default: 1080 lines, or what fits). `--renderer` overrides the saved renderer
+for this run. `--sim60` turns the 60 Hz simulation on in every level. `--chapter N` starts at
+chapter N, a state kept in `saves/chapters` the first time each restart point is reached.
 
-`--sim60` turns the 60 Hz simulation on in every level (default: levels 1-4 only).
-`--chapter N` starts at chapter N, a state kept in `saves/chapters` the first time each restart
-point is reached (the F1 menu lists them).
-`--smooth K` forces K images per game step (1 = the original 30 fps) and `--refresh HZ`
-overrides the detected display refresh rate. A frame rate above the display's refresh is
-presented on a timer with vsync off (the counter in the window title shows it).
+For scripted test runs: `--turbo` (unthrottled), `--press START@600+10,...` (buttons held from
+a frame for some frames), `--screenshot 200,400 PREFIX` (saves those frames as BMPs),
+`--log core,bios,cd,gpu,spu,dma,irq,pad,mdec,host`. Environment: `APOC_SETTINGS=FILE` (another
+settings file), `APOC_BACKGROUND=1` (the window opens behind the others), `APOC_NO_DIALOGS=1`
+(errors only in the log), `APOC_TEXREPLACE_DIR=DIR`, `APOC_TEX_DUMP=1`.
 
-Debugging options: `--log core,bios,cd,gpu,spu,dma,irq,pad,mdec,host`, `--turbo`,
-`--press START@600+10,...` (scripted input), `--watch ADDR` (log writes to a RAM word, including DMA),
-`--dump-ram CYCLES FILE`, `--dump-vram FRAME FILE.bmp`, `--gte-dump FRAME`, `--wav FILE`,
-`--interp` (run everything in the interpreter; for differential testing),
-`--trace-call ADDR` (with `--interp`).
+A double-clicked game logs to `debug/repocalypse.log` (earlier runs in `debug/logs`, crashed
+ones as `debug/crash_*.log`): the file to send with a bug report.
 
-## How it works
+## Source layout
 
 ```
-tools/discfs.py        ISO9660 + CD.HED/CD.WAD reader for the raw MODE2/2352 image
-tools/recomp/
-  mips.py              R3000A decoder
-  analysis.py          function discovery (entry point, call targets, function-pointer scan,
-                       gap filling), jump-table recovery, load-delay hazard check
-  emit.py              one C function per MIPS function; branches become gotos, delay slots
-                       are folded into the branch, jal becomes a direct C call
-  main.py              driver; also reads extra_seeds.txt (entry points found at runtime)
+tools/
+  discfs.py              ISO9660 + CD.HED/CD.WAD reader for the raw MODE2/2352 image
+  recomp/                the static recompiler
+    mips.py              R3000A decoder
+    analysis.py          function discovery (entry point, call targets, function-pointer scan,
+                         gap filling), jump-table recovery, load-delay hazard check
+    emit.py              one C function per MIPS function; branches become gotos, delay slots are
+                         folded into the branch, jal becomes a direct C call; the runtime's hooks
+    main.py              driver; also reads extra_seeds.txt (entry points found at runtime)
+  psx_textures.py        exports the game's textures with the names replacements use
+  extract_images.py, extract_voice.py, extract_movies.py, make_icon.py, package_linux.sh
 runtime/
-  include/recomp.h     ABI used by the generated code (CPU state, inline memory access)
-  src/core.cpp         memory map, scheduler, interrupt controller, COP0, dispatch
-  src/bios.cpp         kernel A0/B0/C0 functions, events, interrupt chains/hooks, memory card files
-  src/interp.cpp       fallback interpreter for code not found by static analysis
-  src/gte.cpp          Geometry Transformation Engine (tests: runtime/tests/gte_test.cpp)
-  src/gpu.cpp          GP0/GP1 + software rasterizer into 1024x512 VRAM
-  src/cdrom.cpp        CD controller, XA-ADPCM decoding, CD-DA
-  src/spu.cpp          24-voice ADPCM SPU
-  src/mdec.cpp         movie decoder
-  src/hw.cpp           DMA, root counters, controller port (SIO0)
-  src/smooth.cpp       extra frames between the game's 30 Hz steps (smooth frame rate)
-  src/sim60.cpp        60 Hz simulation (player and camera) for levels 1-4
-  src/host_sdl.cpp     window, audio, input, frame pacing (SDL3)
+  include/recomp.h       ABI of the generated code (CPU state, inline memory access, hooks)
+  shaders/               Vulkan shaders (SPIR-V at build time); the CRT filter's GLSL, also used by OpenGL
+  data/subtitles.txt     the voice lines' text (built into the exe)
+  src/main.cpp           start-up: the disc, the executable, the hardware, the entry point
+  src/core/              the machine: memory map, scheduler, interrupts, COP0, dispatch (core.cpp),
+                         kernel A0/B0/C0 functions (bios.cpp), the fallback interpreter, memory
+                         cards, save states, chapters and auto-save (savestate.cpp); psx.h
+  src/hw/                PlayStation hardware: GPU commands and software rasterizer (gpu.cpp), GTE,
+                         CD-ROM with XA/CD-DA, SPU, MDEC, DMA / timers / controller port (hw.cpp)
+  src/render/            hardware renderers: OpenGL (gpu_gl.cpp) and Vulkan (gpu_vk.cpp) with their
+                         shared half (hw_common.cpp); presenters (present_gl/vk/common.cpp); menu text
+  src/host/              SDL3: window, frame pacing and audio (host.cpp), controllers (input.cpp),
+                         settings.ini and the enhancement options (settings.cpp), the settings screen
+  src/game/              Apocalypse enhancements: 60 Hz simulation (sim60.cpp), draw distance, the
+                         game's own menus, subtitles, cheats, replacement textures / pictures / movies
 ```
 
 Things the game does that the tools have to handle:
@@ -129,20 +129,12 @@ Things the game does that the tools have to handle:
   function returns.
 - **libcd toggling DMA interrupt enables with byte stores to `DICR+2`.** All 32-bit I/O
   registers support sub-word access.
-- **A fixed 30 Hz simulation.** The level loop advances the world one fixed step per rendered
-  frame, so it cannot simply run faster. Its render, though, can already draw a moment between
-  two steps (it did so when the PS1 fell behind). `runtime/src/smooth.cpp` runs that render again
-  for fractions of a step, outside emulated time and with the machine rolled back afterwards, and
-  shows those images between the game's own.
-- **A 60 Hz simulation for levels 1 to 4.** `runtime/src/sim60.cpp` makes the level loop tick and
-  render every VBlank, updates the player and cameras on the ticks that did nothing, and retimes
-  their per-update amounts (half of each update's change for positions and velocities; whole-
-  number counters such as animation frames keep their 30 Hz rate). Enemies and shots keep their
-  30 Hz logic; the frame after each world update draws the world half way between before and
-  after it (positions, rotations, the screen tint, and animation poses, which are blended per
-  vertex by rendering twice; jointed models' joint matrices half way), so everything moves every
-  frame. What other objects do to the player in a world update (level 2's currents and chute,
-  knockback) is kept whole rather than halved, and force zones push the player on every tick at
-  half strength.
+- **A fixed 30 Hz simulation.** `runtime/src/game/sim60.cpp` makes the level loop tick and render
+  every VBlank, updates the player and cameras on the ticks that did nothing, and retimes their
+  per-update amounts (half of each update's change for positions and velocities; whole-number
+  counters such as animation frames keep their 30 Hz rate). Enemies and shots keep their 30 Hz
+  logic; the frame after each world update draws the world half way between before and after it
+  (positions, rotations, the screen tint, and animation poses, which are blended per vertex by
+  rendering twice), so everything moves every frame.
 - **The game reads controllers directly over SIO.** Byte and `/ACK` timing are modelled,
   because the driver clears IRQ flags between the reply and the `/ACK`.
