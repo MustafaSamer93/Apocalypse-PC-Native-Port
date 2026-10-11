@@ -5,6 +5,7 @@
 // rectangles, scissors and texel coordinates use the same numbers as the OpenGL code.
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 
