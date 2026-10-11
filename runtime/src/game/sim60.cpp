@@ -44,13 +44,13 @@ int psx_opt_sim60 = 0;
 
 // Setting: 0 = 30 Hz everywhere (original), 1 = 60 Hz in the tested levels (1 prison "prsn",
 // 2 sewers "sewr", 3 plague "city" and its death sequence "death", 4 rooftops "roof"), 2 = 60 Hz
-// in every level (untested). Attract-mode
-// demos always run at 30 Hz: they replay input recorded per 30 Hz update.
+// in every level (untested). Attract-mode demos run as the levels do (their input, recorded per
+// 30 Hz update, still plays in step: checked with demo2, 2026-10-11).
 int g_sim60_setting = 1;
 bool g_sim60_force = false;  // --sim60: on in any level, even when it is not known yet
 bool g_sim60_fps30 = false;  // frame rate "30 (original)" (host/settings.cpp): the game runs as it was
 std::string g_sim60_level;  // base name of the level's trigger file ("prsn" = level 1)
-bool g_sim60_demo = false;
+bool g_sim60_demo = false;  // an attract-mode demo is playing (only noted: saved states keep the field)
 
 bool sim60_tested(const std::string& level) {
     // all eleven levels (5-11 added 2026-09-29: grav pest tube war wh bst)
@@ -60,17 +60,16 @@ bool sim60_tested(const std::string& level) {
 }
 
 void sim60_apply() {
-    bool on = !g_sim60_demo &&
-              (g_sim60_force || (!g_sim60_fps30 && !g_sim60_level.empty() && (g_sim60_setting == 2 ||
-                                                            (g_sim60_setting == 1 && sim60_tested(g_sim60_level)))));
+    bool on = g_sim60_force || (!g_sim60_fps30 && !g_sim60_level.empty() &&
+                                (g_sim60_setting == 2 || (g_sim60_setting == 1 && sim60_tested(g_sim60_level))));
     if ((on ? 1 : 0) != psx_opt_sim60)
         log_msg(LogCat::Host, "60 Hz simulation %s (level \"%s\"%s)", on ? "on" : "off", g_sim60_level.c_str(),
                 g_sim60_demo ? ", demo" : "");
     psx_opt_sim60 = on ? 1 : 0;
     // 8x CPU in levels: an update and a render per VBlank at 60 Hz, and at 30 Hz no more of the
     // PS1's slowdowns (busy rooms fell to 20 fps); the game's steps stay fixed, so nothing speeds
-    // up. (Not in the attract demo, whose recorded presses need the original timing.)
-    const bool level = !g_sim60_level.empty() && !g_sim60_demo;
+    // up.
+    const bool level = !g_sim60_level.empty();
     psx_cpi_q = on || level ? 1 : 4 * PSX_CYCLES_PER_INSN;
 }
 
