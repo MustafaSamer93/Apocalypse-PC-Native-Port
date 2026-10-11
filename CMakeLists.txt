@@ -132,6 +132,7 @@ add_executable(repocalypse
     # Apocalypse enhancements
     runtime/src/game/cheats.cpp
     runtime/src/game/drawdist.cpp
+    runtime/src/game/effects.cpp
     runtime/src/game/game_menu.cpp
     runtime/src/game/mesh.cpp
     runtime/src/game/movie.cpp

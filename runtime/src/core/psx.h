@@ -126,7 +126,6 @@ struct GtePrecise {
     float x, y, w;
     uint32_t seq;
 };
-extern bool g_gte_precise;  // setting: draw 3D polygons at their exact positions, perspective-correct
 int gte_precise_find(uint32_t xy, GtePrecise* out, int max);  // candidates found (0: none)
 void gte_precise_clear();
 // PGXP: the exact vertex for a GPU vertex word read from RAM address a (false: none)

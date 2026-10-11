@@ -50,9 +50,9 @@ bool host_parse_press_script(const char* spec);  // --press BUTTON@FRAME[+FRAMES
 // (game_menu.cpp). A change applies and is saved at once.
 
 enum EnhSetting {
-    E_FPS, E_SIM, E_DRAWDIST, E_PRECISE, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_DISPLAY,
+    E_FPS, E_DRAWDIST, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_DISPLAY,
     E_AUTOSAVE, E_SUBTITLES, E_AA, E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO,
-    E_CHEAT_BOMBS, E_CHEAT_ONEHIT, E_FPS_COUNTER, E_CRT, E_GAME_FONT, E_NATIVE_3D,
+    E_CHEAT_BOMBS, E_CHEAT_ONEHIT, E_FPS_COUNTER, E_CRT, E_GAME_FONT, E_TEX_SMOOTH, E_REPLACE,
 };
 const char* enh_name(int id);
 std::string enh_value(int id);

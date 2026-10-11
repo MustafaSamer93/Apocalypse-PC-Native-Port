@@ -58,6 +58,12 @@ ENTRY_HOOKS = {
     0x800307F0: "if (psx_hook_render(c)) return;",
     0x8007E63C: "if (psx_hook_frustum(c)) return;",  # culling planes: widescreen (drawdist.cpp)
     0x800817FC: "if (psx_hook_mesh(c)) return;",  # the level mesh renderer: native (mesh.cpp)
+    # effects and model shapes made on the CPU: run, then their positions exact (effects.cpp)
+    0x80025BEC: "if (psx_hook_ray(c)) return;",
+    0x80026488: "if (psx_hook_beam(c)) return;",
+    0x8002948C: "if (psx_hook_tube(c)) return;",
+    0x8007A8F8: "if (psx_hook_part_shadow(c)) return;",
+    0x8007B2E4: "if (psx_hook_part_halo(c)) return;",
     # the render's 2D part (widescreen: HUD at its own proportions, gpu.cpp)
     0x8006D91C: "psx_hook_2d(c, 0);",  # HUD
     0x80016884: "psx_hook_2d(c, 1);",
@@ -89,7 +95,20 @@ ENTRY_HOOKS = {
 #            (v0): sort glows nearer (sim60.cpp psx_hook_glow_sort)
 INSN_HOOKS = {
     0x800376F8: "psx_hook_glow_sort(c);",
-    0x80080D38: "psx_hook_strip_corner(c);",  # a strip corner (lamps): exact position (gte.cpp)
+    0x8001B588: "psx_hook_text_flame(c);",  # flaming text: a flame sprite is linked (gpu.cpp)
+    0x80080D38: "psx_hook_strip_corner(c);",
+    # the effects renderer (8003736C) made one: its positions exact (effects.cpp)
+    0x80037F88: "psx_fx_glow(c);",
+    0x8003891C: "psx_fx_sprite(c);",
+    0x80038B10: "psx_fx_tri(c);",
+    0x80039130: "psx_fx_quad(c);",
+    0x80039FB4: "psx_fx_trail(c);",
+    0x800380F8: "psx_fx_polyline(c, 0);",
+    0x800382A0: "psx_fx_polyline(c, 1);",
+    0x80038D20: "psx_fx_line(c);",
+    0x8003982C: "psx_fx_tetra(c);",
+    0x8006AE04: "psx_fx_glyph(c);",  # text at a 3D point (8006AAB8)
+    0x800276A4: "psx_fx_ribbon(c);",  # a ribbon's segment (80026C68)
     0x800312A0: "psx_hook_game_over(c);",  # lives left (v1) after a death: 0 restarts the level (savestate.cpp)
     0x8005CDA0: "psx_hook_aim(c);",  # player fire vector +471/+472 set: exact stick/mouse angle (input.cpp)
     # 800664FC: the VBlank wait's loop (800664E4: until the VBlank callback has counted a0 more):

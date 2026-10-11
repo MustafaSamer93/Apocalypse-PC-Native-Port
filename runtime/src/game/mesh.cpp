@@ -1,4 +1,4 @@
-// Native level renderer (Recomp Enhancements -> Native 3D): the game's level mesh renderer 800817FC,
+// Native level renderer (Native 3D, always on): the game's level mesh renderer 800817FC,
 // written again in C++ with float geometry.
 //
 // The original (hand-written MIPS + GTE) draws each polygon record of a mesh from the vertices
@@ -24,8 +24,6 @@
 #include "core/psx.h"
 #include "game/game.h"
 #include "render/gpu_hw.h"
-
-bool g_native_3d = true;  // setting (settings.ini "native3d")
 
 namespace {
 
@@ -207,7 +205,7 @@ int32_t nclip(const Vert& a, const Vert& b, const Vert& d, uint32_t wa, uint32_t
 
 // 800817FC(a0 = polygon records, a2 = count): nonzero = drawn here.
 extern "C" int psx_hook_mesh(R3000* c) {
-    if (!g_native_3d || !g_gte_precise || !hw_active()) return 0;
+    if (!hw_active()) return 0;
     uint32_t rec = c->r[4], count = c->r[6];
     if (!count) return 1;
     Ctx k;

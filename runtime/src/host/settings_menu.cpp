@@ -267,21 +267,18 @@ enum Row {
     R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
     R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
     // the Enhancements page: rows of enhancement settings (enh_of)
-    R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_NATIVE_3D, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK,
+    R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK,
 };
 const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT,
                                     R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
-const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_SIM, R_DRAWDIST, R_PRECISE, R_NATIVE_3D, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK};
+const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK};
 
 // The enhancement setting a row shows (-1: none).
 int enh_of(Row r) {
     switch (r) {
         case R_FPS: return E_FPS;
         case R_FPS_COUNTER: return E_FPS_COUNTER;
-        case R_SIM: return E_SIM;
         case R_DRAWDIST: return E_DRAWDIST;
-        case R_PRECISE: return E_PRECISE;
-        case R_NATIVE_3D: return E_NATIVE_3D;
         case R_GAME_FONT: return E_GAME_FONT;
         case R_FONT: return E_SMOOTH_FONT;
         case R_MENU_SIZE: return E_FONT_SCALE;
@@ -375,7 +372,7 @@ void run_settings_menu() {
                     }
                     case R_FILTER: g_gfx.texture_filter = !g_gfx.texture_filter; gfx_changed = true; break;
                     case R_DUMP_TEX: g_tex_dump = !g_tex_dump; break;  // texdump.cpp (not saved)
-                    case R_TEX_REPLACE:  // texreplace.cpp: assets/replacements/textures
+                    case R_TEX_REPLACE:  // assets/replacements: textures (texreplace.cpp), movies (movie.cpp)
                         g_tex_replace = !g_tex_replace;
                         texreplace_vram_changed();
                         save_settings();
@@ -475,7 +472,7 @@ void run_settings_menu() {
                 case R_ASPECT: return choice("Aspect ratio", kAspect[(int)g_gfx.aspect]);
                 case R_FILTER: return choice("Smooth textures", g_gfx.texture_filter ? "On" : "Off");
                 case R_DUMP_TEX: return choice("Dump textures", g_tex_dump ? "On (assets/dumps/textures)" : "Off");
-                case R_TEX_REPLACE: return choice("Texture replacements", g_tex_replace ? "[x] On" : "[ ] Off (original)");
+                case R_TEX_REPLACE: return choice("HD replacements (textures, movies)", g_tex_replace ? "[x] On" : "[ ] Off (original)");
                 case R_ENHANCE: return "Recomp Enhancements\t>";
                 case R_DEVICE: return choice("Controls", dev_line);
                 case R_REMAP: return std::string("Set up buttons\t") + (is_all ? "" : custom ? "(custom)" : "(default)");

@@ -528,9 +528,9 @@ void draw_polygon(const uint32_t* w) {
         float zv[4] = {};  // exact view depth of each vertex (0: none)
         bool exact_all = false;  // every vertex exact: drawn whatever its size (the PS1's limit is for whole pixels)
         // exact texture coordinates (gte.cpp): the subdivision's whole-texel UVs get their fraction back
-        if (g_gte_precise && textured)
+        if (textured)
             for (int i = 0; i < nv; i++) pgxp_uv_find(uva[i], uvw[i], &h[i].u, &h[i].v);
-        if (g_gte_precise && k == 1.0f && !text && !tilt) {
+        if (k == 1.0f && !text && !tilt) {
             // the vertex the word itself came from (PGXP), else one projected to that pixel
             GtePrecise pr[4];
             bool nc[4], shadow_all = true;
@@ -582,7 +582,9 @@ void draw_polygon(const uint32_t* w) {
         // skylines - the sky is nearer than the skyline it must stay behind) draw in list order
         // as before. Semi-transparent polygons (decals, shadows on the floor) test a little
         // nearer than they are, not to fight the surface they lie on.
-        if (g_gte_precise && k == 1.0f && g_gpu_ot_z && g_gpu_ot_z < 0x3FF0 && hw_zbuffer_ready()) {
+        // Effects (glows, sprites, beams: exact with Native 3D) stay in list order: a glow or a
+        // puff of smoke cut off by the wall behind it was never the game's look.
+        if (k == 1.0f && !(g_gpu_packet_addr && fx_packet(g_gpu_packet_addr)) && g_gpu_ot_z && g_gpu_ot_z < 0x3FF0 && hw_zbuffer_ready()) {
             bool exact = true;
             for (int i = 0; i < nv; i++) exact &= zv[i] > 0;
             if (exact) {
@@ -602,10 +604,18 @@ void draw_polygon(const uint32_t* w) {
 
 // ---------------------------------------------------------------- lines
 
-void draw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, bool semi) {
+// exact: the ends' exact positions (Native 3D's effect lines), else whole pixels
+void draw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, bool semi, const float* exact = nullptr) {
     int dx = x1 - x0, dy = y1 - y0;
     if (std::abs(dx) >= 1024 || std::abs(dy) >= 512) return;
-    float cx = 0, k = squeeze_2d((float)std::min(x0, x1), (float)std::max(x0, x1), &cx);
+    float cx = 0, k = exact ? 1.0f : squeeze_2d((float)std::min(x0, x1), (float)std::max(x0, x1), &cx);
+    if (exact && hw_active()) {
+        HwPrim p;
+        p.semi = semi;
+        p.semi_mode = S.semi_mode;
+        hw_line(exact[0], exact[1], c0, exact[2], exact[3], c1, gouraud, p, hw_state());
+        return;
+    }
     if (k != 1.0f) {
         x0 = (int)std::lround(cx + ((float)x0 - cx) * k);
         x1 = (int)std::lround(cx + ((float)x1 - cx) * k);
@@ -786,9 +796,14 @@ void execute(const std::vector<uint32_t>& w) {
         bool gouraud = cmd & 0x10;
         uint32_t c0 = w[0] & 0xFFFFFF, xy0 = w[1];
         uint32_t c1 = gouraud ? w[2] & 0xFFFFFF : c0, xy1 = gouraud ? w[3] : w[2];
+        GtePrecise a, b;
+        float exact[4];
+        const bool ex = w.data() == g_cmd.data() && pgxp_find(g_cmd_addr[1], xy0, &a) &&
+                        pgxp_find(g_cmd_addr[gouraud ? 3 : 2], xy1, &b);
+        if (ex) exact[0] = a.x + S.off_x, exact[1] = a.y + S.off_y, exact[2] = b.x + S.off_x, exact[3] = b.y + S.off_y;
         draw_line(((int32_t)(xy0 << 21) >> 21) + S.off_x, ((int32_t)((xy0 >> 16) << 21) >> 21) + S.off_y, c0,
                   ((int32_t)(xy1 << 21) >> 21) + S.off_x, ((int32_t)((xy1 >> 16) << 21) >> 21) + S.off_y, c1,
-                  gouraud, cmd & 0x02);
+                  gouraud, cmd & 0x02, ex ? exact : nullptr);
         return;
     }
     if (cmd >= 0x60 && cmd < 0x80) { draw_rect(w.data()); return; }
@@ -1119,6 +1134,33 @@ bool gpu_title_screen() {
     return (g_press_start_seen && f - g_press_start_seen < 4) || (g_menu_drawn && f - g_menu_drawn < 4);
 }
 
+// Flaming text (the selected menu item): after each letter the text routine links up to three
+// flame sprites into the letters' ordering-table entry (INSN hook 8001B588, s1 = the flame), so
+// each letter's flames covered the letters after it. Its flames now go behind all its letters.
+std::vector<uint32_t> g_flames;
+extern "C" void psx_hook_text_flame(R3000* c) {
+    if (g_flames.size() < 1024) g_flames.push_back(c->r[17] & 0xFFFFFF);
+}
+void flames_behind(R3000* c, uint32_t from, uint32_t to) {
+    if (g_flames.empty()) return;
+    const uint32_t e = MEM_R32(c, 0x800FF660) + 0x70 + 4u * MEM_R16(c, 0x800FEEBC + 0x2FE);  // (8001B578)
+    std::vector<uint32_t> flames, letters;
+    uint32_t p = MEM_R32(c, e) & 0xFFFFFF;
+    while (p >= from && p < to && flames.size() + letters.size() < 4096) {  // this call's, at the head
+        (std::find(g_flames.begin(), g_flames.end(), p) != g_flames.end() ? flames : letters).push_back(p);
+        p = MEM_R32(c, p) & 0xFFFFFF;
+    }
+    g_flames.clear();
+    if (flames.empty() || letters.empty()) return;
+    for (uint32_t l : letters) MEM_W8(c, l + 7, MEM_R8(c, l + 7) & ~2u);  // the letters solid (not semi-transparent)
+    flames.insert(flames.end(), letters.begin(), letters.end());  // drawn in list order: flames first
+    for (size_t i = 0; i < flames.size(); i++) {
+        const uint32_t next = i + 1 < flames.size() ? flames[i + 1] : p;
+        MEM_W32(c, flames[i], (MEM_R32(c, flames[i]) & 0xFF000000) | next);
+    }
+    MEM_W32(c, e, (MEM_R32(c, e) & 0xFF000000) | flames[0]);
+}
+
 // Entry hooks on the text routine (8001AA28, a2 = the text) and the icon routines: run the
 // routine and note the packets it made.
 extern "C" int psx_hook_2d_call(R3000* c, int which) {
@@ -1143,9 +1185,11 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
     const float tilt = which == 0 ? subtitle_tilt(c->r[6]) : 0.0f;  // (a2 = the text)
     const float tx = (float)(int32_t)c->r[4], ty = (float)(int32_t)c->r[5];
     inside[which] = true;
+    g_flames.clear();
     call_indirect(c, kFn[which]);
     inside[which] = false;
     const uint32_t to = MEM_R32(c, kNextPacket) & 0x1FFFFC;
+    if (which == 0) flames_behind(c, from, to);
     if (to > from && g_text_packets.size() < 256) g_text_packets.push_back({from, to});
     if (to > from && tilt != 0.0f && g_tilts.size() < 16) g_tilts.push_back({from, to, tx, ty, tilt});
     c->r[31] = ra;

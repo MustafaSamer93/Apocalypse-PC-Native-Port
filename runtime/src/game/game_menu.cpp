@@ -50,7 +50,7 @@ constexpr uint32_t kButtons = 0x800EC0F8;  // 16 bytes a button: +0 held, +1 pre
 constexpr uint32_t kGpRepeat = 0x800FEEBC + 344, kUpdateCount = 0x800FF2F0;
 
 // Our pages: their settings (host/settings.cpp enh_*), in order.
-constexpr int kPerformanceSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_FPS, E_AUTOSAVE};
+constexpr int kPerformanceSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_TEX_SMOOTH, E_REPLACE, E_DRAWDIST, E_FPS, E_AUTOSAVE};
 constexpr int kCosmeticSettings[] = {E_SUBTITLES, E_CRT, E_GAME_FONT, E_FONT_SCALE, E_FPS_COUNTER};
 constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT};
 // The game's own options, for the pause menu (the front end has its own pages for them); ids
@@ -404,39 +404,61 @@ bool selected_is(R3000* c, uint32_t menu, uint32_t text) {
 }
 
 // Draws `menu` at g_menu_zoom percent around its middle: its fields are scaled for the draw and
-// put back after.
-void draw_zoomed(R3000* c, uint32_t menu) {
+// put back after. window: a menu of more items shows only that many, the selected one among them
+// (they scroll with the selection), in the middle of where the whole menu would be.
+void draw_zoomed(R3000* c, uint32_t menu, int window = 0) {
     const int n = std::min<int>(MEM_R8(c, menu + 10), kMaxItems);
-    if (g_menu_zoom >= 100 || n <= 0) {
+    const bool scroll = window > 0 && n > window;
+    if ((g_menu_zoom >= 100 && !scroll) || n <= 0) {
         call_indirect(c, kMenuDraw);
         return;
     }
-    const float f = (float)g_menu_zoom / 100.0f;
-    const int32_t y = (int32_t)MEM_R32(c, menu + 16), spacing = (int32_t)MEM_R32(c, menu + 20);
-    uint16_t saved[kMaxItems][5];
-    int height = 0, shown = 0;
-    for (int i = 0; i < n; i++) {
-        const uint32_t it = item(menu, i);
-        for (int k = 0; k < 4; k++) saved[i][k] = MEM_R16(c, it + 4 + 2 * k);
-        saved[i][4] = MEM_R8(c, it + 12);
-        if (MEM_R8(c, it + 13)) height += MEM_R8(c, it + 12), shown++;
-    }
-    height += std::max(0, shown - 1) * spacing;
+    const float f = (float)std::min(g_menu_zoom, 100) / 100.0f;
     auto scaled = [f](int v) { return (int)std::lround((float)v * f); };
-    MEM_W32(c, menu + 16, (uint32_t)(y + height / 2 - scaled(height) / 2));
+    const int32_t y = (int32_t)MEM_R32(c, menu + 16), spacing = (int32_t)MEM_R32(c, menu + 20);
+    const uint8_t sel = MEM_R8(c, menu + 6);
+    uint8_t saved[kMaxItems][kItemSize];
+    for (int i = 0; i < n; i++)
+        for (uint32_t k = 0; k < kItemSize; k++) saved[i][k] = (uint8_t)MEM_R8(c, item(menu, i) + k);
+    // the height of items [from, to) as laid out (gaps above and the spacing between shown ones)
+    auto height = [&](int from, int to, int line, bool scale) {
+        int h = 0, shown = 0;
+        for (int i = from; i < to; i++)
+            if (saved[i][13]) h += scale ? scaled(saved[i][12]) : saved[i][12], shown++;
+        return h + std::max(0, shown - 1) * line;
+    };
+    const int middle = y + height(0, n, spacing, false) / 2;
+    int top = 0, count = n;
+    if (scroll) {
+        top = std::clamp((int)sel - window / 2, 0, n - window), count = window;
+        for (int i = 0; i < count; i++)
+            for (uint32_t k = 0; k < kItemSize; k++) MEM_W8(c, item(menu, i) + k, saved[top + i][k]);
+        MEM_W8(c, menu + 10, (uint8_t)count);
+        MEM_W8(c, menu + 6, (uint8_t)(sel - top));
+    }
+    MEM_W32(c, menu + 16, (uint32_t)(middle - height(top, top + count, scaled(spacing), true) / 2));
     MEM_W32(c, menu + 20, (uint32_t)scaled(spacing));
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < count; i++) {
         const uint32_t it = item(menu, i);
-        for (int k = 0; k < 4; k++) MEM_W16(c, it + 4 + 2 * k, (uint16_t)scaled((int16_t)saved[i][k]));
-        MEM_W8(c, it + 12, (uint8_t)scaled(saved[i][4]));
+        for (int k = 0; k < 4; k++) MEM_W16(c, it + 4 + 2 * k, (uint16_t)scaled((int16_t)MEM_R16(c, it + 4 + 2 * k)));
+        MEM_W8(c, it + 12, (uint8_t)scaled(MEM_R8(c, it + 12)));
     }
     call_indirect(c, kMenuDraw);
     MEM_W32(c, menu + 16, (uint32_t)y);
     MEM_W32(c, menu + 20, (uint32_t)spacing);
+    MEM_W8(c, menu + 10, (uint8_t)n);
+    MEM_W8(c, menu + 6, sel);
+    // what the draw changed in an item (the selected one's flames) stays; only the scales and the
+    // gap we set go back, and the items the window moved go back to their places
+    uint8_t drawn_items[kMaxItems][kItemSize];
+    for (int i = 0; i < count; i++)
+        for (uint32_t k = 0; k < kItemSize; k++) drawn_items[i][k] = (uint8_t)MEM_R8(c, item(menu, i) + k);
     for (int i = 0; i < n; i++) {
-        const uint32_t it = item(menu, i);
-        for (int k = 0; k < 4; k++) MEM_W16(c, it + 4 + 2 * k, saved[i][k]);
-        MEM_W8(c, it + 12, (uint8_t)saved[i][4]);
+        const bool was_drawn = i >= top && i < top + count;
+        for (uint32_t k = 0; k < kItemSize; k++) {
+            const bool ours = (k >= 4 && k < 12) || k == 12;  // scales and gap (scaled for the draw)
+            MEM_W8(c, item(menu, i) + k, was_drawn && !ours ? drawn_items[i - top][k] : saved[i][k]);
+        }
     }
 }
 
@@ -605,15 +627,17 @@ extern "C" int psx_hook_menu_draw(R3000* c) {
         }
     }
     if (g_pause.menu && menu == g_pause.menu && g_pause.texts) append_item(c, menu, host_text(g_pause, kTextExit));
+    int window = 0;
     for (Host* h : {&g_pause, &g_mainh}) {
         if (!h->menu || menu != h->menu) continue;
         if (!ghost) h->drawn = true;
         if (h->page >= 0) refresh_texts(c, h->pages[h->page], g_pages[h->page]);
         menu = c->r[4] = shown_menu(*h);
+        if (h->page >= 0) window = 5;  // a long page scrolls, five lines at a time
     }
     const uint32_t ra = c->r[31], sp = c->r[29];
     inside = true;
-    draw_zoomed(c, menu);
+    draw_zoomed(c, menu, window);
     inside = false;
     c->r[31] = ra, c->r[29] = sp;
     return 1;

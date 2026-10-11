@@ -51,7 +51,7 @@ int hw_samples();
 void hw_triangle(const HwVtx* v0, const HwVtx* v1, const HwVtx* v2, const HwPrim& p, const HwState& s);
 void hw_rect(int x, int y, int w, int h, int u0, int v0, bool flip_x, bool flip_y, uint32_t color,
              const HwPrim& p, const HwState& s);
-void hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, const HwPrim& p,
+void hw_line(float x0, float y0, uint32_t c0, float x1, float y1, uint32_t c1, bool gouraud, const HwPrim& p,
              const HwState& s);
 
 // VRAM operations mirrored from the CPU copy (native coordinates).

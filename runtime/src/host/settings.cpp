@@ -36,7 +36,8 @@ namespace {
 int g_active_msaa = 1;  // MSAA samples the renderer was created with
 
 // Choices offered in the menus.
-constexpr int kDrawDistChoices[] = {100, 150, 200, 300, 400};  // percent of the game's own (drawdist.cpp)
+// percent of the game's own (drawdist.cpp): Original, Medium (2x), High (the whole depth range)
+constexpr int kDrawDistChoices[] = {100, 200, 400};
 constexpr int kFontScaleChoices[] = {30, 40, 50, 60, 70, 80};  // the game's menus (game_menu.cpp)
 constexpr int kMenuFpsChoices[] = {30, 60};                    // 30 = the original
 // Display choices: resolution and aspect ratio together (the game's Enhancements page).
@@ -60,20 +61,8 @@ int display_choice() {
     return std::max(k, 0);
 }
 
-std::string sim60_label() {
-    const char* names[] = {"30 Hz original", "60 Hz all levels", "60 Hz all (beta)"};
-    std::string s = names[std::clamp(g_sim60_setting, 0, 2)];
-    if (g_sim60_fps30) s += " (frame rate 30)";  // the frame rate setting keeps it off
-    else if (psx_opt_sim60) s += " ON";          // active in the current level
-    return s;
-}
-
 std::string drawdist_label() {
-    if (g_draw_distance <= 100) return "Original";
-    if (g_draw_distance >= 400) return "Max";  // the depth range (16380) in every level (drawdist.cpp)
-    std::string s = std::to_string(g_draw_distance / 100);
-    if (g_draw_distance % 100) s += "." + std::to_string(g_draw_distance % 100 / 10);
-    return s + "x";
+    return g_draw_distance <= 100 ? "Original" : g_draw_distance < 400 ? "Medium" : "High";
 }
 
 // Internal resolution actually rendered: the Resolution setting, raised by supersampling to
@@ -129,11 +118,8 @@ void save_settings() {
     std::fprintf(f, "# Written by the game's settings screen. Safe to delete to reset.\n");
     std::fprintf(f, "gfx scale=%d aspect=%d crt=%d filter=%d fps=%d\n", g_gfx.scale, (int)g_gfx.aspect,
                  g_gfx.crt ? 1 : 0, g_gfx.texture_filter ? 1 : 0, g_gfx.fps);
-    std::fprintf(f, "sim %d\n", g_sim60_setting);
     std::fprintf(f, "drawdist %d\n", g_draw_distance);
     std::fprintf(f, "gamefont %d\n", g_game_font ? 1 : 0);
-    std::fprintf(f, "precise %d\n", g_gte_precise ? 1 : 0);
-    std::fprintf(f, "native3d %d\n", g_native_3d ? 1 : 0);
     std::fprintf(f, "font %d\n", g_smooth_font ? 1 : 0);
     std::fprintf(f, "menuzoom %d\n", g_menu_zoom);
     std::fprintf(f, "autosave %d\n", g_autosave ? 1 : 0);
@@ -182,9 +168,9 @@ void load_settings() {
     const struct { const char* name; bool* flag; int* value; int lo, hi; } kSimple[] = {
         {"fullscreen", &g_fullscreen}, {"font", &g_smooth_font}, {"texreplace", &g_tex_replace},
         {"fpscounter", &g_fps_counter}, {"subtitles", &g_subtitles}, {"autosave", &g_autosave},
-        {"precise", &g_gte_precise}, {"gamefont", &g_game_font}, {"native3d", &g_native_3d},
+        {"gamefont", &g_game_font},
         {"menuzoom", nullptr, &g_menu_zoom, 30, 80}, {"drawdist", nullptr, &g_draw_distance, 100, 400},
-        {"sim", nullptr, &g_sim60_setting, 0, 2}, {"aa", nullptr, &g_gfx.aa, 0, 3},
+        {"aa", nullptr, &g_gfx.aa, 0, 3},
     };
     char line[1024];
     while (std::fgets(line, sizeof line, f)) {
@@ -251,6 +237,8 @@ void load_settings() {
         g_layouts[guid] = lay;
     }
     std::fclose(f);
+    // older settings files had 150 / 300 too: the nearest of the three
+    g_draw_distance = g_draw_distance < 150 ? 100 : g_draw_distance < 300 ? 200 : 400;
 }
 
 }  // namespace host
@@ -260,21 +248,18 @@ void load_settings() {
 using namespace host;
 
 const char* enh_name(int id) {
-    static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
+    static const char* names[] = {"Frame rate", "Draw distance", "Smooth font",
                                   "Font upscaling", "Renderer", "Screen mode", "Display", "Autosave", "One-liners",
                                   "Anti-aliasing", "Infinite health", "Infinite lives", "Unlock all weapons", "Infinite ammo",
-                                  "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font type", "Native 3D"};
-    static_assert(std::size(names) == E_NATIVE_3D + 1, "one name per EnhSetting");
+                                  "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font type", "Smooth textures", "HD replacements"};
+    static_assert(std::size(names) == E_REPLACE + 1, "one name per EnhSetting");
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
 std::string enh_value(int id) {
     switch (id) {
         case E_FPS: return g_gfx.fps == 30 ? "30 (original)" : "60";
-        case E_SIM: return sim60_label();
         case E_DRAWDIST: return drawdist_label();
-        case E_PRECISE: return g_gte_precise ? "On (no wobble)" : "Off (original)";
-        case E_NATIVE_3D: return !g_native_3d ? "Off" : g_gte_precise ? "On" : "On (needs Precise 3D)";
         case E_SMOOTH_FONT: return g_smooth_font ? "On" : "Off (original)";
         case E_FONT_SCALE: return std::to_string(g_menu_zoom) + "%";
         case E_RENDERER:
@@ -287,6 +272,8 @@ std::string enh_value(int id) {
         case E_AA: return kAaNames[std::clamp(g_gfx.aa, 0, 3)];
         case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
         case E_CRT: return g_gfx.crt ? "On" : "Off";
+        case E_TEX_SMOOTH: return g_gfx.texture_filter ? "On" : "Off (original)";
+        case E_REPLACE: return g_tex_replace ? "On" : "Off (original)";
         case E_GAME_FONT: {
             if (texreplace_font_name().empty()) return "Original (no font in assets/fonts)";
             return g_game_font ? "Remastered" : "Original";
@@ -310,15 +297,7 @@ void enh_change(int id, int dir) {
     };
     switch (id) {
         case E_FPS: g_gfx.fps = cycle(kMenuFpsChoices, (int)std::size(kMenuFpsChoices), g_gfx.fps); break;
-        case E_SIM: {  // 60 Hz simulation (sim60.cpp)
-            static const int order[] = {1, 0, 2};  // levels 1-4, off, all levels
-            g_sim60_setting = cycle(order, 3, g_sim60_setting);
-            sim60_apply();
-            break;
-        }
         case E_DRAWDIST: g_draw_distance = cycle(kDrawDistChoices, (int)std::size(kDrawDistChoices), g_draw_distance); break;
-        case E_PRECISE: g_gte_precise = !g_gte_precise; break;
-        case E_NATIVE_3D: g_native_3d = !g_native_3d; break;
         case E_SMOOTH_FONT: g_smooth_font = !g_smooth_font; break;
         case E_FONT_SCALE: g_menu_zoom = cycle(kFontScaleChoices, (int)std::size(kFontScaleChoices), g_menu_zoom); break;
         case E_RENDERER: g_gfx.vulkan = !g_gfx.vulkan; break;  // takes effect when the game is started again
@@ -337,6 +316,11 @@ void enh_change(int id, int dir) {
         case E_AA: g_gfx.aa = (g_gfx.aa + dir + 4) % 4; break;
         case E_FPS_COUNTER: g_fps_counter = !g_fps_counter; break;
         case E_CRT: g_gfx.crt = !g_gfx.crt; break;
+        case E_TEX_SMOOTH: g_gfx.texture_filter = !g_gfx.texture_filter; break;  // (apply_graphics)
+        case E_REPLACE:  // textures and pictures (texreplace.cpp, replace.cpp) and movies (movie.cpp)
+            g_tex_replace = !g_tex_replace;
+            texreplace_vram_changed();
+            break;
         case E_GAME_FONT:
             g_game_font = !g_game_font;
             texreplace_font_changed();

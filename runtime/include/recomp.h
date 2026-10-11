@@ -233,6 +233,22 @@ void psx_hook_2d(R3000* c, int stage);        // the render's 2D routines start 
 int psx_hook_2d_call(R3000* c, int which);  // nonzero: a 2D routine was run by the hook (gpu.cpp)
 int psx_hook_render(R3000* c);  // nonzero: the render was done by the hook
 int psx_hook_mesh(R3000* c);    // nonzero: the level mesh was drawn natively (mesh.cpp)
+// effects and model shapes made on the CPU, run and then given exact positions (effects.cpp)
+int psx_hook_beam(R3000* c);
+int psx_hook_tube(R3000* c);
+int psx_hook_part_shadow(R3000* c);
+int psx_hook_part_halo(R3000* c);
+void psx_fx_glow(R3000* c);
+void psx_fx_sprite(R3000* c);
+void psx_fx_tri(R3000* c);
+void psx_fx_quad(R3000* c);
+void psx_fx_trail(R3000* c);
+void psx_fx_polyline(R3000* c, int flat);
+void psx_fx_line(R3000* c);
+void psx_fx_tetra(R3000* c);
+void psx_fx_glyph(R3000* c);
+int psx_hook_ray(R3000* c);
+void psx_fx_ribbon(R3000* c);
 int psx_hook_frustum(R3000* c);  // nonzero: the culling planes were built by the hook (drawdist.cpp)
 int psx_hook_tick(R3000* c);  // nonzero: the tick was handled (sim60.cpp)
 void psx_hook_player(R3000* c);  // entry of the player's update, a0 = player (sim60.cpp)
@@ -246,6 +262,7 @@ void psx_hook_zone(R3000* c);  // a force zone pushes a list, a0 = zone, a1 = li
 RECOMP_INLINE void psx_idle_until_event(R3000* c) {
     if (c->cycles < c->next_event) c->cycles = c->next_event;
 }
+void psx_hook_text_flame(R3000* c);  // the text routine links a flame sprite, s1 (gpu.cpp)
 void psx_hook_glow_sort(R3000* c);  // glow renderer: v0 = ordering-table slot, a1 = depth, s4 = glow (sim60.cpp)
 void psx_hook_strip_corner(R3000* c);  // level transform: a strip corner is stored (gte.cpp)
 void psx_hook_fire(R3000* c, int site);  // the player's weapon fires (sim60.cpp)

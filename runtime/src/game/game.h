@@ -10,7 +10,6 @@
 
 // ---------------------------------------------------------------- 60 Hz simulation (sim60.cpp)
 
-extern int g_sim60_setting;    // 0 = 30 Hz, 1 = 60 Hz in levels 1-4, 2 = 60 Hz in every level
 extern bool g_sim60_force;     // --sim60
 extern bool g_sim60_fps30;     // frame rate 30 chosen: no 60 Hz simulation
 extern std::string g_sim60_level;
@@ -20,7 +19,6 @@ void sim60_note_file(const std::string& file);
 
 // ---------------------------------------------------------------- native 3D (mesh.cpp)
 
-extern bool g_native_3d;  // setting: the level mesh drawn natively, with float geometry (needs precise 3D)
 
 // ---------------------------------------------------------------- draw distance (drawdist.cpp)
 
@@ -66,7 +64,7 @@ void texdump_vram_changed(int x, int y, int w, int h);
 // ---------------------------------------------------------------- texture replacements (texreplace.cpp)
 // assets/replacements/textures; the game's font from assets/fonts
 
-extern bool g_tex_replace;  // setting
+extern bool g_tex_replace;  // setting: HD replacements (textures, pictures, movies)
 extern bool g_game_font;    // setting
 void texreplace_vram_changed(int x = 0, int y = 0, int w = 1024, int h = 512);  // (default: all of it)
 void texreplace_atlas_lost();  // the renderer's atlas is gone (shut down)

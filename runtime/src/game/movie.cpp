@@ -5,6 +5,7 @@
 // replacement's picture instead (draw_game), and the replacement's sound takes the place of the
 // movie's CD audio in the SPU (so the game's own volume still applies).
 //
+// Only with the HD replacements setting on (g_tex_replace, which also covers the textures).
 // A replacement starts when the game reads the first sectors of a .STR that has one, and stops
 // when the game reads elsewhere on the disc, stops showing movie pictures, or stops reading.
 // Decoding is Windows Media Foundation (H.264 / HEVC / AAC ... as installed; FFmpeg elsewhere) on its own thread,
@@ -397,6 +398,10 @@ void start(const Str& s) {
 
 // cdrom.cpp: a sector was read from the disc.
 void movie_cd_sector(uint32_t lba) {
+    if (!g_tex_replace) {  // HD replacements off: the disc's own movies
+        if (g_play.str) stop("replacements off");
+        return;
+    }
     if (!g_scanned) scan();
     if (g_play.str) {
         if (lba >= g_play.str->lba && lba < g_play.str->lba + g_play.str->sectors) {

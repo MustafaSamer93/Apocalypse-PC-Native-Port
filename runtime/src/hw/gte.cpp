@@ -64,13 +64,12 @@ void gte_blend_begin(GteBlendMode m) {
     g_seg_misses = 0;
 }
 
-// Precise vertices (Recomp Enhancements -> Precise 3D). The GTE hands the game whole-pixel screen positions,
+// Precise vertices (always on: Native 3D). The GTE hands the game whole-pixel screen positions,
 // so vertices jump from pixel to pixel as things move, and the GPU maps textures without
 // perspective; both make textures wobble. Each projection's exact position and depth is kept
 // here under the whole-pixel position it produced (as a GPU vertex word packs it: 11-bit x
 // and y); the GPU looks its polygons' vertices up (gpu.cpp). Cleared after each frame's
 // ordering table is drawn.
-bool g_gte_precise = true;
 
 namespace {
 
@@ -500,7 +499,7 @@ void rtp(int n, const Cmd& c, bool last) {
     // exact view position (x4096): a subdivision grid vertex is rebuilt from its exact corners
     double ev[3] = {(double)view[0], (double)view[1], (double)view[2]};
     bool rebuilt = false;
-    if (g_gte_precise && c.shift == 12 && K(5) == 0 && K(6) == 0 && K(7) == 0) {
+    if (c.shift == 12 && K(5) == 0 && K(6) == 0 && K(7) == 0) {
         const CornerSlot* cs[3];
         bool all = true;
         for (int j = 0; j < 3 && all; j++)
@@ -524,12 +523,12 @@ void rtp(int n, const Cmd& c, bool last) {
             }
         }
     }
-    if (g_gte_precise && c.shift == 12) {
+    if (c.shift == 12) {
         const double u[3] = {ev[0] / 4096.0, ev[1] / 4096.0, ev[2] / 4096.0};
         corner_put(corner_key(IR(1), IR(2), IR(3)), u);
     }
     float px = 0, py = 0, pw = 0;
-    if (g_gte_precise && ev[2] >= 4096) {
+    if (ev[2] >= 4096) {
         const double ws = g_gte_widescreen;
         const double fx = (double)K(24) / 65536.0 + (double)h * ev[0] / ev[2] * ws;
         const double fy = (double)K(25) / 65536.0 + (double)h * ev[1] / ev[2];
@@ -784,7 +783,7 @@ extern "C" void gte_command(R3000* c, uint32_t cmd) {
                               (int64_t)sx0 * sy2 - (int64_t)sx1 * sy0 - (int64_t)sx2 * sy1);
             // PGXP culling correction: facing from the exact positions, when all three are known
             // (thin or tiny polygons whose whole-pixel corners flip the sign, and flicker)
-            if (g_gte_precise) {
+            {
                 GtePrecise e[3];
                 bool all = true;
                 for (int i = 0; i < 3 && all; i++) {

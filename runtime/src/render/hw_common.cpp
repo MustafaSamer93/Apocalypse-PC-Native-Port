@@ -125,13 +125,13 @@ void hw_rect(int x, int y, int w, int h, int u0, int v0, bool flip_x, bool flip_
     draw_area_dirty(x, y, x + w, y + h, s);
 }
 
-void hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gouraud, const HwPrim& p, const HwState& s) {
+void hw_line(float x0, float y0, uint32_t c0, float x1, float y1, uint32_t c1, bool gouraud, const HwPrim& p, const HwState& s) {
     begin_prim(p, s);
     if (!gouraud) c1 = c0;
     const int r0 = c0 & 0xFF, g0 = (c0 >> 8) & 0xFF, b0 = (c0 >> 16) & 0xFF;
     const int r1 = c1 & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = (c1 >> 16) & 0xFF;
     // a one-pixel-wide quad along the major axis, covering both end pixels
-    float ax = (float)x0, ay = (float)y0, bx = (float)x1, by = (float)y1;
+    float ax = x0, ay = y0, bx = x1, by = y1;
     const bool xmajor = std::abs(x1 - x0) >= std::abs(y1 - y0);
     const float px = xmajor ? 0.0f : 1.0f, py = xmajor ? 1.0f : 0.0f;  // the quad's width
     if (xmajor) {
@@ -141,5 +141,6 @@ void hw_line(int x0, int y0, uint32_t c0, int x1, int y1, uint32_t c1, bool gour
     }
     push(ax, ay, r0, g0, b0, 0, 0, p); push(bx, by, r1, g1, b1, 0, 0, p); push(ax + px, ay + py, r0, g0, b0, 0, 0, p);
     push(bx, by, r1, g1, b1, 0, 0, p); push(bx + px, by + py, r1, g1, b1, 0, 0, p); push(ax + px, ay + py, r0, g0, b0, 0, 0, p);
-    draw_area_dirty(std::min(x0, x1), std::min(y0, y1), std::max(x0, x1) + 1, std::max(y0, y1) + 1, s);
+    draw_area_dirty((int)std::floor(std::min(x0, x1)), (int)std::floor(std::min(y0, y1)), (int)std::ceil(std::max(x0, x1)) + 1,
+                    (int)std::ceil(std::max(y0, y1)) + 1, s);
 }

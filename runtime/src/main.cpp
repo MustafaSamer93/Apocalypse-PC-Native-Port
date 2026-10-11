@@ -51,7 +51,7 @@ void usage() {
         "  --cue PATH         disc image .cue or .bin (default: the image in assets/image)\n"
         "  --scale N          window height 240*N (default: 1080 lines, or fullscreen / what fits)\n"
         "  --log cats         comma list: core,bios,mem,gpu,cd,spu,dma,irq,pad,mdec,host,all\n"
-        "  --sim60            60 Hz simulation in every level (default: levels 1-4; Recomp Enhancements)\n"
+        "  --sim60            60 Hz simulation in any level, also at frame rate 30 (default: every level at 60)\n"
         "  --chapter N        start at chapter N (saves/chapters; Settings -> Chapter lists them)\n"
         "  --renderer R       opengl or vulkan (default: the saved setting)\n"
         "  --turbo            run as fast as possible (also: hold Tab)\n"

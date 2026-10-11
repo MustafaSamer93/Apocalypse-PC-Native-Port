@@ -650,16 +650,12 @@ void core_ghost_begin(R3000* c, uint64_t cycle_budget, std::jmp_buf* abort) {
     g_snap.imask = g_imask;
     g_snap.cache_isolated = psx_cache_isolated;
     // ponytail: copies all 8 MB of shadows (~1 ms per ghost render); journal the ghost's shadow stores if that shows up in profiles
-    if (g_gte_precise) {
-        g_snap.pgxp_ram.assign(pgxp_ram, pgxp_ram + PSX_RAM_SIZE / 4);
-        std::memcpy(g_snap.pgxp_scratch, pgxp_scratch, sizeof pgxp_scratch);
-        std::memcpy(g_snap.pgxp_gpr, pgxp_gpr, sizeof pgxp_gpr);
-        g_snap.rgb2 = g_rgb2_exact;
-        std::memcpy(g_snap.mac, g_mac_exact, sizeof g_mac_exact);
-        g_snap.mac_ok = g_mac_exact_ok;
-    } else {
-        g_snap.pgxp_ram.clear();
-    }
+    g_snap.pgxp_ram.assign(pgxp_ram, pgxp_ram + PSX_RAM_SIZE / 4);
+    std::memcpy(g_snap.pgxp_scratch, pgxp_scratch, sizeof pgxp_scratch);
+    std::memcpy(g_snap.pgxp_gpr, pgxp_gpr, sizeof pgxp_gpr);
+    g_snap.rgb2 = g_rgb2_exact;
+    std::memcpy(g_snap.mac, g_mac_exact, sizeof g_mac_exact);
+    g_snap.mac_ok = g_mac_exact_ok;
     g_ghost = true;
     g_ghost_deadline = c->cycles + cycle_budget;
     g_ghost_abort = abort;

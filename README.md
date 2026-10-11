@@ -17,9 +17,9 @@ executable from your disc image, and the program reads everything else from it a
 | Renderers: OpenGL 3.3 and Vulkan 1.3 (falls back to the other if one cannot start); software renderer | working |
 | Resolution 1x-9x (up to 2160 lines), supersampling, FXAA, MSAA 1x-8x | working |
 | Aspect ratios 4:3, 16:9, 16:10, 21:9, 32:9 (the 3D view widens; HUD, menu text and icons keep their shape) | working |
-| Precise 3D: polygons at their exact positions, perspective-correct textures, Z-buffer (no wobble) | working |
-| 60 Hz simulation (levels 1-4 by default, every level optional) | working |
-| CRT filter, texture smoothing, FPS counter, draw distance up to 4x | working |
+| Native 3D (always on): every polygon, effect and shadow at its exact float position, perspective-correct textures, Z-buffer (no wobble) | working |
+| 60 Hz simulation in every level (always on at frame rate 60) | working |
+| CRT filter, texture smoothing, FPS counter, draw distance (original, medium, high) | working |
 | Replacement textures, full-screen pictures and movies; the game's font from a TrueType file | working |
 | Subtitles for the voice lines, cheats, auto-save at checkpoints, chapter list | working |
 | Keyboard + mouse, gamepads (twin-stick aiming, free aim, rumble), button remapping | working |
