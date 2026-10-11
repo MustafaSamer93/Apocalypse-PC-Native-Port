@@ -89,8 +89,6 @@ struct Host {
     uint32_t menu = 0;
     uint32_t texts = 0;           // our item texts (Text)
     bool groups[kGroups] = {};    // the groups it offers
-    float size = 1.0f;            // lists and pages: this size of the menu's text,
-    int lower = 0;                // and this many lines lower
     int group = -1;               // the group whose list is shown, -1 = none
     uint32_t list = 0;            // its list
     int page = -1;                // the page shown, -1 = none
@@ -251,14 +249,11 @@ void refresh_texts(R3000* c, uint32_t block, const Page& p) {
     }
 }
 
-// Starts `menu` in the same place, alignment, scales and spacing as the game's menu `like`
-// (text size and spacing times `size`).
-void init_like(R3000* c, uint32_t menu, uint32_t like, float size = 1.0f) {
+// Starts `menu` in the same place, alignment, scales and spacing as the game's menu `like`.
+void init_like(R3000* c, uint32_t menu, uint32_t like) {
     const uint32_t it = item(like, 0);
-    auto sized = [size](int v) { return (uint32_t)std::lround((float)v * size); };
     game_call(c, kMenuInit, menu, MEM_R32(c, like + 12), MEM_R32(c, like + 16), MEM_R8(c, like + 4),
-              {sized((int16_t)MEM_R16(c, it + 8)), sized((int16_t)MEM_R16(c, it + 10)),
-               sized((int32_t)MEM_R32(c, like + 20))});
+              {(uint32_t)(int16_t)MEM_R16(c, it + 8), (uint32_t)(int16_t)MEM_R16(c, it + 10), MEM_R32(c, like + 20)});
 }
 
 // Our texts for a host: lower case in the main menu (as its own items), as written in the pause menu.
@@ -277,15 +272,15 @@ uint32_t make_texts(R3000* c, Host& h, bool lower_case) {
     return h.texts;
 }
 
-// A list or page menu for `h`: like its menu, sized and lowered as `h` wants; 0 if the heap is full.
+// A list or page menu for `h`: in its menu's place, text size and spacing (Font upscaling then
+// sizes it as every menu); 0 if the heap is full.
 uint32_t start_menu(R3000* c, const Host& h, uint32_t bytes) {
     const uint32_t block = game_call(c, kAlloc, bytes);
-    if (block) init_like(c, block, h.menu, h.size);
+    if (block) init_like(c, block, h.menu);
     return block;
 }
-void finish_menu(R3000* c, const Host& h, uint32_t block) {
+void finish_menu(R3000* c, uint32_t block) {
     game_call(c, kMenuLayout, block);  // centred up and down
-    MEM_W32(c, block + 16, MEM_R32(c, block + 16) + (uint32_t)h.lower * MEM_R32(c, block + 20));
     game_call(c, kMenuSelect, block, 0);
 }
 
@@ -340,7 +335,7 @@ void open_page(R3000* c, Host& h, int i) {
     refresh_texts(c, block, p);
     for (int k = 0; k < p.count; k++) game_call(c, kMenuAdd, block, block + 444 + kTextSize * (uint32_t)k);
     game_call(c, kMenuAdd, block, host_text(h, kTextBack));
-    finish_menu(c, h, block);
+    finish_menu(c, block);
     h.pages[i] = block;
     h.page = i;
 }
@@ -357,7 +352,7 @@ void open_list(R3000* c, Host& h, int g) {
     const int n = group_pages(g, pages);
     for (int k = 0; k < n; k++) game_call(c, kMenuAdd, block, host_text(h, kTextPage + pages[k]));
     game_call(c, kMenuAdd, block, host_text(h, kTextListBack));
-    finish_menu(c, h, block);
+    finish_menu(c, block);
     h.list = block;
     h.group = g;
 }
@@ -494,13 +489,10 @@ extern "C" void psx_hook_menu_add(R3000* c) {
             MEM_W32(c, kStrings + 4 * kStrSelectLevel, g_main_text + 16);
         }
         state_note_main_menu();
-        // Recomp Enhancements (its item goes before "options" at the menu's draws); its list and
-        // pages smaller, and a line lower: clear of the title above them
+        // Recomp Enhancements (its item goes before "options" at the menu's draws)
         g_mainh = Host{};
         g_mainh.menu = menu;
         g_mainh.groups[kGroupEnhancements] = true;
-        g_mainh.size = 0.75f;
-        g_mainh.lower = 1;
         make_texts(c, g_mainh, true);
         return;
     }
@@ -508,7 +500,6 @@ extern "C" void psx_hook_menu_add(R3000* c) {
         g_pause = Host{};  // (the old one's blocks went with its menu)
         g_pause.menu = menu;
         g_pause.groups[kGroupEnhancements] = g_pause.groups[kGroupOptions] = true;
-        g_pause.size = 0.7f;  // (between the pause screen's title and button prompts)
         if (!make_texts(c, g_pause, false)) return;
         game_call(c, kMenuAdd, menu, host_text(g_pause, kTextGroup + kGroupEnhancements));
         game_call(c, kMenuAdd, menu, host_text(g_pause, kTextGroup + kGroupOptions));
