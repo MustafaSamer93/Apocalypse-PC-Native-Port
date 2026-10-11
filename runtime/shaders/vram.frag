@@ -168,9 +168,11 @@ void main() {
             vec4 g = texel(ivec2(floor(v_uv)), vec2(0.0), game_transparent);
             if (((v_info.x >> 28) & 1u) != 0u) {
                 // a letter in the game font (texreplace.cpp): its shape, coloured like the game's
-                // letter on that row (the nearest row with any), in the palette it is drawn with
+                // letter on that row (the nearest row with any), in the palette it is drawn with.
+                // Semi-transparent or not goes by the row too: the shape is not the game letter's,
+                // and by the texel under it the edges drawn big showed the game letter's steps
                 int lo = int(v_box & 255u), hi = int((v_box >> 16) & 255u), y = int(floor(v_uv.y));
-                vec3 sum = vec3(0.0);
+                vec4 sum = vec4(0.0);
                 float n = 0.0;
                 for (int d = 0; d < 8 && n == 0.0; d++)
                     for (int s = -1; s <= 1; s += 2) {
@@ -179,10 +181,10 @@ void main() {
                         for (int x = lo; x <= hi && x < lo + 64; x++) {
                             bool tr;
                             vec4 c = texel(ivec2(x, row), vec2(0.0), tr);
-                            if (!tr) { sum += c.rgb; n += 1.0; }
+                            if (!tr) { sum += c; n += 1.0; }
                         }
                     }
-                if (n > 0.0) tc.rgb = sum / n;
+                if (n > 0.0) { tc.rgb = sum.rgb / n; g.a = step(0.5, sum.a / n); }
             } else if (transparent && !game_transparent) { tc.rgb = g.rgb; transparent = false; }
             tc.a = g.a;
         } else if (((v_info.x >> 24) & 1u) != 0u) {  // game text
