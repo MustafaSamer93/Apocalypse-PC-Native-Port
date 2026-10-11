@@ -402,6 +402,42 @@ void shared_corners(const uint32_t* xyw, int nv, GtePrecise* pr, bool* ok) {
     }
 }
 
+// Effects in widescreen (fx_packet): the corners made on the screen are narrowed round a point
+// that stays put. A light is a fan - triangles from its projected middle out to a ring, quads from
+// the ring outwards - whose polygons share corners: narrowed each round its own middle, the shared
+// corners split apart and the fan showed dark gaps. A corner placed once this frame keeps its place,
+// and a polygon with one of those corners is narrowed round the same point as the polygon before
+// (found from that corner); otherwise round its exact corners (a fan's middle). A fan's quad comes
+// before its triangle: its sides lie on the light's rays, and where they meet is the middle. Else
+// (a sprite: parallel sides) round its own middle.
+std::unordered_map<uint64_t, float> g_fx_corners;  // vertex word + draw offset -> its x; cleared by gpu_list_done
+void fx_squeeze(HwVtx* h, const uint32_t* xyw, const bool* exact, int nv) {
+    const float k = g_gte_widescreen;
+    uint64_t key[4];
+    for (int i = 0; i < nv; i++) key[i] = (uint64_t)xyw[i] << 32 | (uint32_t)(uint16_t)S.off_x << 16 | (uint16_t)S.off_y;
+    float fix = 0;
+    bool have = false;
+    for (int i = 0; i < nv && !have; i++)
+        if (!exact[i])
+            if (auto it = g_fx_corners.find(key[i]); it != g_fx_corners.end()) fix = (it->second - k * h[i].x) / (1 - k), have = true;
+    if (!have) {
+        float sx = 0, ax = 0;
+        int n = 0;
+        for (int i = 0; i < nv; i++) sx += h[i].x, ax += exact[i] ? h[i].x : 0, n += exact[i];
+        fix = n ? ax / (float)n : sx / (float)nv;
+        if (!n && nv == 4) {  // sides 0 -> 2 and 1 -> 3 (outer corners, then inner ones)
+            const float dx0 = h[2].x - h[0].x, dy0 = h[2].y - h[0].y, dx1 = h[3].x - h[1].x, dy1 = h[3].y - h[1].y;
+            const float det = dx0 * dy1 - dy0 * dx1;
+            if (std::fabs(det) > 1e-3f) {
+                const float t = ((h[1].x - h[0].x) * dy1 - (h[1].y - h[0].y) * dx1) / det;
+                if (t > 1.0f && t < 16.0f) fix = h[0].x + dx0 * t;  // past the inner corners, not far
+            }
+        }
+    }
+    for (int i = 0; i < nv; i++)
+        if (!exact[i]) h[i].x = g_fx_corners.emplace(key[i], fix + (h[i].x - fix) * k).first->second;
+}
+
 // Scanline-accurate rasterization would need the exact hardware edge walker; the
 // edge-function rasterizer above follows the same fill convention (top/left inclusive).
 void draw_polygon(const uint32_t* w) {
@@ -496,14 +532,16 @@ void draw_polygon(const uint32_t* w) {
             GtePrecise pr[4];
             bool nc[4], shadow_all = true;
             for (int i = 0; i < nv; i++) shadow_all &= nc[i] = pgxp_find(xya[i], xyw[i], &pr[i]);
-            if (!shadow_all) {
+            // (an effect's corners made on the screen may land on some 3D point's pixel: only the
+            // corners the GTE made are exact, the rest come in with fx_squeeze)
+            if (!shadow_all && !fx) {
                 GtePrecise pc[4];
                 bool cc[4];
                 precise_corners(xyw, nv, pc, cc);
                 for (int i = 0; i < nv; i++)
                     if (!nc[i]) pr[i] = pc[i], nc[i] = cc[i];
             }
-            if (!textured) shared_corners(xyw, nv, pr, nc);
+            if (!textured && !fx) shared_corners(xyw, nv, pr, nc);
             bool all = true;
             float wmax = 0;
             for (int i = 0; i < nv; i++) {
@@ -519,20 +557,11 @@ void draw_polygon(const uint32_t* w) {
             if (all)
                 for (int i = 0; i < nv; i++) h[i].w = pr[i].w / wmax;
             exact_all = all;
-            // an effect: the corners made on the screen come in round the projected ones (a glow's
-            // middle), or round their own middle (a sprite)
-            if (fx && !all) {
-                float ax = 0, sx = 0;
-                int n = 0;
-                for (int i = 0; i < nv; i++) sx += h[i].x, ax += nc[i] ? h[i].x : 0, n += nc[i];
-                ax = n ? ax / (float)n : sx / (float)nv;
-                for (int i = 0; i < nv; i++)
-                    if (!nc[i]) h[i].x = ax + (h[i].x - ax) * g_gte_widescreen;
-            }
-        } else if (fx) {  // (no exact corners known: round its middle)
-            float sx = 0;
-            for (int i = 0; i < nv; i++) sx += h[i].x;
-            for (int i = 0; i < nv; i++) h[i].x = sx / (float)nv + (h[i].x - sx / (float)nv) * g_gte_widescreen;
+            // an effect: the corners made on the screen come in (fx_squeeze)
+            if (fx && !all) fx_squeeze(h, xyw, nc, nv);
+        } else if (fx) {  // (no exact corners known)
+            const bool none[4] = {};
+            fx_squeeze(h, xyw, none, nv);
         }
         // a replacement texture (texreplace.cpp): drawn from its HD copy of VRAM
         if (textured && g_tex_replace) {
@@ -1125,6 +1154,7 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
 // render notes its own; after a level, its HUD range must not apply to menu packets).
 void gpu_list_done() {
     g_shared_corners.clear();
+    g_fx_corners.clear();
     gte_precise_clear();
     g_text_packets.clear();
     g_tilts.clear();
