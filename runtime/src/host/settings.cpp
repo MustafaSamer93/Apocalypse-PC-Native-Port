@@ -261,9 +261,9 @@ using namespace host;
 
 const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Simulation", "Draw distance", "Precise 3D", "Smooth font",
-                                  "Font scaling", "Renderer", "Screen mode", "Display", "Autosave", "One-liners",
-                                  "Anti-aliasing", "Infinite health", "Infinite lives", "All weapons", "Infinite ammo",
-                                  "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font", "Native 3D"};
+                                  "Font upscaling", "Renderer", "Screen mode", "Display", "Autosave", "One-liners",
+                                  "Anti-aliasing", "Infinite health", "Infinite lives", "Unlock all weapons", "Infinite ammo",
+                                  "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font type", "Native 3D"};
     static_assert(std::size(names) == E_NATIVE_3D + 1, "one name per EnhSetting");
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
@@ -288,9 +288,8 @@ std::string enh_value(int id) {
         case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
         case E_CRT: return g_gfx.crt ? "On" : "Off";
         case E_GAME_FONT: {
-            const std::string name = texreplace_font_name();
-            if (name.empty()) return "Original (no font in assets/fonts)";
-            return g_game_font ? name : "Original";
+            if (texreplace_font_name().empty()) return "Original (no font in assets/fonts)";
+            return g_game_font ? "Remastered" : "Original";
         }
         case E_CHEAT_HEALTH:
         case E_CHEAT_LIVES:
