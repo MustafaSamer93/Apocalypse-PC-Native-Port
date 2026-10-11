@@ -40,7 +40,20 @@ bool overlaps_dirty(int x0, int y0, int x1, int y1) {
     return g_dirty && x0 < g_dx1 && x1 > g_dx0 && y0 < g_dy1 && y1 > g_dy0;
 }
 
+// Frame interpolation: the frame being recorded, and the last finished ones.
+bool g_rec_on = false;
+RecFrame g_rec;
+constexpr int kRecFrames = 4;
+RecFrame g_rec_done[kRecFrames];
+int g_rec_next = 0;
+
+const RecFrame* rec_frame(int id) { return id >= 0 && id < kRecFrames ? &g_rec_done[id] : nullptr; }
+
 namespace {
+
+void rec_touch(int x0, int y0, int x1, int y1) {
+    if (g_rec_on) g_rec.touched.push_back({x0, y0, x1, y1});
+}
 
 // A primitive starts: if it samples VRAM drawn since the last sync, sync first; a new drawing
 // state ends the batch.
@@ -54,7 +67,11 @@ void begin_prim(const HwPrim& p, const HwState& s) {
         const int pw = p.depth == 0 ? 64 : p.depth == 1 ? 128 : 256;
         bool hit = overlaps_dirty(p.page_x, p.page_y, p.page_x + pw, p.page_y + 256);
         if (p.depth < 2) hit = hit || overlaps_dirty(p.clut_x, p.clut_y, p.clut_x + (p.depth == 0 ? 16 : 256), p.clut_y + 1);
-        if (hit) sync_read();
+        if (hit) {
+            sync_read();
+            // (drawn and then used as a texture: a picture of the frame itself cannot be redrawn)
+            rec_touch(p.page_x, p.page_y, p.page_x + pw, p.page_y + 256);
+        }
     }
     BatchKey k;
     k.semi = p.semi;
@@ -69,12 +86,24 @@ void begin_prim(const HwPrim& p, const HwState& s) {
     }
 }
 
-void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f, float z = 0.0f) {
+void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim& p, float w = 1.0f, float z = 0.0f,
+          Mot m = {0, 0, 1}) {
     const uint32_t info0 = (uint32_t)(p.page_x & 1023) | (uint32_t)(p.page_y & 511) << 10 | (uint32_t)p.depth << 20 |
                            (uint32_t)p.textured << 22 | (uint32_t)p.raw << 23 | (uint32_t)p.smooth << 24 |
                            (uint32_t)p.hd << 27 | (uint32_t)p.glyph << 28;
     const uint32_t info1 = (uint32_t)(p.clut_x & 1023) | (uint32_t)(p.clut_y & 511) << 10;
     g_batch.push_back(Vtx{x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b, 255, u, v, info0, info1, w, p.box, z});
+    if (!g_rec_on) return;
+    if (g_rec.ops.empty() || g_rec.ops.back().kind != RecOp::Batch || !(g_rec.ops.back().key == g_key) ||
+        g_rec.ops.back().filter != g_filter) {
+        RecOp op{RecOp::Batch, g_key};
+        op.filter = g_filter, op.first = (uint32_t)g_rec.v.size();
+        g_rec.ops.push_back(op);
+    }
+    g_rec.ops.back().count++;
+    g_rec.v.push_back(g_batch.back());
+    g_rec.m.push_back(m);
+    g_rec.moving |= m.dx != 0 || m.dy != 0 || m.dr != 1;
 }
 
 // The drawn area, clipped to the drawing area, becomes dirty.
@@ -102,7 +131,7 @@ void hw_triangle(const HwVtx* a, const HwVtx* b, const HwVtx* c, const HwPrim& p
     begin_prim(p, s);
     for (const HwVtx* v : {a, b, c}) {
         const HwVtx* col = p.gouraud ? v : a;
-        push(v->x, v->y, col->r, col->g, col->b, v->u, v->v, p, v->w, v->z);
+        push(v->x, v->y, col->r, col->g, col->b, v->u, v->v, p, v->w, v->z, {v->dx, v->dy, v->dr});
     }
     draw_area_dirty((int)std::floor(std::min({a->x, b->x, c->x})), (int)std::floor(std::min({a->y, b->y, c->y})),
                     (int)std::ceil(std::max({a->x, b->x, c->x})) + 1, (int)std::ceil(std::max({a->y, b->y, c->y})) + 1, s);
@@ -143,4 +172,47 @@ void hw_line(float x0, float y0, uint32_t c0, float x1, float y1, uint32_t c1, b
     push(bx, by, r1, g1, b1, 0, 0, p); push(bx + px, by + py, r1, g1, b1, 0, 0, p); push(ax + px, ay + py, r0, g0, b0, 0, 0, p);
     draw_area_dirty((int)std::floor(std::min(x0, x1)), (int)std::floor(std::min(y0, y1)), (int)std::ceil(std::max(x0, x1)) + 1,
                     (int)std::ceil(std::max(y0, y1)) + 1, s);
+}
+
+// ================================================================ frame interpolation
+
+void hw_rec_enable(bool on) {
+    if (on == g_rec_on) return;
+    g_rec_on = on;
+    g_rec = RecFrame{};
+}
+
+void hw_rec_note_fill(int x, int y, int w, int h, uint16_t color) {
+    if (!g_rec_on) return;
+    RecOp op{RecOp::Fill};
+    op.x = x, op.y = y, op.w = w, op.h = h, op.color = color;
+    g_rec.ops.push_back(op);
+}
+
+void hw_rec_note_depth() {
+    if (g_rec_on) g_rec.ops.push_back(RecOp{RecOp::Depth});
+}
+
+void hw_rec_note_write(int x, int y, int w, int h) { rec_touch(x, y, x + w, y + h); }
+
+int hw_rec_finish(int x, int y, int w, int h) {
+    if (!g_rec_on) return -1;
+    if (g_rec.ops.empty()) return -2;
+    bool ok = !g_rec.ops.empty() && w > 0 && h > 0 && x + w <= 1024 && y + h <= 512;
+    for (const auto& r : g_rec.touched) {
+        // (a few pixels do not count: the game puts 2 at 0,0 every other frame)
+        const bool hit = r[0] < x + w && r[2] > x && r[1] < y + h && r[3] > y && (r[2] - r[0]) * (r[3] - r[1]) >= 64;
+        ok &= !hit;
+    }
+    int id = -1;
+    if (ok) {
+        id = g_rec_next;
+        g_rec_next = (g_rec_next + 1) % kRecFrames;
+        g_rec.x = x, g_rec.y = y, g_rec.w = w, g_rec.h = h;
+        std::swap(g_rec_done[id], g_rec);
+    }
+    // (the vectors keep their memory for the next frame)
+    g_rec.v.clear(), g_rec.m.clear(), g_rec.ops.clear(), g_rec.touched.clear();
+    g_rec.moving = false;
+    return id;
 }

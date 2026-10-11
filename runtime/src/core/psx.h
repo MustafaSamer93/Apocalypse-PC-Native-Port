@@ -137,6 +137,20 @@ extern double g_mac_exact[4];
 extern bool g_mac_exact_ok;
 void gte_frame_stats();  // per-frame command counts (--log gpu)
 
+// Frame interpolation (game/motion.cpp): where each exact vertex of this frame was in the last.
+extern bool g_motion_on;  // in-between images are being made (host.cpp)
+struct MotionPrev {
+    float x, y, w;  // screen position and view depth last frame
+};
+void motion_frame_begin();       // a level render starts (not a ghost one)
+void motion_camera(R3000* c);    // the level renderer: the frame's camera (its first call counts)
+// gte.cpp: a model part (rotation, translation) begins; a vertex of it was projected exactly
+void motion_segment(const int16_t* rt, const int32_t* tr, uint32_t ra);
+void motion_vertex(int16_t vx, int16_t vy, int16_t vz, float px, float py, float pw, const int16_t* rt, const int32_t* tr,
+                   float h);
+// gpu.cpp: last frame's position of the exact vertex (x, y, w) (false: none known)
+bool motion_prev(float x, float y, float w, MotionPrev* out);
+
 // ---------------------------------------------------------------- CD-ROM (cdrom.cpp)
 
 void cdrom_init(const std::string& cue_path);

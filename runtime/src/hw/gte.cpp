@@ -44,6 +44,7 @@ constexpr uint32_t kSegLookAhead = 24;
 constexpr int64_t kSegNear = 512;  // largest distance (sum of |dx|, |dy|, |dz|) of paired translations
 std::vector<BlendSeg> g_blend_segs;  // recorded
 bool g_tr_loaded = true;             // the translation was loaded since the current segment began
+bool g_motion_part = true;           // the rotation or translation was loaded since (motion.cpp's parts)
 const BlendSeg* g_seg_rec = nullptr;  // blend pass: the recorded segment paired with the current one
 bool g_seg_near = false;               // blend pass: paired by a nearby translation, not the same one
 uint32_t g_seg_next = 0;              // blend pass: the first recorded segment not paired yet
@@ -570,6 +571,17 @@ void rtp(int n, const Cmd& c, bool last) {
             else pw = 0;
         }
     }
+    // frame interpolation (motion.cpp): where this vertex was last frame
+    if (g_motion_on && pw > 0 && g_gte_blend != GteBlendMode::Record && !core_in_ghost()) {
+        int16_t rt[9];
+        for (int i = 0; i < 9; i++) rt[i] = M(0, i / 3, i % 3);
+        const int32_t t[3] = {K(5), K(6), K(7)};
+        if (g_motion_part) {
+            g_motion_part = false;
+            motion_segment(rt, t, C->r[31]);
+        }
+        motion_vertex((int16_t)x, (int16_t)y, (int16_t)z, px, py, pw, rt, t, (float)h);
+    }
     g_pgxp_sxy[2] = {(uint32_t)D(14), px, py, pw};
     if (pw > 0 && g_gte_blend != GteBlendMode::Record) precise_put((uint32_t)D(14), px, py, pw);
     if (last) {
@@ -722,6 +734,7 @@ extern "C" uint32_t gte_read_ctrl(R3000* c, int r) {
 extern "C" void gte_write_ctrl(R3000* c, int r, uint32_t v) {
     C = c;
     if (r >= 5 && r <= 7) g_tr_loaded = true;  // a new pose-blend segment
+    if (r <= 7) g_motion_part = true;
     switch (r) {
         case 4: case 12: case 20: case 26: case 27: case 29: case 30:
             c->gte_ctrl[r] = (int16_t)v; break;

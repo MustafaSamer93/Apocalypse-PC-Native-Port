@@ -560,6 +560,14 @@ void draw_polygon(const uint32_t* w) {
             if (all)
                 for (int i = 0; i < nv; i++) h[i].w = pr[i].w / wmax;
             exact_all = all;
+            // frame interpolation (motion.cpp): where each exact corner was last frame
+            if (g_motion_on)
+                for (int i = 0; i < nv; i++) {
+                    MotionPrev m;
+                    if (!nc[i] || !motion_prev(pr[i].x, pr[i].y, pr[i].w, &m)) continue;
+                    h[i].dx = m.x - pr[i].x, h[i].dy = m.y - pr[i].y;
+                    if (all) h[i].dr = m.w / pr[i].w;
+                }
             // an effect: the corners made on the screen come in (fx_squeeze)
             if (fx && !all) fx_squeeze(h, xyw, nc, nv);
         } else if (fx) {  // (no exact corners known)
@@ -819,7 +827,7 @@ void execute(const std::vector<uint32_t>& w) {
                 if (S.check_mask && (d & 0x8000)) continue;
                 d = tmp[(size_t)j * ww + i] | (S.set_mask ? 0x8000 : 0);
             }
-        if (hw_active()) hw_copy(sx, sy, dx, dy, ww, hh);
+        if (hw_active()) hw_copy(sx, sy, dx, dy, ww, hh), hw_rec_note_write(dx, dy, ww, hh);
         replace_note_copy(sx, sy, dx, dy, ww, hh);
         texdump_vram_changed(dx, dy, ww, hh);
         if (dx + ww > 512) texreplace_vram_changed(dx, dy, ww, hh);
@@ -854,7 +862,7 @@ void execute(const std::vector<uint32_t>& w) {
             int ww = ((w[2] & 0x3FF) + 15) & ~15, hh = (w[2] >> 16) & 0x1FF;
             for (int j = 0; j < hh; j++)
                 for (int i = 0; i < ww; i++) vram(x + i, y + j) = c;
-            if (hw_active()) hw_fill(x, y, ww, hh, c);
+            if (hw_active()) hw_fill(x, y, ww, hh, c), hw_rec_note_fill(x, y, ww, hh, c);
             return;
         }
         case 0x1F: DS.irq = true; return;
@@ -901,7 +909,10 @@ void upload_word(uint32_t v) {
             if (++g_upload.cy >= g_upload.h) {
                 g_upload.active = false;
                 LOG(Gpu, "upload %d,%d %dx%d", g_upload.x, g_upload.y, g_upload.w, g_upload.h);
-                if (hw_active()) hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
+                if (hw_active()) {
+                    hw_upload(g_upload.x, g_upload.y, g_upload.w, g_upload.h, g_vram);
+                    hw_rec_note_write(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
+                }
                 texdump_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 if (g_upload.x + g_upload.w > 512 && g_upload.h > 1) texreplace_vram_changed(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
                 texreplace_vram_written(g_upload.x, g_upload.y, g_upload.w, g_upload.h);
@@ -1207,7 +1218,7 @@ void gpu_list_done() {
     g_tilts.clear();
     g_last_text_from = 0;
     g_2d_from = g_2d_mid = g_2d_to = g_2d_bar = g_fx_from = 0;
-    if (hw_active()) hw_depth_reset();
+    if (hw_active()) hw_depth_reset(), hw_rec_note_depth();
 }
 
 void gpu_note_movie_frame() {

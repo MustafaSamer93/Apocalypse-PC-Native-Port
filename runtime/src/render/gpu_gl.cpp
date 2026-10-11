@@ -25,11 +25,18 @@ using namespace hwc;
 GLuint g_draw_tex, g_draw_fbo, g_read_tex, g_read_fbo, g_stage_tex;
 GLuint g_draw_rb = 0;                     // multisampled draw target (instead of g_draw_tex)
 GLuint g_prog, g_copy_prog, g_vao, g_vbo;
-GLint u_scale, u_texwin, u_pass, u_set_mask, u_filter, u_vram, u_hd;
+GLint u_scale, u_texwin, u_pass, u_set_mask, u_filter, u_vram, u_hd, u_origin;
 GLuint g_hd_tex = 0;  // replacement textures' atlas (texreplace.cpp), on texture unit 1
 GLint uc_src, uc_scale, uc_off;
 
 GLuint g_zbuffer = 0;  // depth renderbuffer of the draw FBO (0: none)
+
+// Frame interpolation (gl_hw_replay): the image a recorded frame is drawn again into, with its own
+// depth buffer, multisampled like the VRAM target (then resolved into ip_tex).
+struct {
+    GLuint tex = 0, fbo = 0, ms_rb = 0, ms_fbo = 0, depth = 0;
+    int w = 0, h = 0, samples = 0;  // pixels
+} g_ip;
 
 
 const char* kVS = R"(#version 330 core
@@ -40,13 +47,14 @@ layout(location = 3) in uvec2 a_info;
 layout(location = 4) in float a_w;
 layout(location = 5) in uint a_box;
 layout(location = 6) in float a_z;
+uniform vec4 u_origin;  // the VRAM rectangle the target covers (x, y, w, h): all of VRAM, or a frame (hw_replay)
 flat out uint v_box;
 out float v_z;
 out vec4 v_color;  // like v_uv: perspective-correct when a_w varies (PGXP colour correction)
 out vec2 v_uv;  // perspective-correct when a_w varies (precise 3D); affine when it is 1
 flat out uvec2 v_info;
 void main() {
-    gl_Position = vec4(a_pos.x / 512.0 - 1.0, a_pos.y / 256.0 - 1.0, 0.0, 1.0) * a_w;
+    gl_Position = vec4((a_pos - u_origin.xy) / u_origin.zw * 2.0 - 1.0, 0.0, 1.0) * a_w;
     v_color = a_color;
     v_uv = a_uv;
     v_info = a_info;
@@ -344,13 +352,14 @@ void bind_draw_target() {
     glViewport(0, 0, 1024 * S, 512 * S);
 }
 
-void gl_flush() {
-    if (g_batch.empty()) return;
-    bind_draw_target();
+// Draws n vertices with drawing state `key` into the bound target, which covers the VRAM
+// rectangle `origin` (x, y, w, h).
+void draw_vertices(const Vtx* v, size_t n, const BatchKey& key, bool filter, const int* origin) {
     glEnable(GL_SCISSOR_TEST);
-    glScissor(g_key.sc[0] * S, g_key.sc[1] * S, (g_key.sc[2] - g_key.sc[0] + 1) * S,
-              (g_key.sc[3] - g_key.sc[1] + 1) * S);
+    glScissor((key.sc[0] - origin[0]) * S, (key.sc[1] - origin[1]) * S, (key.sc[2] - key.sc[0] + 1) * S,
+              (key.sc[3] - key.sc[1] + 1) * S);
     glUseProgram(g_prog);
+    glUniform4f(u_origin, (float)origin[0], (float)origin[1], (float)origin[2], (float)origin[3]);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_read_tex);
     glUniform1i(u_vram, 0);
@@ -359,35 +368,42 @@ void gl_flush() {
     glUniform1i(u_hd, 1);
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(u_scale, S);
-    glUniform4i(u_texwin, g_key.tw[0], g_key.tw[1], g_key.tw[2], g_key.tw[3]);
-    glUniform1i(u_set_mask, g_key.set_mask ? 1 : 0);
-    glUniform1i(u_filter, g_filter ? 1 : 0);
+    glUniform4i(u_texwin, key.tw[0], key.tw[1], key.tw[2], key.tw[3]);
+    glUniform1i(u_set_mask, key.set_mask ? 1 : 0);
+    glUniform1i(u_filter, filter ? 1 : 0);
     glBindVertexArray(g_vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g_batch.size() * sizeof(Vtx)), g_batch.data(), GL_STREAM_DRAW);
-    if (g_key.ztest && g_zbuffer) {
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * sizeof(Vtx)), v, GL_STREAM_DRAW);
+    if (key.ztest && g_zbuffer) {
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
-        glDepthMask(g_key.ztest == 1 ? GL_TRUE : GL_FALSE);
+        glDepthMask(key.ztest == 1 ? GL_TRUE : GL_FALSE);
     } else {
         glDisable(GL_DEPTH_TEST);
     }
-    if (!g_key.semi) {
+    if (!key.semi) {
         glDisable(GL_BLEND);
         glUniform1i(u_pass, 0);
-        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g_batch.size());
+        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)n);
     } else {
         glDisable(GL_BLEND);
         glUniform1i(u_pass, 1);
-        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g_batch.size());
-        set_blend(g_key.semi_mode);
+        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)n);
+        set_blend(key.semi_mode);
         glUniform1i(u_pass, 2);
-        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g_batch.size());
+        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)n);
         glDisable(GL_BLEND);
     }
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
     glDisable(GL_SCISSOR_TEST);
+}
+
+void gl_flush() {
+    if (g_batch.empty()) return;
+    bind_draw_target();
+    static const int kAll[4] = {0, 0, 1024, 512};
+    draw_vertices(g_batch.data(), g_batch.size(), g_key, g_filter, kAll);
     g_batch.clear();
 }
 
@@ -420,6 +436,7 @@ bool gl_hw_init(int scale) {
         u_filter = glGetUniformLocation(g_prog, "u_filter");
         u_vram = glGetUniformLocation(g_prog, "u_vram");
         u_hd = glGetUniformLocation(g_prog, "u_hd");
+        u_origin = glGetUniformLocation(g_prog, "u_origin");
         uc_src = glGetUniformLocation(g_copy_prog, "u_src");
         uc_scale = glGetUniformLocation(g_copy_prog, "u_scale");
         uc_off = glGetUniformLocation(g_copy_prog, "u_off");
@@ -519,8 +536,18 @@ bool gl_hw_init(int scale) {
     return true;
 }
 
+static void free_replay_target() {
+    if (g_ip.tex) glDeleteTextures(1, &g_ip.tex);
+    if (g_ip.fbo) glDeleteFramebuffers(1, &g_ip.fbo);
+    if (g_ip.ms_rb) glDeleteRenderbuffers(1, &g_ip.ms_rb);
+    if (g_ip.ms_fbo) glDeleteFramebuffers(1, &g_ip.ms_fbo);
+    if (g_ip.depth) glDeleteRenderbuffers(1, &g_ip.depth);
+    g_ip = {};
+}
+
 void gl_hw_shutdown() {
     if (!S) return;
+    free_replay_target();
     if (g_zbuffer) glDeleteRenderbuffers(1, &g_zbuffer);
     g_zbuffer = 0;
     glDeleteFramebuffers(1, &g_draw_fbo);
@@ -723,4 +750,84 @@ unsigned gl_hw_display_texture(int x, int y, int w, int h, int* px, int* py, int
     *pw = w * S;
     *ph = h * S;
     return g_samples > 1 ? g_read_tex : g_draw_tex;
+}
+
+// ================================================================ frame interpolation
+
+// The replay target for a w x h (native) frame.
+static bool replay_target(int w, int h) {
+    const int pw = w * S, ph = h * S;
+    if (g_ip.tex && g_ip.w == pw && g_ip.h == ph && g_ip.samples == g_samples) return true;
+    free_replay_target();
+    g_ip.w = pw, g_ip.h = ph, g_ip.samples = g_samples;
+    g_ip.tex = make_vram_texture(pw, ph);
+    g_ip.fbo = make_fbo(g_ip.tex);
+    GLuint target = g_ip.fbo;
+    if (g_samples > 1) {
+        glGenRenderbuffers(1, &g_ip.ms_rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, g_ip.ms_rb);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_samples, GL_RGBA8, pw, ph);
+        glGenFramebuffers(1, &g_ip.ms_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, g_ip.ms_fbo);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, g_ip.ms_rb);
+        target = g_ip.ms_fbo;
+    }
+    if (g_zbuffer) {
+        glGenRenderbuffers(1, &g_ip.depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, g_ip.depth);
+        if (g_samples > 1) glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_samples, GL_DEPTH_COMPONENT32F, pw, ph);
+        else glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, pw, ph);
+        glBindFramebuffer(GL_FRAMEBUFFER, target);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_ip.depth);
+    }
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        log_msg(LogCat::Gpu, "frame interpolation: no %dx%d image", pw, ph);
+        free_replay_target();
+        return false;
+    }
+    return true;
+}
+
+unsigned gl_hw_replay(int id, float t, int* tw, int* th) {
+    const RecFrame* f = rec_frame(id);
+    if (!S || !f || !replay_target(f->w, f->h)) return 0;
+    flush();  // (the game's own pending primitives, into VRAM)
+    const GLuint target = g_ip.ms_fbo ? g_ip.ms_fbo : g_ip.fbo;
+    glBindFramebuffer(GL_FRAMEBUFFER, target);
+    glViewport(0, 0, g_ip.w, g_ip.h);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0, 0, 0, 0);
+    glClearDepth(1.0);
+    glDepthMask(GL_TRUE);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    const int origin[4] = {f->x, f->y, f->w, f->h};
+    static std::vector<Vtx> moved;
+    for (const RecOp& op : f->ops) {
+        if (op.kind == RecOp::Depth) {
+            glDisable(GL_SCISSOR_TEST);
+            glClear(GL_DEPTH_BUFFER_BIT);
+        } else if (op.kind == RecOp::Fill) {
+            const int x0 = std::max(op.x, f->x), y0 = std::max(op.y, f->y);
+            const int x1 = std::min(op.x + op.w, f->x + f->w), y1 = std::min(op.y + op.h, f->y + f->h);
+            if (x0 >= x1 || y0 >= y1) continue;
+            const uint32_t c = rgba_of(op.color & 0x7FFF);
+            glEnable(GL_SCISSOR_TEST);
+            glScissor((x0 - f->x) * S, (y0 - f->y) * S, (x1 - x0) * S, (y1 - y0) * S);
+            glClearColor((c & 0xFF) / 255.0f, ((c >> 8) & 0xFF) / 255.0f, ((c >> 16) & 0xFF) / 255.0f, 0.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDisable(GL_SCISSOR_TEST);
+        } else {
+            moved.resize(op.count);
+            for (uint32_t i = 0; i < op.count; i++) moved[i] = rec_vertex(f->v[op.first + i], f->m[op.first + i], t);
+            draw_vertices(moved.data(), moved.size(), op.key, op.filter, origin);
+        }
+    }
+    if (g_ip.ms_fbo) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_ip.ms_fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_ip.fbo);
+        glBlitFramebuffer(0, 0, g_ip.w, g_ip.h, 0, 0, g_ip.w, g_ip.h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    *tw = g_ip.w, *th = g_ip.h;
+    return g_ip.tex;
 }

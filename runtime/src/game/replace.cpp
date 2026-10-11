@@ -308,6 +308,7 @@ void replace_check(const uint16_t* vram) {
             if (!load(p)) continue;
             fit(p, hw_scale(), aspect);
             hw_draw_picture(0, y, p.w, p.h, p.fitted.data());
+            hw_rec_note_write(0, y, p.w, p.h);
             g_replaced[b] = true;
         }
     }

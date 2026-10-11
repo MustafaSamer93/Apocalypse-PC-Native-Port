@@ -39,7 +39,7 @@ int g_active_msaa = 1;  // MSAA samples the renderer was created with
 // percent of the game's own (drawdist.cpp): Original, Medium (2x), High (the whole depth range)
 constexpr int kDrawDistChoices[] = {100, 200, 400};
 constexpr int kFontScaleChoices[] = {30, 40, 50, 60, 70, 80};  // the game's menus (game_menu.cpp)
-constexpr int kMenuFpsChoices[] = {30, 60};                    // 30 = the original
+constexpr int kMenuFpsChoices[] = {30, 60, 75, 90, 120};        // 30 = the original; above 60: in-between images (interp.cpp)
 // Display choices: resolution and aspect ratio together (the game's Enhancements page).
 const struct { const char* name; int scale; Aspect aspect; } kDisplays[] = {
     {"320x240 (Original)", 1, Aspect::A4_3},     {"960x720", 3, Aspect::A4_3},
@@ -181,7 +181,7 @@ void load_settings() {
             g_gfx.aspect = (Aspect)std::clamp(as, 0, 5);
             g_gfx.crt = crt != 0;
             g_gfx.texture_filter = filt != 0;
-            if (got == 5) g_gfx.fps = fps == 30 ? 30 : 60;
+            if (got == 5) g_gfx.fps = fps == 30 || fps == 75 || fps == 90 || fps == 120 ? fps : 60;
             continue;
         }
         char name[16];
@@ -258,7 +258,7 @@ const char* enh_name(int id) {
 
 std::string enh_value(int id) {
     switch (id) {
-        case E_FPS: return g_gfx.fps == 30 ? "30 (original)" : "60";
+        case E_FPS: return g_gfx.fps == 30 ? "30 original" : std::to_string(g_gfx.fps);
         case E_DRAWDIST: return drawdist_label();
         case E_SMOOTH_FONT: return g_smooth_font ? "On" : "Off (original)";
         case E_FONT_SCALE: return std::to_string(g_menu_zoom) + "%";

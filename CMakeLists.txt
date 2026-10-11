@@ -135,6 +135,7 @@ add_executable(repocalypse
     runtime/src/game/effects.cpp
     runtime/src/game/game_menu.cpp
     runtime/src/game/mesh.cpp
+    runtime/src/game/motion.cpp
     runtime/src/game/movie.cpp
     runtime/src/game/replace.cpp
     runtime/src/game/sim60.cpp

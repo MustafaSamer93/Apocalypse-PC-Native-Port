@@ -22,6 +22,7 @@ bool host_quit_requested();
 void host_request_quit();            // close the game (as closing the window does)
 void host_present(const GpuDisplay& d);
 void host_throttle_frame();          // holds the display rate (vsync or a 59.94 Hz timer)
+void host_interp_poll();             // above 60 fps: an in-between image due now (from the emulation)
 void host_set_turbo(bool on);        // run as fast as possible
 void host_audio_push(const int16_t* stereo, int frames);
 void host_audio_clear();

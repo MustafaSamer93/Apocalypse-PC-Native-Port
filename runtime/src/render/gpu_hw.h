@@ -14,6 +14,9 @@ struct HwVtx {
     float u, v;        // texels; fractional with exact texture coordinates (gte.cpp pgxp_uv_find)
     float w = 1.0f;    // view depth for perspective-correct texturing (precise 3D); 1 = affine
     float z = 0.0f;    // view depth (Z-buffer, HwPrim::ztest)
+    // Frame interpolation (motion.cpp, hw_replay): where the vertex was last frame, as the
+    // position's change (native pixels) and the view depth's ratio (w and z)
+    float dx = 0.0f, dy = 0.0f, dr = 1.0f;
 };
 
 // Per-primitive drawing state (texture page, palette, blending) as the GPU had it.
@@ -72,6 +75,19 @@ unsigned hw_display_texture(int x, int y, int w, int h, int* px, int* py, int* p
 
 void hw_depth_reset();  // a new frame: the Z-buffer is cleared
 bool hw_zbuffer_ready();  // the VRAM render target has a depth buffer (HwPrim::ztest works)
+
+// Frame interpolation (host.cpp): while on, each frame's primitives are recorded (gpu.cpp notes
+// the fills, depth clears and other VRAM writes). A finished frame, shown at x, y, w, h, gets an
+// id (-2: nothing drawn since the last; -1: none, or it cannot be drawn again: a picture or copy went into it, or its own pixels were
+// used as a texture); hw_replay (render_backend.h) draws it again with every vertex at phase t of
+// its motion (0: where it was last frame, 1: where it is) into an image of its own.
+void hw_rec_enable(bool on);
+void hw_rec_note_fill(int x, int y, int w, int h, uint16_t color);
+void hw_rec_note_depth();
+void hw_rec_note_write(int x, int y, int w, int h);
+int hw_rec_finish(int x, int y, int w, int h);
+// The image (a texture of *tw x *th pixels, the frame's top row first; 0: none).
+unsigned hw_replay(int id, float t, int* tw, int* th);
 
 // Texture smoothing on/off (bilinear filtering of game textures).
 void hw_set_texture_filter(bool on);

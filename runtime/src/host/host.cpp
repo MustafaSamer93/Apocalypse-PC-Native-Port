@@ -190,6 +190,75 @@ void draw_game(const GpuDisplay& d) {
     finish_frame(true);  // (the title screen's moving background is a 24-bit movie too)
 }
 
+// ================================================================ in-between images (above 60 fps)
+
+// With a frame rate above 60 chosen (and a display at least that fast), the screen gets images at
+// that rate, each the latest frame drawn again (hw_replay) with every vertex at the point of its
+// motion since the frame before (motion.cpp) that matches the moment the image will be on the
+// screen. The images run one emulated frame behind: frame k, due at N_k, is shown whole at N_(k+1),
+// and on its way there it moves in from where frame k-1 had everything.
+//
+// Each image is aimed at a refresh of the display: started just before it (interp_service is polled
+// while emulating and while waiting for the next frame), so the swap, which waits for the refresh
+// (vsync), holds the game up only briefly. When the swap returns, that refresh has just happened:
+// the next ones follow every 1/refresh seconds.
+struct Recorded {
+    int id;        // hw_replay's frame
+    uint64_t due;  // N_k
+    int nh;        // its PS1 line count (CRT filter)
+};
+std::vector<Recorded> g_ip_frames;  // the last few, oldest first
+int g_ip_rate = 0;                  // images per second (0: off)
+uint64_t g_ip_target = 0;           // the refresh the next image is for
+uint64_t g_ip_ideal = 0;            // ... and when it would be at exactly the chosen rate
+uint64_t g_ip_lead = 3000000;       // started this long before its refresh (ns; adapts)
+
+int interp_rate() {
+    if (g_gfx.fps <= 60 || g_turbo || g_vsync_pacing || !hw_active() || !psx_opt_sim60) return 0;
+    const int rate = std::min(g_gfx.fps, (int)std::lround(g_refresh_hz));
+    return rate > 60 ? rate : 0;
+}
+
+uint64_t refresh_ns() { return (uint64_t)(1e9 / std::max(g_refresh_hz, 1.0f)); }
+
+// When the next image is to be started.
+uint64_t interp_due() { return g_ip_target - g_ip_lead; }
+
+void interp_service() {
+    if (!g_ip_rate || g_ip_frames.empty()) return;
+    const uint64_t start = SDL_GetTicksNS();
+    if (start < interp_due()) return;
+    const uint64_t vb = refresh_ns();
+    if (start > g_ip_target) g_ip_target += (start - g_ip_target + vb - 1) / vb * vb;  // (late: the next refresh)
+    // the moment shown: a frame period before the refresh, between the frame due last before it
+    // and the one after
+    const uint64_t at = g_ip_target - FRAME_NS;
+    size_t k = 0;
+    while (k + 1 < g_ip_frames.size() && g_ip_frames[k].due < at) k++;
+    const Recorded& f = g_ip_frames[k];
+    const uint64_t span = k ? f.due - g_ip_frames[k - 1].due : FRAME_NS;
+    const float t = at >= f.due ? 1.0f : std::clamp(1.0f - (float)(f.due - at) / (float)span, 0.0f, 1.0f);
+    int tw = 0, th = 0;
+    const unsigned tex = hw_replay(f.id, t, &tw, &th);
+    const int nh = f.nh;
+    if (k > 1) g_ip_frames.erase(g_ip_frames.begin(), g_ip_frames.begin() + (k - 1));  // (older ones are done)
+    if (!tex) return;
+    present_game_texture(tex, tw, th, 0, 0, tw, th, nh, present_options());
+    g_images++;
+    finish_frame(true);
+    // The swap returned just after the refresh it waited for. Missed it (returned a refresh later):
+    // start earlier; on time: a little later each time, so the game is held up as little as can be.
+    const uint64_t back = SDL_GetTicksNS();
+    if (back > g_ip_target + vb / 2) g_ip_lead = std::min(g_ip_lead + 1000000, vb * 3 / 4);
+    else g_ip_lead = std::max<uint64_t>(g_ip_lead - 20000, 1500000);
+    const uint64_t refresh = back > g_ip_target + vb / 2 ? g_ip_target + vb : back;  // the one just shown
+    // the next image: the first refresh at or after the chosen rate's next moment
+    g_ip_ideal += 1000000000ull / (uint64_t)g_ip_rate;
+    if (g_ip_ideal + vb < refresh || g_ip_ideal > refresh + 2 * vb) g_ip_ideal = refresh + 1000000000ull / (uint64_t)g_ip_rate;
+    g_ip_target = refresh + vb;
+    while (g_ip_target + vb / 2 < g_ip_ideal) g_ip_target += vb;
+}
+
 // Once a second: the frame rate in the title (and FPS counter) and, with --log host, frame
 // times and audio health; once a minute in every log: the frame rate and slow moments.
 void frame_stats() {
@@ -474,7 +543,28 @@ void host_present(const GpuDisplay& d) {
     state_poll_load(g_cpu);
     if (!g_video_ok) return;
     frame_stats();
+    // above 60 fps: the frame is recorded to be shown by interp_service
+    const int rate = interp_rate();
+    const int id = hw_rec_finish(d.x, d.y, std::clamp(d.w, 1, 1024), std::clamp(d.h, 1, 512));
+    hw_rec_enable(rate > 0);
+    g_motion_on = rate > 0;
+    if (rate && id == -2 && !g_ip_frames.empty()) return;  // nothing drawn since: no new frame yet
+    if (rate && id >= 0 && d.enabled && !d.rgb24) {
+        if (g_ip_rate != rate || g_ip_frames.empty())
+            g_ip_target = g_ip_ideal = SDL_GetTicksNS() + g_ip_lead + refresh_ns() / 2;
+        g_ip_rate = rate;
+        g_ip_frames.push_back({id, g_next_frame_ns + FRAME_NS, std::clamp(d.h, 1, 512)});
+        if (g_ip_frames.size() > 3) g_ip_frames.erase(g_ip_frames.begin());
+        interp_service();
+        return;
+    }
+    g_ip_frames.clear();
+    g_ip_rate = 0;
     draw_game(d);
+}
+
+void host_interp_poll() {
+    if (g_ip_rate) interp_service();
 }
 
 void host_throttle_frame() {
@@ -489,8 +579,14 @@ void host_throttle_frame() {
         g_next_frame_ns = SDL_GetTicksNS();
         return;
     }
-    const uint64_t now = SDL_GetTicksNS();
     g_next_frame_ns += FRAME_NS;
+    // the in-between images due before the next frame (above 60 fps)
+    for (uint64_t t = SDL_GetTicksNS(); g_ip_rate && !g_ip_frames.empty() && interp_due() < g_next_frame_ns && t < g_next_frame_ns;
+         t = SDL_GetTicksNS()) {
+        if (interp_due() > t) SDL_DelayPrecise(interp_due() - t);
+        interp_service();
+    }
+    const uint64_t now = SDL_GetTicksNS();
     if (g_next_frame_ns > now) {
         SDL_DelayPrecise(g_next_frame_ns - now);
     } else if (now - g_next_frame_ns > FRAME_NS * 4) {

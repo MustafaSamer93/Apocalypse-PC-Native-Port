@@ -303,6 +303,7 @@ static void scanline_event(R3000* c) {
     bool vbl_end = g_scanline == 0;
     timers_scanline(c, vbl_start, vbl_end);
     spu_scanline();
+    host_interp_poll();
     // One picture goes to the screen per refresh; the host waits for the display there, and the
     // controller is read after that wait, for the game's next frame. Each frame is shown as soon
     // as the game has drawn it (core_frame_drawn), a refresh before the game itself flips to it.

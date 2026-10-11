@@ -39,68 +39,85 @@ void begin_draw() { vkc::begin_rendering(g_draw, g_zbuf.image ? &g_zbuf : nullpt
 struct VramPush {
     int32_t scale, pass, set_mask, filter;
     int32_t texwin[4];
+    float origin[4];  // the VRAM rectangle the target covers (vram.vert)
 };
+
+// Frame interpolation (vk_hw_replay): the image a recorded frame is drawn again into, with its own
+// depth image, multisampled like `draw` (then resolved into g_ip).
+VkImg g_ip, g_ip_ms, g_ip_z;
 struct CopyPush {
     int32_t scale, pad, off[2];
 };
 
 VkCommandBuffer cb() { return vkc::cmd(); }
 
-void set_viewport_scissor(int sx, int sy, int sw, int sh) {
-    VkViewport vp{0, 0, (float)(1024 * S), (float)(512 * S), 0, 1};
+void set_viewport_scissor(int sx, int sy, int sw, int sh, int vw = 0, int vh = 0) {
+    VkViewport vp{0, 0, (float)(vw ? vw : 1024 * S), (float)(vh ? vh : 512 * S), 0, 1};
     VkRect2D sc{{sx, sy}, {(uint32_t)std::max(sw, 0), (uint32_t)std::max(sh, 0)}};
     vkCmdSetViewport(cb(), 0, 1, &vp);
     vkCmdSetScissor(cb(), 0, 1, &sc);
 }
 
-void vk_flush() {
-    if (g_batch.empty()) return;
-    // textures come from `read`; once it is readable, batches follow each other in one rendering
-    VkImg& tex = g_read;
-    VkImg& hd = g_hd.image ? g_hd : tex;  // (set 1 must hold an image even with no replacements)
-    for (VkImg* img : {&tex, &hd})
-        if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+// The textures (`read`, the replacements' atlas) ready to be sampled; may end the rendering.
+void textures_readable() {
+    for (VkImg* img : {&g_read, &g_hd})
+        if (img->image && img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
             vkc::end_rendering();
             vkc::transition(*img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
-    begin_draw();
-    const size_t bytes = g_batch.size() * sizeof(Vtx);
+}
+
+// Draws n vertices with drawing state `key` into the target being rendered, which covers the VRAM
+// rectangle `origin` (x, y, w, h); depth: the target has a depth image (tested as the key says).
+void draw_vertices(const Vtx* v, size_t n, const BatchKey& key, bool filter, const int* origin, bool depth) {
+    VkImg& tex = g_read;
+    VkImg& hd = g_hd.image ? g_hd : tex;  // (set 1 must hold an image even with no replacements)
+    const size_t bytes = n * sizeof(Vtx);
     vkc::Staging st = vkc::stage(bytes);
-    std::memcpy(st.ptr, g_batch.data(), bytes);
+    std::memcpy(st.ptr, v, bytes);
     VkCommandBuffer c = cb();
-    if (g_zbuf.image) {
-        const bool test = g_key.ztest != 0;
-        if (test && g_zbuf_clear) {  // a new frame: far away everywhere
-            VkClearAttachment ca{VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}};
-            ca.clearValue.depthStencil = {1.0f, 0};
-            VkClearRect cr{{{0, 0}, {(uint32_t)(1024 * S), (uint32_t)(512 * S)}}, 0, 1};
-            vkCmdClearAttachments(c, 1, &ca, 1, &cr);
-            g_zbuf_clear = false;
-        }
-        vkCmdSetDepthTestEnable(c, test);
-        vkCmdSetDepthWriteEnable(c, g_key.ztest == 1);
+    if (depth) {
+        vkCmdSetDepthTestEnable(c, key.ztest != 0);
+        vkCmdSetDepthWriteEnable(c, key.ztest == 1);
     }
     vkCmdBindVertexBuffers(c, 0, 1, &st.buffer, &st.offset);
     const VkDescriptorSet sets[2] = {vkc::sampler_set(tex, false), vkc::sampler_set(hd, true)};
-    set_viewport_scissor(g_key.sc[0] * S, g_key.sc[1] * S, (g_key.sc[2] - g_key.sc[0] + 1) * S,
-                         (g_key.sc[3] - g_key.sc[1] + 1) * S);
-    VramPush pc{S, 0, g_key.set_mask ? 1 : 0, g_filter ? 1 : 0, {g_key.tw[0], g_key.tw[1], g_key.tw[2], g_key.tw[3]}};
+    set_viewport_scissor((key.sc[0] - origin[0]) * S, (key.sc[1] - origin[1]) * S, (key.sc[2] - key.sc[0] + 1) * S,
+                         (key.sc[3] - key.sc[1] + 1) * S, origin[2] * S, origin[3] * S);
+    VramPush pc{S, 0, key.set_mask ? 1 : 0, filter ? 1 : 0, {key.tw[0], key.tw[1], key.tw[2], key.tw[3]},
+                {(float)origin[0], (float)origin[1], (float)origin[2], (float)origin[3]}};
     auto draw = [&](VkPipeline pipe, int pass) {
         vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
         vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 2, sets, 0, nullptr);
         pc.pass = pass;
         vkCmdPushConstants(c, g_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
-        vkCmdDraw(c, (uint32_t)g_batch.size(), 1, 0, 0);
+        vkCmdDraw(c, (uint32_t)n, 1, 0, 0);
     };
-    if (!g_key.semi) {
+    if (!key.semi) {
         draw(g_pipes[0], 0);
     } else {
-        float k = g_key.semi_mode == 0 ? 0.5f : 0.25f;
+        float k = key.semi_mode == 0 ? 0.5f : 0.25f;
         const float consts[4] = {0, 0, 0, k};
         vkCmdSetBlendConstants(c, consts);
         draw(g_pipes[0], 1);
-        draw(g_pipes[1 + (g_key.semi_mode & 3)], 2);
+        draw(g_pipes[1 + (key.semi_mode & 3)], 2);
     }
+}
+
+void vk_flush() {
+    if (g_batch.empty()) return;
+    // textures come from `read`; once it is readable, batches follow each other in one rendering
+    textures_readable();
+    begin_draw();
+    if (g_zbuf.image && g_key.ztest && g_zbuf_clear) {  // a new frame: far away everywhere
+        VkClearAttachment ca{VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}};
+        ca.clearValue.depthStencil = {1.0f, 0};
+        VkClearRect cr{{{0, 0}, {(uint32_t)(1024 * S), (uint32_t)(512 * S)}}, 0, 1};
+        vkCmdClearAttachments(cb(), 1, &ca, 1, &cr);
+        g_zbuf_clear = false;
+    }
+    static const int kAll[4] = {0, 0, 1024, 512};
+    draw_vertices(g_batch.data(), g_batch.size(), g_key, g_filter, kAll, g_zbuf.image != VK_NULL_HANDLE);
     g_batch.clear();
 }
 
@@ -279,6 +296,7 @@ void vk_hw_shutdown() {
     vkc::destroy_image(g_draw);
     vkc::destroy_image(g_read);
     vkc::destroy_image(g_zbuf);
+    for (VkImg* img : {&g_ip, &g_ip_ms, &g_ip_z}) vkc::destroy_image(*img);
     if (g_hd.image) vkc::destroy_image(g_hd), texreplace_atlas_lost();
     destroy_pipelines();
     g_batch.clear();
@@ -439,6 +457,82 @@ unsigned vk_hw_display_texture(int x, int y, int w, int h, int* px, int* py, int
     *pw = w * S;
     *ph = h * S;
     return g_read.id;
+}
+
+// ================================================================ frame interpolation
+
+// The replay images for a w x h (native) frame.
+static bool replay_target(int w, int h) {
+    const int pw = w * S, ph = h * S;
+    if (g_ip.image && g_ip.w == pw && g_ip.h == ph) return true;  // (vk_hw_init frees them)
+    for (VkImg* img : {&g_ip, &g_ip_ms, &g_ip_z}) vkc::destroy_image(*img);
+    const VkSampleCountFlagBits sc = (VkSampleCountFlagBits)g_samples;
+    bool ok = vkc::create_image(g_ip, pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (ok && g_samples > 1)
+        ok = vkc::create_image(g_ip_ms, pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
+                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, sc);
+    if (ok && g_zbuf.image)
+        ok = vkc::create_image(g_ip_z, pw, ph, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, sc);
+    if (!ok) {
+        log_msg(LogCat::Gpu, "frame interpolation: no %dx%d image", pw, ph);
+        for (VkImg* img : {&g_ip, &g_ip_ms, &g_ip_z}) vkc::destroy_image(*img);
+        return false;
+    }
+    vkc::register_texture(&g_ip);
+    return true;
+}
+
+unsigned vk_hw_replay(int id, float t, int* tw, int* th) {
+    const RecFrame* f = rec_frame(id);
+    if (!S || !f || !replay_target(f->w, f->h)) return 0;
+    flush();  // (the game's own pending primitives, into VRAM)
+    textures_readable();
+    VkImg& target = g_samples > 1 ? g_ip_ms : g_ip;
+    vkc::end_rendering();
+    vkc::begin_rendering(target, g_ip_z.image ? &g_ip_z : nullptr);
+    VkCommandBuffer c = cb();
+    auto clear = [&](VkImageAspectFlags aspect, int x, int y, int w, int h, uint32_t rgba) {
+        VkClearAttachment ca{aspect, 0, {}};
+        if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
+            ca.clearValue.depthStencil = {1.0f, 0};
+        } else {
+            for (int i = 0; i < 3; i++) ca.clearValue.color.float32[i] = ((rgba >> (8 * i)) & 0xFF) / 255.0f;
+            ca.clearValue.color.float32[3] = 0.0f;
+        }
+        VkClearRect cr{{{x, y}, {(uint32_t)w, (uint32_t)h}}, 0, 1};
+        vkCmdClearAttachments(c, 1, &ca, 1, &cr);
+    };
+    clear(VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, target.w, target.h, 0);
+    if (g_ip_z.image) clear(VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, target.w, target.h, 0);
+    const int origin[4] = {f->x, f->y, f->w, f->h};
+    static std::vector<Vtx> moved;
+    for (const RecOp& op : f->ops) {
+        if (op.kind == RecOp::Depth) {
+            if (g_ip_z.image) clear(VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, target.w, target.h, 0);
+        } else if (op.kind == RecOp::Fill) {
+            const int x0 = std::max(op.x, f->x), y0 = std::max(op.y, f->y);
+            const int x1 = std::min(op.x + op.w, f->x + f->w), y1 = std::min(op.y + op.h, f->y + f->h);
+            if (x0 < x1 && y0 < y1)
+                clear(VK_IMAGE_ASPECT_COLOR_BIT, (x0 - f->x) * S, (y0 - f->y) * S, (x1 - x0) * S, (y1 - y0) * S,
+                      rgba_of(op.color & 0x7FFF));
+        } else {
+            moved.resize(op.count);
+            for (uint32_t i = 0; i < op.count; i++) moved[i] = rec_vertex(f->v[op.first + i], f->m[op.first + i], t);
+            draw_vertices(moved.data(), moved.size(), op.key, op.filter, origin, g_ip_z.image != VK_NULL_HANDLE);
+        }
+    }
+    vkc::end_rendering();
+    if (g_samples > 1) {
+        vkc::transition(g_ip_ms, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vkc::transition(g_ip, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageSubresourceLayers sub{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        VkImageResolve r{sub, {0, 0, 0}, sub, {0, 0, 0}, {(uint32_t)g_ip.w, (uint32_t)g_ip.h, 1}};
+        vkCmdResolveImage(cb(), g_ip_ms.image, g_ip_ms.layout, g_ip.image, g_ip.layout, 1, &r);
+    }
+    vkc::transition(g_ip, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    *tw = g_ip.w, *th = g_ip.h;
+    return g_ip.id;
 }
 
 // Frees everything the renderer created (before the Vulkan device goes; present_vk.cpp).

@@ -206,6 +206,7 @@ int32_t nclip(const Vert& a, const Vert& b, const Vert& d, uint32_t wa, uint32_t
 // 800817FC(a0 = polygon records, a2 = count): nonzero = drawn here.
 extern "C" int psx_hook_mesh(R3000* c) {
     if (!hw_active()) return 0;
+    motion_camera(c);  // (frame interpolation: the frame's camera)
     uint32_t rec = c->r[4], count = c->r[6];
     if (!count) return 1;
     Ctx k;

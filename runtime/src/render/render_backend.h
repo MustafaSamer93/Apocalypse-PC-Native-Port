@@ -25,6 +25,7 @@
     X(unsigned, hw_display_texture, (int x, int y, int w, int h, int* px, int* py, int* pw, int* ph),          \
       (x, y, w, h, px, py, pw, ph))                                                                            \
     X(void, hw_depth_reset, (), ())                                                                            \
+    X(unsigned, hw_replay, (int id, float t, int* tw, int* th), (id, t, tw, th))                               \
     X(bool, hw_zbuffer_ready, (), ())                                                                          \
     X(bool, hw_hd_upload, (int level, int x, int y, int w, int h, const uint32_t* rgba), (level, x, y, w, h, rgba))              \
     X(bool, present_init, (SDL_Window * window), (window))                                                     \

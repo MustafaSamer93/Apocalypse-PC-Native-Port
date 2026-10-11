@@ -1175,6 +1175,7 @@ bool sim60_in_render();
 int sim60_render(R3000* c);
 extern "C" int psx_hook_render(R3000* c) {
     if (core_in_ghost()) return 0;
+    if (!sim60_in_render()) motion_frame_begin();  // (frame interpolation)
     g_level_render_frame = host_frame_count();  // (savestate.cpp: a level is running)
     drawdist_apply(c);
     return psx_opt_sim60 && !sim60_in_render() ? sim60_render(c) : 0;

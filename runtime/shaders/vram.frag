@@ -8,6 +8,7 @@ layout(push_constant) uniform PC {
     int set_mask;
     int filter_;
     ivec4 texwin;  // mask x, mask y, offset x, offset y (8-pixel units)
+    vec4 origin;   // (vram.vert)
 } pc;
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
