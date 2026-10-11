@@ -887,6 +887,16 @@ struct QueuedVoice {
     uint64_t frame;  // when it was queued, or reached the front of the queue
 };
 std::vector<QueuedVoice> g_queued;
+// Queues a line at the back (dropped when the queue is full) or the front (the last one goes).
+void queue_line(QueuedVoice line, bool front) {
+    line.frame = host_frame_count();
+    g_queued.insert(front ? g_queued.begin() : g_queued.end(), line);
+    if (g_queued.size() > kQueueMax) g_queued.pop_back();
+}
+void dequeue_line() {  // the next one's wait starts now
+    g_queued.erase(g_queued.begin());
+    if (!g_queued.empty()) g_queued[0].frame = host_frame_count();
+}
 bool g_voice_ours = false;  // the call comes from us (a queued line, or Extra Life / Smart Bomb)
 // The last pickup line the game started: a level line that cuts it within kRecutFrames sends it
 // back to the front of the queue (the level's lines start the clip themselves, 8002FD2C).
@@ -919,26 +929,25 @@ extern "C" int psx_hook_voice(R3000* c) {
     bool pickup = g_voice_ours;
     for (uint32_t a : kPickupCalls) pickup |= c->r[31] == a;
     if (!pickup) return 0;
-    LOG(Host, "voice %u/%u pickup talking=%d cd_busy=%d f=%llu", c->r[4], c->r[5], (int)voice_talking(c), (int)cd_busy(c),
-        (unsigned long long)host_frame_count());
+    const bool talking = voice_talking(c), busy = cd_busy(c);
+    LOG(Host, "voice b%02u_c%02u: pickup line%s%s", c->r[4], c->r[5], talking ? ", voice in use" : "",
+        busy ? ", CD busy" : "");
     const QueuedVoice line{{c->r[4], c->r[5], c->r[6], c->r[7]}, host_frame_count() + 1};
-    if (!voice_talking(c) && !cd_busy(c)) {  // the game plays it
+    if (!talking && !busy) {  // the game plays it
         g_last_line = line;
         return 0;
     }
-    if (!cd_busy(c) || !play_beside(c, line.args[0], line.args[1]))
-        if (g_queued.size() < kQueueMax) g_queued.push_back({{line.args[0], line.args[1], line.args[2], line.args[3]}, host_frame_count()});
+    if (!busy || !play_beside(c, line.args[0], line.args[1])) queue_line(line, false);
     return 1;
 }
 
 // 8002FD2C (block, channel) starts a clip: from 8002FC64 (pickups, ...) or the level's own lines.
 extern "C" void psx_hook_voice_clip(R3000* c) {
-    if (c->r[31] == 0x8002FCF8 || !g_last_line.frame || host_frame_count() > g_last_line.frame + kRecutFrames) return;
+    if (c->r[31] == 0x8002FCF8 || !g_last_line.frame) return;
+    if (host_frame_count() > g_last_line.frame + kRecutFrames) return;
     if (cd_busy(c) || MEM_R32(c, kVoiceReady) == 0 || MEM_R32(c, kVoiceBusy) != 0) return;  // it will not play
     LOG(Host, "voice b%02u_c%02u cuts the pickup line: it plays again after", c->r[4], c->r[5]);
-    g_queued.insert(g_queued.begin(), {{g_last_line.args[0], g_last_line.args[1], g_last_line.args[2], g_last_line.args[3]},
-                                       host_frame_count()});
-    if (g_queued.size() > kQueueMax) g_queued.pop_back();
+    queue_line(g_last_line, true);
     g_last_line.frame = 0;
 }
 
@@ -946,21 +955,17 @@ extern "C" void psx_hook_voice_clip(R3000* c) {
 void game_voice_poll(R3000* c) {
     autoload_end(c);  // (the game copied the auto-save's record in the frame it was chosen)
     if (g_queued.empty()) return;
-    const uint64_t now = host_frame_count();
     if (!MEM_R32(c, kPlayer)) return g_queued.clear();
-    if (now - g_queued[0].frame > kQueueFrames) {
-        g_queued.erase(g_queued.begin());
-        if (!g_queued.empty()) g_queued[0].frame = now;
-        return;
-    }
+    if (host_frame_count() - g_queued[0].frame > kQueueFrames) return dequeue_line();
     if (voice_talking(c)) return;
     const QueuedVoice q = g_queued[0];
-    if (cd_busy(c) && !play_beside(c, q.args[0], q.args[1])) return;
-    g_queued.erase(g_queued.begin());
-    if (!g_queued.empty()) g_queued[0].frame = now;
-    if (cd_busy(c)) return;  // (playing beside the drive)
+    const bool busy = cd_busy(c);
+    if (busy && !play_beside(c, q.args[0], q.args[1])) return;
+    dequeue_line();
+    if (busy) return;  // (playing beside the drive)
     g_voice_ours = true;
-    game_call(c, kPlayVoice, q.args[0], q.args[1], MEM_R32(c, kPlayer) + 4, q.args[3]);  // (every pickup line is at the player)
+    // (every pickup line is at the player)
+    game_call(c, kPlayVoice, q.args[0], q.args[1], MEM_R32(c, kPlayer) + 4, q.args[3]);
     g_voice_ours = false;
 }
 

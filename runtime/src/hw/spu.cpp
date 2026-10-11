@@ -481,7 +481,8 @@ uint32_t spu_dma_read() {
 }
 
 namespace {
-void resample_into(std::deque<int16_t>& fifo, double& phase, int16_t prev[2], const int16_t* stereo, int frames, int rate) {
+void resample_into(std::deque<int16_t>& fifo, double& phase, int16_t prev[2], const int16_t* stereo, int frames,
+                   int rate) {
     catch_up();
     // linear resample to 44.1 kHz
     double step = (double)rate / 44100.0;

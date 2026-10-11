@@ -394,10 +394,13 @@ struct SharedCorner {
     bool ok;
 };
 std::unordered_map<uint64_t, SharedCorner> g_shared_corners;  // cleared by gpu_list_done
+// a corner this frame: its vertex word and the draw offset it is drawn at
+uint64_t corner_key(uint32_t xy) {
+    return (uint64_t)xy << 32 | (uint32_t)(uint16_t)S.off_x << 16 | (uint16_t)S.off_y;
+}
 void shared_corners(const uint32_t* xyw, int nv, GtePrecise* pr, bool* ok) {
     for (int i = 0; i < nv; i++) {
-        const uint64_t key = (uint64_t)xyw[i] << 32 | (uint32_t)(uint16_t)S.off_x << 16 | (uint16_t)S.off_y;
-        auto [it, fresh] = g_shared_corners.emplace(key, SharedCorner{pr[i], ok[i]});
+        auto [it, fresh] = g_shared_corners.emplace(corner_key(xyw[i]), SharedCorner{pr[i], ok[i]});
         if (!fresh) pr[i] = it->second.p, ok[i] = it->second.ok;
     }
 }
@@ -413,13 +416,13 @@ void shared_corners(const uint32_t* xyw, int nv, GtePrecise* pr, bool* ok) {
 std::unordered_map<uint64_t, float> g_fx_corners;  // vertex word + draw offset -> its x; cleared by gpu_list_done
 void fx_squeeze(HwVtx* h, const uint32_t* xyw, const bool* exact, int nv) {
     const float k = g_gte_widescreen;
-    uint64_t key[4];
-    for (int i = 0; i < nv; i++) key[i] = (uint64_t)xyw[i] << 32 | (uint32_t)(uint16_t)S.off_x << 16 | (uint16_t)S.off_y;
     float fix = 0;
     bool have = false;
-    for (int i = 0; i < nv && !have; i++)
-        if (!exact[i])
-            if (auto it = g_fx_corners.find(key[i]); it != g_fx_corners.end()) fix = (it->second - k * h[i].x) / (1 - k), have = true;
+    for (int i = 0; i < nv && !have; i++) {
+        if (exact[i]) continue;
+        const auto it = g_fx_corners.find(corner_key(xyw[i]));
+        if (it != g_fx_corners.end()) fix = (it->second - k * h[i].x) / (1 - k), have = true;
+    }
     if (!have) {
         float sx = 0, ax = 0;
         int n = 0;
@@ -435,7 +438,7 @@ void fx_squeeze(HwVtx* h, const uint32_t* xyw, const bool* exact, int nv) {
         }
     }
     for (int i = 0; i < nv; i++)
-        if (!exact[i]) h[i].x = g_fx_corners.emplace(key[i], fix + (h[i].x - fix) * k).first->second;
+        if (!exact[i]) h[i].x = g_fx_corners.emplace(corner_key(xyw[i]), fix + (h[i].x - fix) * k).first->second;
 }
 
 // Scanline-accurate rasterization would need the exact hardware edge walker; the
