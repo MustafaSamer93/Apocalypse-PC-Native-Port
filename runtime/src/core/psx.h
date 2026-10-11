@@ -146,7 +146,11 @@ void cdrom_write(R3000* c, uint32_t reg, uint8_t v);
 void cdrom_event(R3000* c);
 void cdrom_read_event(R3000* c);
 uint32_t cdrom_dma_read_word();
-void cdrom_voice_poll();  // once a frame: the rest of a voice line a data read cut
+void cdrom_voice_poll();  // once a frame: the rest of a voice line a data read cut, a line beside
+// Plays the voice clip at `lba` (its channel's sectors up to `end`) from the disc image, beside the
+// drive; false while one is still playing (also the rest of a cut line).
+bool cdrom_side_voice(uint32_t lba, uint32_t end, int chan);
+bool cdrom_side_busy();
 // Direct file access for the BIOS HLE (FlushCache-free loaders, open("cdrom:...")).
 bool cdrom_find_file(const char* path, uint32_t* lba, uint32_t* size);
 bool cdrom_read_sector_user(uint32_t lba, uint8_t out[2048]);
@@ -162,6 +166,8 @@ void spu_scanline();           // produces samples due so far (keeps sound event
 void spu_end_frame(R3000* c);  // hands this frame's samples to the host
 void spu_push_cd_audio(const int16_t* stereo, int frames, int sample_rate);
 size_t spu_cd_queued();  // CD audio frames not played yet
+void spu_push_side_audio(const int16_t* stereo, int frames, int sample_rate);  // mixed over the CD input
+size_t spu_side_queued();
 
 // ---------------------------------------------------------------- MDEC (mdec.cpp)
 

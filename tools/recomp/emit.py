@@ -79,6 +79,7 @@ ENTRY_HOOKS = {
     0x800119C4: "if (psx_hook_menu_camera(c)) return;",  # once per front end loop (menus at 60 Hz)
     # pickup voice lines: more of them, and one for Extra Life (game_menu.cpp)
     0x8002FC64: "if (psx_hook_voice(c)) return;",
+    0x8002FD2C: "psx_hook_voice_clip(c);",  # a clip starts (a level line can cut a pickup line)
     0x8005E260: "psx_hook_weapon_pickup(c);",  # cheats.cpp
     0x8001B788: "psx_hook_message(c);",
 }

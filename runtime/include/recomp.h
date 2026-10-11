@@ -259,6 +259,7 @@ int psx_hook_menu_camera(R3000* c);
 int psx_hook_menu_draw(R3000* c);  // nonzero: drawn by the hook
 int psx_hook_menu_keys(R3000* c);  // nonzero: read by the hook
 int psx_hook_voice(R3000* c);     // 8002FC64 play a voice clip (a0 block, a1 channel); nonzero: silent
+void psx_hook_voice_clip(R3000* c);  // 8002FD2C start a clip (a0 block, a1 channel)
 void psx_hook_weapon_pickup(R3000* c);  // 8005E260 give a weapon (a0 player, a1 type)
 void psx_hook_message(R3000* c);  // 8001B788 show a message (a0 text)
 

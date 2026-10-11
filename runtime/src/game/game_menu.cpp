@@ -868,49 +868,99 @@ constexpr int kStrSmartBomb = 147, kStrExtraLife = 148;
 }  // namespace
 
 // A pickup line asked for while another line is playing is dropped by the game (one voice at a
-// time, 8002FC64 checks gp+1024 "ready" and gp+1012). Pickup lines are kept instead and started
-// as soon as the voice is free, if that is within kQueueFrames.
+// time, 8002FC64 checks gp+1024 "ready" and gp+1012). Pickup lines are kept instead, in order,
+// and each started as soon as the voice is free, if it has not waited at the front of the queue
+// for more than kQueueFrames (a pickup line plays about 3 s, so several pickups in a row each get
+// theirs).
+// The game also refuses a voice while the drive is busy: a data read (section loads), reads it
+// has queued, or a level's own XA stream (pest, the whole level). A pickup line is then played
+// beside the drive, straight from the disc image (cdrom_side_voice).
 constexpr uint32_t kGp = 0x800FEEBC, kVoiceReady = kGp + 1024, kVoiceBusy = kGp + 1012;
-constexpr uint64_t kQueueFrames = 180;  // 3 s
+constexpr uint32_t kCdReading = 0x800FF700, kCdQueue = 0x800EAD38, kCdQueueAt = 0x800FF79C, kXaStream = 0x800FF250;
+constexpr uint64_t kQueueFrames = 360;  // 6 s (a level line can play 4 s and more)
+constexpr size_t kQueueMax = 3;
 // return addresses of the pickups' calls: health (8005CE70), weapons (8005E260), and 0 for ours
 constexpr uint32_t kPickupCalls[] = {0x8005CECC, 0x8005E2B4, 0x8005E350, 0x8005E3EC, 0x8005E498,
                                      0x8005E534, 0x8005E5D0, 0x8005E66C};
 struct QueuedVoice {
-    uint32_t args[4];
-    uint64_t frame;
-    bool pending = false;
-} g_queued;
+    uint32_t args[4];  // block, channel, (where), priority
+    uint64_t frame;  // when it was queued, or reached the front of the queue
+};
+std::vector<QueuedVoice> g_queued;
 bool g_voice_ours = false;  // the call comes from us (a queued line, or Extra Life / Smart Bomb)
+// The last pickup line the game started: a level line that cuts it within kRecutFrames sends it
+// back to the front of the queue (the level's lines start the clip themselves, 8002FD2C).
+QueuedVoice g_last_line{};
+constexpr uint64_t kRecutFrames = 60;
 
-bool voice_free(R3000* c) { return MEM_R32(c, kVoiceReady) != 0 && MEM_R32(c, kVoiceBusy) == 0; }
+// The game's voice is in use: a line playing, the rest of a cut one or ours beside the drive, or
+// a pickup line started in the last kStartFrames (the game marks the voice busy only once the
+// clip's CD seek is under way, and a second line started before that cuts the first one off).
+constexpr uint64_t kStartFrames = 30;
+bool voice_talking(R3000* c) {
+    return host_frame_count() + 1 < g_last_line.frame + kStartFrames || MEM_R32(c, kVoiceReady) == 0 ||
+           MEM_R32(c, kVoiceBusy) != 0 || cdrom_side_busy();
+}
+bool cd_busy(R3000* c) {
+    return MEM_R32(c, kCdReading) != 0 || MEM_R8(c, kCdQueue + 16 * MEM_R32(c, kCdQueueAt) + 13) != 0 ||
+           MEM_R32(c, kXaStream) != 0;
+}
+
+// A pickup line beside the drive; false = it must wait.
+bool play_beside(R3000* c, uint32_t block, uint32_t chan) {
+    uint32_t lba, end;
+    if (voice_talking(c) || !voice_clip_lba((int)block, (int)chan, &lba, &end)) return false;
+    LOG(Host, "voice b%02u_c%02u beside the drive", block, chan);
+    return cdrom_side_voice(lba, end, (int)chan);
+}
 
 extern "C" int psx_hook_voice(R3000* c) {
     if (cheat_quiet()) return 1;  // a weapon the cheat gives says nothing
     bool pickup = g_voice_ours;
     for (uint32_t a : kPickupCalls) pickup |= c->r[31] == a;
-    LOG(Host, "voice %u/%u ra=%08X pickup=%d ready=%u busy=%u ff700=%u ff250=%u tbl=%u f=%llu", c->r[4], c->r[5],
-        c->r[31], pickup, MEM_R32(c, kVoiceReady), MEM_R32(c, kVoiceBusy), MEM_R32(c, 0x800FF700),
-        MEM_R32(c, 0x800FF250), MEM_R8(c, 0x800EAD38 + 16 * MEM_R32(c, 0x800FF79C) + 13),
+    if (!pickup) return 0;
+    LOG(Host, "voice %u/%u pickup talking=%d cd_busy=%d f=%llu", c->r[4], c->r[5], (int)voice_talking(c), (int)cd_busy(c),
         (unsigned long long)host_frame_count());
-    if (pickup && !voice_free(c)) {
-        g_queued = {{c->r[4], c->r[5], c->r[6], c->r[7]}, host_frame_count(), true};
-        return 1;
+    const QueuedVoice line{{c->r[4], c->r[5], c->r[6], c->r[7]}, host_frame_count() + 1};
+    if (!voice_talking(c) && !cd_busy(c)) {  // the game plays it
+        g_last_line = line;
+        return 0;
     }
-    return 0;
+    if (!cd_busy(c) || !play_beside(c, line.args[0], line.args[1]))
+        if (g_queued.size() < kQueueMax) g_queued.push_back({{line.args[0], line.args[1], line.args[2], line.args[3]}, host_frame_count()});
+    return 1;
+}
+
+// 8002FD2C (block, channel) starts a clip: from 8002FC64 (pickups, ...) or the level's own lines.
+extern "C" void psx_hook_voice_clip(R3000* c) {
+    if (c->r[31] == 0x8002FCF8 || !g_last_line.frame || host_frame_count() > g_last_line.frame + kRecutFrames) return;
+    if (cd_busy(c) || MEM_R32(c, kVoiceReady) == 0 || MEM_R32(c, kVoiceBusy) != 0) return;  // it will not play
+    LOG(Host, "voice b%02u_c%02u cuts the pickup line: it plays again after", c->r[4], c->r[5]);
+    g_queued.insert(g_queued.begin(), {{g_last_line.args[0], g_last_line.args[1], g_last_line.args[2], g_last_line.args[3]},
+                                       host_frame_count()});
+    if (g_queued.size() > kQueueMax) g_queued.pop_back();
+    g_last_line.frame = 0;
 }
 
 // Once per frame (savestate.cpp): a queued pickup line starts when the voice is free.
 void game_voice_poll(R3000* c) {
     autoload_end(c);  // (the game copied the auto-save's record in the frame it was chosen)
-    if (!g_queued.pending) return;
-    if (host_frame_count() - g_queued.frame > kQueueFrames || !MEM_R32(c, kPlayer)) {
-        g_queued.pending = false;
+    if (g_queued.empty()) return;
+    const uint64_t now = host_frame_count();
+    if (!MEM_R32(c, kPlayer)) return g_queued.clear();
+    if (now - g_queued[0].frame > kQueueFrames) {
+        g_queued.erase(g_queued.begin());
+        if (!g_queued.empty()) g_queued[0].frame = now;
         return;
     }
-    if (!voice_free(c)) return;
-    g_queued.pending = false;
+    if (voice_talking(c)) return;
+    const QueuedVoice q = g_queued[0];
+    if (cd_busy(c) && !play_beside(c, q.args[0], q.args[1])) return;
+    g_queued.erase(g_queued.begin());
+    if (!g_queued.empty()) g_queued[0].frame = now;
+    if (cd_busy(c)) return;  // (playing beside the drive)
     g_voice_ours = true;
-    game_call(c, kPlayVoice, g_queued.args[0], g_queued.args[1], g_queued.args[2], g_queued.args[3]);
+    game_call(c, kPlayVoice, q.args[0], q.args[1], MEM_R32(c, kPlayer) + 4, q.args[3]);  // (every pickup line is at the player)
     g_voice_ours = false;
 }
 
@@ -937,8 +987,8 @@ float subtitle_tilt(uint32_t text) {
 void game_menu_reset(bool state_loaded) {
     g_message = g_subtitle[0] = g_subtitle[1] = 0;  // (the heap they were in is gone)
     g_sub.n = 0;
-    g_queued.pending = false;
     if (state_loaded) {
+        g_queued.clear();  // (a section load also comes here: queued lines stay)
         g_opt = g_pause = Host{};
         g_pause_block = g_main = g_main_text = g_load = g_proxy = 0;
     }

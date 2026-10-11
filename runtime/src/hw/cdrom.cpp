@@ -203,6 +203,14 @@ uint32_t g_carry_next = 0, g_carry_end = 0;           // the rest being streamed
 // ended every one-liner. Past the clip's end nothing more is played until the next Setloc.
 uint32_t g_voice_stop = 0;
 int32_t g_carry_old[2] = {}, g_carry_older[2] = {};
+// Pickup lines while the drive is busy (a data read, the game's queued reads, a level's own XA
+// stream as in pest): the game refuses a voice then. The clip is played here straight from the
+// disc image instead, beside the drive, mixed over the CD input (spu_push_side_audio).
+struct {
+    uint32_t next = 0, end = 0;  // next sector of the clip (0 = none), the sector after its last
+    int chan = 0;
+    int32_t old[2] = {}, older[2] = {};
+} g_side;
 
 // Data reads without XA audio run kFastData times faster than the drive: level section loads
 // froze the picture for 1-2 s. XA (voices, movie sound) keeps the real rate.
@@ -300,7 +308,7 @@ bool xa_decode_sector(const uint8_t* raw, std::vector<int16_t>& pcm, int* rate) 
     return true;
 }
 
-void xa_play_sector(const uint8_t* raw) {
+void xa_play_sector(const uint8_t* raw, bool side = false) {
     std::vector<int16_t> pcm;
     int rate;
     if (!xa_decode_sector(raw, pcm, &rate) || g_muted) return;
@@ -310,7 +318,19 @@ void xa_play_sector(const uint8_t* raw) {
         pcm[i] = (int16_t)std::clamp((l * g_vol[0] + r * g_vol[3]) >> 7, -32768, 32767);
         pcm[i + 1] = (int16_t)std::clamp((r * g_vol[2] + l * g_vol[1]) >> 7, -32768, 32767);
     }
-    spu_push_cd_audio(pcm.data(), (int)(pcm.size() / 2), rate);
+    if (side) spu_push_side_audio(pcm.data(), (int)(pcm.size() / 2), rate);
+    else spu_push_cd_audio(pcm.data(), (int)(pcm.size() / 2), rate);
+}
+
+// A sector of a clip streamed apart from the drive, with that stream's own ADPCM history.
+void play_stream_sector(const uint8_t* raw, int32_t old[2], int32_t older[2], bool side) {
+    int32_t keep[4] = {g_xa_old[0], g_xa_old[1], g_xa_older[0], g_xa_older[1]};
+    std::memcpy(g_xa_old, old, sizeof g_xa_old);
+    std::memcpy(g_xa_older, older, sizeof g_xa_older);
+    xa_play_sector(raw, side);
+    std::memcpy(old, g_xa_old, sizeof g_xa_old);
+    std::memcpy(older, g_xa_older, sizeof g_xa_older);
+    g_xa_old[0] = keep[0], g_xa_old[1] = keep[1], g_xa_older[0] = keep[2], g_xa_older[1] = keep[3];
 }
 
 void cdda_play_sector(const uint8_t* raw) {
@@ -685,21 +705,32 @@ void cdrom_voice_poll() {
         const bool ok = read_raw(g_carry_next, raw);
         g_carry_next += 16;
         if (!ok || !(raw[18] & 4) || raw[17] != g_voice_chan) continue;
-        int32_t keep[4] = {g_xa_old[0], g_xa_old[1], g_xa_older[0], g_xa_older[1]};
-        std::memcpy(g_xa_old, g_carry_old, sizeof g_xa_old);
-        std::memcpy(g_xa_older, g_carry_older, sizeof g_xa_older);
-        xa_play_sector(raw);
-        std::memcpy(g_carry_old, g_xa_old, sizeof g_carry_old);
-        std::memcpy(g_carry_older, g_xa_older, sizeof g_carry_older);
-        g_xa_old[0] = keep[0], g_xa_old[1] = keep[1], g_xa_older[0] = keep[2], g_xa_older[1] = keep[3];
+        play_stream_sector(raw, g_carry_old, g_carry_older, false);
     }
     if (g_carry_next >= g_carry_end) g_carry_next = 0;
+    for (int guard = 0; g_side.next && g_side.next < g_side.end && spu_side_queued() < 8820 && guard < 8; guard++) {
+        const bool ok = read_raw(g_side.next, raw);
+        g_side.next += 16;
+        if (ok && (raw[18] & 4) && raw[17] == g_side.chan) play_stream_sector(raw, g_side.old, g_side.older, true);
+    }
+    if (g_side.next >= g_side.end) g_side.next = 0;
 }
+
+bool cdrom_side_voice(uint32_t lba, uint32_t end, int chan) {
+    if (cdrom_side_busy()) return false;
+    g_side = {};
+    g_side.next = lba, g_side.end = end, g_side.chan = chan;
+    subtitle_note_xa(lba, chan);  // its subtitle, as when the drive plays it
+    cdrom_voice_poll();
+    return true;
+}
+
+bool cdrom_side_busy() { return g_side.next || g_carry_next || spu_side_queued() > 0; }
 
 // ================================================================ save states
 
 void cdrom_state(StateIO& s) {
-    if (s.loading()) g_voice_next = g_carry_next = g_voice_stop = 0;  // (not saved: a voice line going on)
+    if (s.loading()) g_voice_next = g_carry_next = g_voice_stop = g_side.next = 0;  // (not saved: a voice line going on)
     s.marker(0x43444452);  // "CDDR"
     s(g_index); s(g_int_enable); s(g_int_flag);
     s.vec(g_params);

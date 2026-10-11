@@ -97,6 +97,10 @@ bool g_rev_odd = false;
 std::deque<int16_t> g_cd_fifo;
 double g_cd_phase = 0;
 int16_t g_cd_prev[2] = {};
+// A voice line played beside the drive (cdrom.cpp g_side), mixed over the CD input
+std::deque<int16_t> g_side_fifo;
+double g_side_phase = 0;
+int16_t g_side_prev[2] = {};
 
 // sample production in emulated time
 uint64_t g_last_cycles = 0;
@@ -342,6 +346,12 @@ void mix_sample(int16_t& out_l, int16_t& out_r) {
         if (movie_audio(&ml, &mr)) cdl = ml, cdr = mr;
         else cdl = cdr = 0;
     }
+    if (g_side_fifo.size() >= 2) {
+        cdl = std::clamp(cdl + g_side_fifo[0], -32768, 32767);
+        cdr = std::clamp(cdr + g_side_fifo[1], -32768, 32767);
+        g_side_fifo.pop_front();
+        g_side_fifo.pop_front();
+    }
     if (cnt & 1) {
         int32_t cl = mul15(cdl, (int16_t)reg(0x1B0)), cr = mul15(cdr, (int16_t)reg(0x1B2));
         l += cl;
@@ -387,6 +397,7 @@ void spu_init() {
     std::memset(g_regs, 0, sizeof g_regs);
     for (auto& v : g_voice) v = Voice{};
     g_cd_fifo.clear();
+    g_side_fifo.clear();
     g_out.clear();
     g_rev_addr = 0;
 }
@@ -469,27 +480,37 @@ uint32_t spu_dma_read() {
     return w;
 }
 
-void spu_push_cd_audio(const int16_t* stereo, int frames, int rate) {
+namespace {
+void resample_into(std::deque<int16_t>& fifo, double& phase, int16_t prev[2], const int16_t* stereo, int frames, int rate) {
     catch_up();
     // linear resample to 44.1 kHz
     double step = (double)rate / 44100.0;
     for (int i = 0; i < frames; i++) {
         int16_t cur[2] = {stereo[i * 2], stereo[i * 2 + 1]};
-        while (g_cd_phase < 1.0) {
+        while (phase < 1.0) {
             for (int ch = 0; ch < 2; ch++)
-                g_cd_fifo.push_back((int16_t)(g_cd_prev[ch] + (cur[ch] - g_cd_prev[ch]) * g_cd_phase));
-            g_cd_phase += step;
+                fifo.push_back((int16_t)(prev[ch] + (cur[ch] - prev[ch]) * phase));
+            phase += step;
         }
-        g_cd_phase -= 1.0;
-        g_cd_prev[0] = cur[0];
-        g_cd_prev[1] = cur[1];
+        phase -= 1.0;
+        prev[0] = cur[0];
+        prev[1] = cur[1];
     }
     // keep latency bounded if the game streams faster than it plays
     const size_t max_samples = 44100 * 2;
-    while (g_cd_fifo.size() > max_samples) g_cd_fifo.pop_front();
+    while (fifo.size() > max_samples) fifo.pop_front();
+}
+}  // namespace
+
+void spu_push_cd_audio(const int16_t* stereo, int frames, int rate) {
+    resample_into(g_cd_fifo, g_cd_phase, g_cd_prev, stereo, frames, rate);
+}
+void spu_push_side_audio(const int16_t* stereo, int frames, int rate) {
+    resample_into(g_side_fifo, g_side_phase, g_side_prev, stereo, frames, rate);
 }
 
 size_t spu_cd_queued() { return g_cd_fifo.size() / 2; }
+size_t spu_side_queued() { return g_side_fifo.size() / 2; }
 
 void spu_scanline() { catch_up(); }
 
@@ -517,5 +538,5 @@ void spu_state(StateIO& s) {
     s.raw(g_cd_prev, sizeof g_cd_prev);
     s(g_last_cycles);
     s(g_cycle_accum);
-    if (s.loading()) g_out.clear();
+    if (s.loading()) g_out.clear(), g_side_fifo.clear();
 }

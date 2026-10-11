@@ -119,6 +119,16 @@ bool voice_clip_end(uint32_t lba, int chan, uint32_t* end) {
     return false;
 }
 
+// Clip bBB_cCC: its first disc sector and the sector after its last (false: no such clip).
+bool voice_clip_lba(int block, int chan, uint32_t* lba, uint32_t* end) {
+    if (block < 0 || block >= kBlocks || chan < 0 || chan >= kChannels) return false;
+    const int32_t pos = (int32_t)ram32(kPosTable + 4 * block), len = (int32_t)ram32(kLenTable + 4 * (block * kChannels + chan));
+    if (len <= 0) return false;
+    *lba = kXaLba + (uint32_t)pos * kChannels + (uint32_t)chan;
+    *end = kXaLba + (uint32_t)(pos + len) * kChannels + (uint32_t)chan;
+    return true;
+}
+
 // savestate.cpp psx_safepoint (once per frame, in the game's main loop): shows a pending line.
 void subtitle_poll(R3000* c) {
     if (g_subtitles) game_subtitle_keep(c);

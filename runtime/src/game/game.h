@@ -45,6 +45,7 @@ void subtitle_note_xa(uint32_t lba, int chan);  // cdrom.cpp: an XA sector is be
 void subtitle_poll(R3000* c);                   // once per frame
 float subtitle_tilt(uint32_t text);
 bool voice_clip_end(uint32_t lba, int chan, uint32_t* end);
+bool voice_clip_lba(int block, int chan, uint32_t* lba, uint32_t* end);
 
 // ---------------------------------------------------------------- cheats (cheats.cpp)
 // 0 health, 1 lives, 2 weapons, 3 ammo, 4 smart bombs, 5 one hit kill. Off at start, not saved.
