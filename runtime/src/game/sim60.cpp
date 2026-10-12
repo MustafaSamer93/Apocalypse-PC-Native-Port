@@ -1365,18 +1365,18 @@ extern "C" void psx_hook_zone(R3000* c) {
     MEM_W16(c, z + kZoneStrength, (uint16_t)(own - own / 2));
 }
 
-// Low input lag (Recomp Enhancements -> Input lag): the game reads the pad at VBlank, after its tick and
+// Low input lag (every frame rate but 30 original): the game reads the pad at VBlank, after its tick and
 // render and before the frame goes to the screen and the pacing waits for the next one, and its
 // controller library then passes each reading on a VBlank late (its buffer, 800EC3F0 port 1: status,
 // ID, data, gets the reading taken at one VBlank at the next). So a press reached a tick one or two
-// frames after it was made. Before each level tick (both of sim60's, and the game's own at 30) the
+// frames after it was made. Before each level tick (both of sim60's) the
 // buffer gets the pad read right then instead (the host polled it just before, after the wait), when
 // it holds a good reading of the same kind (status 0, same ID); the library still does the rest.
 constexpr uint32_t kPadDriver = 0x800EC3F0;
 void fresh_pad(R3000* c) {
     uint8_t id, data[6];
     int n;
-    if (!g_low_lag || g_sim60_demo || !pad_read_now(&id, data, &n)) return;
+    if (g_sim60_fps30 || g_sim60_demo || !pad_read_now(&id, data, &n)) return;
     if (MEM_R8(c, kPadDriver) != 0 || MEM_R8(c, kPadDriver + 1) != id) return;
     for (int i = 0; i < n; i++) MEM_W8(c, kPadDriver + 2 + i, data[i]);
 }

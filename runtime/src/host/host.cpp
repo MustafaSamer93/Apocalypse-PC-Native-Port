@@ -27,7 +27,6 @@
 
 constexpr const char* kVersion = "v1.0";
 int g_renderer_override = -1;
-bool g_low_lag = true;
 int g_start_state = -1;
 std::vector<uint64_t> g_shot_frames;
 std::string g_shot_prefix;
@@ -214,16 +213,15 @@ uint64_t g_ip_target = 0;           // the refresh the next image is for
 uint64_t g_ip_ideal = 0;            // ... and when it would be at exactly the chosen rate
 uint64_t g_ip_lead = 3000000;       // started this long before its refresh (ns; adapts)
 
-// When a recorded frame is due (N_k). Its emulation started at `start` (the pacing's time for it).
-// Original: a frame after that, the latest it can be ready. Low input lag: when frames are ready now
-// (the slowest of the last ten seconds' from their start, and a margin), never later than the
-// original: shown that much sooner (an image that still comes before the next frame: interp_service).
+// When a recorded frame is due (N_k). Its emulation started at `start` (the pacing's time for it): due
+// when frames are ready now (the slowest of the last ten seconds' from their start, and a margin), at
+// most a frame after its start (the latest it can be ready), so it goes on the screen as soon as it
+// can (an image that still comes before the next frame: interp_service).
 uint64_t g_emu_ns[600] = {};  // how long the last frames took to emulate (from their start)
 int g_emu_next = 0;
 uint64_t frame_due(uint64_t start, uint64_t now) {
     g_emu_ns[g_emu_next] = now > start ? now - start : 0;
     g_emu_next = (g_emu_next + 1) % 600;
-    if (!g_low_lag) return start + FRAME_NS;
     constexpr uint64_t kMargin = 2000000;
     const uint64_t slowest = *std::max_element(std::begin(g_emu_ns), std::end(g_emu_ns));
     return std::max(std::min(start + slowest + kMargin, start + FRAME_NS), now);
@@ -268,11 +266,10 @@ void interp_service() {
     while (k + 1 < g_ip_frames.size() && g_ip_frames[k].due < at) k++;
     const Recorded& f = g_ip_frames[k];
     const uint64_t span = k ? f.due - g_ip_frames[k - 1].due : FRAME_NS;
-    // (Low input lag: an image started late, so aimed a refresh further on, can come before the
-    // next frame is ready; the newest one then goes on along its motion, at most half a frame,
-    // instead of standing still)
-    const float t_max = g_low_lag ? 1.5f : 1.0f;
-    const float t = std::clamp(1.0f - (float)((int64_t)f.due - (int64_t)at) / (float)span, 0.0f, t_max);
+    // (an image started late, so aimed a refresh further on, can come before the next frame is ready
+    // (frame_due); the newest one then goes on along its motion, at most half a frame, instead of
+    // standing still)
+    const float t = std::clamp(1.0f - (float)((int64_t)f.due - (int64_t)at) / (float)span, 0.0f, 1.5f);
     int tw = 0, th = 0;
     const unsigned tex = hw_replay(f.id, t, &tw, &th);
     const int nh = f.nh;
