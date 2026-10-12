@@ -419,9 +419,18 @@ void ds_param(int idx, uint8_t tx) {
     }
 }
 
+// The last completed reading (command 42): the pad's ID and its data bytes (pad_last_reading).
+uint8_t g_read_id = 0, g_read_data[6];
+int g_read_len = 0;
+
 // Applies the effects of a completed transaction.
 void ds_end() {
     DualShock& d = g_ds;
+    if (d.cmd == 0x42 && !d.config) {
+        g_read_id = d.resp[0];
+        g_read_len = std::min(d.len - 2, 6);
+        std::memcpy(g_read_data, d.resp + 2, (size_t)g_read_len);
+    }
     const uint8_t* a = d.txb + 2;  // parameter bytes
     if (d.cmd == 0x42 && !d.config) {
         // motor bytes routed by the 0x4D mapping: 00 = small motor (on/off), 01 = large motor
@@ -472,6 +481,14 @@ void sio_transfer(R3000* c, uint8_t tx) {
 }
 
 }  // namespace
+
+bool pad_last_reading(uint8_t* id, uint8_t* data, int* n) {
+    if (!g_read_len) return false;
+    *id = g_read_id;
+    *n = g_read_len;
+    std::memcpy(data, g_read_data, (size_t)g_read_len);
+    return true;
+}
 
 void sio_event(R3000* c) {
     switch (g_sio_phase) {

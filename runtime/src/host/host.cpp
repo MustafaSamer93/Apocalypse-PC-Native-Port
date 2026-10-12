@@ -27,6 +27,7 @@
 
 constexpr const char* kVersion = "v1.0";
 int g_renderer_override = -1;
+bool g_low_lag = true;
 int g_start_state = -1;
 std::vector<uint64_t> g_shot_frames;
 std::string g_shot_prefix;
