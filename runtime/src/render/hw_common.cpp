@@ -103,7 +103,6 @@ void push(float x, float y, int r, int g, int b, float u, float v, const HwPrim&
     g_rec.ops.back().count++;
     g_rec.v.push_back(g_batch.back());
     g_rec.m.push_back(m);
-    g_rec.moving |= m.dx != 0 || m.dy != 0 || m.dr != 1;
 }
 
 // The drawn area, clipped to the drawing area, becomes dirty.
@@ -198,12 +197,9 @@ void hw_rec_note_write(int x, int y, int w, int h) { rec_touch(x, y, x + w, y + 
 int hw_rec_finish(int x, int y, int w, int h) {
     if (!g_rec_on) return -1;
     if (g_rec.ops.empty()) return -2;
-    bool ok = !g_rec.ops.empty() && w > 0 && h > 0 && x + w <= 1024 && y + h <= 512;
-    for (const auto& r : g_rec.touched) {
-        // (a few pixels do not count: the game puts 2 at 0,0 every other frame)
-        const bool hit = r[0] < x + w && r[2] > x && r[1] < y + h && r[3] > y && (r[2] - r[0]) * (r[3] - r[1]) >= 64;
-        ok &= !hit;
-    }
+    bool ok = w > 0 && h > 0 && x + w <= 1024 && y + h <= 512;
+    for (const auto& r : g_rec.touched)  // (a few pixels do not count: the game puts 2 at 0,0 every other frame)
+        ok &= !(r[0] < x + w && r[2] > x && r[1] < y + h && r[3] > y && (r[2] - r[0]) * (r[3] - r[1]) >= 64);
     int id = -1;
     if (ok) {
         id = g_rec_next;
@@ -213,6 +209,5 @@ int hw_rec_finish(int x, int y, int w, int h) {
     }
     // (the vectors keep their memory for the next frame)
     g_rec.v.clear(), g_rec.m.clear(), g_rec.ops.clear(), g_rec.touched.clear();
-    g_rec.moving = false;
     return id;
 }

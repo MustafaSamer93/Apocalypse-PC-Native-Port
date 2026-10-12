@@ -506,22 +506,11 @@ unsigned vk_hw_replay(int id, float t, int* tw, int* th) {
     clear(VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, target.w, target.h, 0);
     if (g_ip_z.image) clear(VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, target.w, target.h, 0);
     const int origin[4] = {f->x, f->y, f->w, f->h};
-    static std::vector<Vtx> moved;
-    for (const RecOp& op : f->ops) {
-        if (op.kind == RecOp::Depth) {
-            if (g_ip_z.image) clear(VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, target.w, target.h, 0);
-        } else if (op.kind == RecOp::Fill) {
-            const int x0 = std::max(op.x, f->x), y0 = std::max(op.y, f->y);
-            const int x1 = std::min(op.x + op.w, f->x + f->w), y1 = std::min(op.y + op.h, f->y + f->h);
-            if (x0 < x1 && y0 < y1)
-                clear(VK_IMAGE_ASPECT_COLOR_BIT, (x0 - f->x) * S, (y0 - f->y) * S, (x1 - x0) * S, (y1 - y0) * S,
-                      rgba_of(op.color & 0x7FFF));
-        } else {
-            moved.resize(op.count);
-            for (uint32_t i = 0; i < op.count; i++) moved[i] = rec_vertex(f->v[op.first + i], f->m[op.first + i], t);
-            draw_vertices(moved.data(), moved.size(), op.key, op.filter, origin, g_ip_z.image != VK_NULL_HANDLE);
-        }
-    }
+    const bool depth = g_ip_z.image != VK_NULL_HANDLE;
+    replay_ops(
+        *f, t, [&] { if (depth) clear(VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, target.w, target.h, 0); },
+        [&](int x, int y, int w, int h, uint32_t rgba) { clear(VK_IMAGE_ASPECT_COLOR_BIT, x, y, w, h, rgba); },
+        [&](const Vtx* v, size_t n, const BatchKey& key, bool filter) { draw_vertices(v, n, key, filter, origin, depth); });
     vkc::end_rendering();
     if (g_samples > 1) {
         vkc::transition(g_ip_ms, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);

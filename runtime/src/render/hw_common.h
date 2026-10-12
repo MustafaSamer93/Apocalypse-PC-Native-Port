@@ -5,6 +5,7 @@
 // are defined here once; each backend sets the two functions below in its hw_init.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -66,10 +67,10 @@ struct Mot {
 };
 struct RecOp {
     enum Kind : uint8_t { Batch, Fill, Depth } kind;
-    BatchKey key;            // Batch: its drawing state
-    bool filter = false;     // Batch: texture smoothing
-    uint32_t first = 0, count = 0;  // Batch: its vertices
-    int x = 0, y = 0, w = 0, h = 0;  // Fill
+    BatchKey key;                    // Batch: its drawing state
+    bool filter = false;             // Batch: texture smoothing
+    uint32_t first = 0, count = 0;   // Batch: its vertices
+    int x = 0, y = 0, w = 0, h = 0;  // Fill (native VRAM)
     uint16_t color = 0;
 };
 struct RecFrame {
@@ -77,16 +78,36 @@ struct RecFrame {
     std::vector<Mot> m;
     std::vector<RecOp> ops;
     std::vector<std::array<int, 4>> touched;  // VRAM written other than by drawing, or drawn and then sampled
-    bool moving = false;    // some vertex moved
-    int x = 0, y = 0, w = 0, h = 0;  // where it is shown (finished frames)
+    int x = 0, y = 0, w = 0, h = 0;           // where it is shown (finished frames)
 };
 const RecFrame* rec_frame(int id);  // a finished frame (nullptr: gone)
-// A recorded vertex at phase t of its motion (1: where it is now).
-inline Vtx rec_vertex(const Vtx& v, const Mot& m, float t) {
-    const float back = 1.0f - t, f = 1.0f + back * (m.dr - 1.0f);
-    Vtx o = v;
-    o.x += back * m.dx, o.y += back * m.dy, o.w *= f, o.z *= f;
-    return o;
+
+// Draws frame f again at phase t (0: every vertex where it was last frame, 1: where it is) through
+// the backend: depth() clears the depth buffer, fill(x, y, w, h, rgba) clears a rectangle of the
+// target (its pixels: the fill cut to the frame and scaled), draw(v, n, key, filter) draws vertices.
+template <class Depth, class Fill, class Draw>
+void replay_ops(const RecFrame& f, float t, Depth depth, Fill fill, Draw draw) {
+    static std::vector<Vtx> moved;
+    const float back = 1.0f - t;
+    for (const RecOp& op : f.ops) {
+        if (op.kind == RecOp::Depth) {
+            depth();
+        } else if (op.kind == RecOp::Fill) {
+            const int x0 = std::max(op.x, f.x), y0 = std::max(op.y, f.y);
+            const int x1 = std::min(op.x + op.w, f.x + f.w), y1 = std::min(op.y + op.h, f.y + f.h);
+            if (x0 < x1 && y0 < y1) fill((x0 - f.x) * S, (y0 - f.y) * S, (x1 - x0) * S, (y1 - y0) * S, rgba_of(op.color & 0x7FFF));
+        } else {
+            moved.resize(op.count);
+            for (uint32_t i = 0; i < op.count; i++) {
+                const Vtx& v = f.v[op.first + i];
+                const Mot& m = f.m[op.first + i];
+                const float k = 1.0f + back * (m.dr - 1.0f);  // (w and z: the view depth's ratio)
+                moved[i] = v;
+                moved[i].x += back * m.dx, moved[i].y += back * m.dy, moved[i].w *= k, moved[i].z *= k;
+            }
+            draw(moved.data(), moved.size(), op.key, op.filter);
+        }
+    }
 }
 
 }  // namespace hwc

@@ -801,27 +801,16 @@ unsigned gl_hw_replay(int id, float t, int* tw, int* th) {
     glDepthMask(GL_TRUE);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     const int origin[4] = {f->x, f->y, f->w, f->h};
-    static std::vector<Vtx> moved;
-    for (const RecOp& op : f->ops) {
-        if (op.kind == RecOp::Depth) {
-            glDisable(GL_SCISSOR_TEST);
-            glClear(GL_DEPTH_BUFFER_BIT);
-        } else if (op.kind == RecOp::Fill) {
-            const int x0 = std::max(op.x, f->x), y0 = std::max(op.y, f->y);
-            const int x1 = std::min(op.x + op.w, f->x + f->w), y1 = std::min(op.y + op.h, f->y + f->h);
-            if (x0 >= x1 || y0 >= y1) continue;
-            const uint32_t c = rgba_of(op.color & 0x7FFF);
+    replay_ops(
+        *f, t, [] { glClear(GL_DEPTH_BUFFER_BIT); },
+        [](int x, int y, int w, int h, uint32_t c) {
             glEnable(GL_SCISSOR_TEST);
-            glScissor((x0 - f->x) * S, (y0 - f->y) * S, (x1 - x0) * S, (y1 - y0) * S);
+            glScissor(x, y, w, h);
             glClearColor((c & 0xFF) / 255.0f, ((c >> 8) & 0xFF) / 255.0f, ((c >> 16) & 0xFF) / 255.0f, 0.0f);
             glClear(GL_COLOR_BUFFER_BIT);
             glDisable(GL_SCISSOR_TEST);
-        } else {
-            moved.resize(op.count);
-            for (uint32_t i = 0; i < op.count; i++) moved[i] = rec_vertex(f->v[op.first + i], f->m[op.first + i], t);
-            draw_vertices(moved.data(), moved.size(), op.key, op.filter, origin);
-        }
-    }
+        },
+        [&](const Vtx* v, size_t n, const BatchKey& key, bool filter) { draw_vertices(v, n, key, filter, origin); });
     if (g_ip.ms_fbo) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, g_ip.ms_fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_ip.fbo);

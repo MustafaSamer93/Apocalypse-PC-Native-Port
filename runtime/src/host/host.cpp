@@ -224,6 +224,21 @@ uint64_t refresh_ns() { return (uint64_t)(1e9 / std::max(g_refresh_hz, 1.0f)); }
 // When the next image is to be started.
 uint64_t interp_due() { return g_ip_target - g_ip_lead; }
 
+// After an image's swap returned (at `back`): just after the refresh it waited for. Missed it
+// (returned a refresh later): start earlier; on time: a little later each time, so the game is held
+// up as little as can be. The next image is for the first refresh at or after the chosen rate's
+// next moment.
+void interp_aim(uint64_t back) {
+    const uint64_t vb = refresh_ns(), period = 1000000000ull / (uint64_t)g_ip_rate;
+    const bool missed = back > g_ip_target + vb / 2;
+    g_ip_lead = missed ? std::min(g_ip_lead + 1000000, vb * 3 / 4) : std::max<uint64_t>(g_ip_lead - 20000, 1500000);
+    const uint64_t refresh = missed ? g_ip_target + vb : back;  // the one just shown
+    g_ip_ideal += period;
+    if (g_ip_ideal + vb < refresh || g_ip_ideal > refresh + 2 * vb) g_ip_ideal = refresh + period;
+    g_ip_target = refresh + vb;
+    while (g_ip_target + vb / 2 < g_ip_ideal) g_ip_target += vb;
+}
+
 void interp_service() {
     if (!g_ip_rate || g_ip_frames.empty()) return;
     const uint64_t start = SDL_GetTicksNS();
@@ -246,17 +261,7 @@ void interp_service() {
     present_game_texture(tex, tw, th, 0, 0, tw, th, nh, present_options());
     g_images++;
     finish_frame(true);
-    // The swap returned just after the refresh it waited for. Missed it (returned a refresh later):
-    // start earlier; on time: a little later each time, so the game is held up as little as can be.
-    const uint64_t back = SDL_GetTicksNS();
-    if (back > g_ip_target + vb / 2) g_ip_lead = std::min(g_ip_lead + 1000000, vb * 3 / 4);
-    else g_ip_lead = std::max<uint64_t>(g_ip_lead - 20000, 1500000);
-    const uint64_t refresh = back > g_ip_target + vb / 2 ? g_ip_target + vb : back;  // the one just shown
-    // the next image: the first refresh at or after the chosen rate's next moment
-    g_ip_ideal += 1000000000ull / (uint64_t)g_ip_rate;
-    if (g_ip_ideal + vb < refresh || g_ip_ideal > refresh + 2 * vb) g_ip_ideal = refresh + 1000000000ull / (uint64_t)g_ip_rate;
-    g_ip_target = refresh + vb;
-    while (g_ip_target + vb / 2 < g_ip_ideal) g_ip_target += vb;
+    interp_aim(SDL_GetTicksNS());
 }
 
 // Once a second: the frame rate in the title (and FPS counter) and, with --log host, frame
@@ -544,8 +549,8 @@ void host_present(const GpuDisplay& d) {
     if (!g_video_ok) return;
     frame_stats();
     // above 60 fps: the frame is recorded to be shown by interp_service
-    const int rate = interp_rate();
-    const int id = hw_rec_finish(d.x, d.y, std::clamp(d.w, 1, 1024), std::clamp(d.h, 1, 512));
+    const int rate = interp_rate(), w = std::clamp(d.w, 1, 1024), h = std::clamp(d.h, 1, 512);
+    const int id = hw_rec_finish(d.x, d.y, w, h);
     hw_rec_enable(rate > 0);
     g_motion_on = rate > 0;
     if (rate && id == -2 && !g_ip_frames.empty()) return;  // nothing drawn since: no new frame yet
@@ -553,7 +558,7 @@ void host_present(const GpuDisplay& d) {
         if (g_ip_rate != rate || g_ip_frames.empty())
             g_ip_target = g_ip_ideal = SDL_GetTicksNS() + g_ip_lead + refresh_ns() / 2;
         g_ip_rate = rate;
-        g_ip_frames.push_back({id, g_next_frame_ns + FRAME_NS, std::clamp(d.h, 1, 512)});
+        g_ip_frames.push_back({id, g_next_frame_ns + FRAME_NS, h});
         if (g_ip_frames.size() > 3) g_ip_frames.erase(g_ip_frames.begin());
         interp_service();
         return;

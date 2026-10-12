@@ -283,6 +283,18 @@ bool file_read_auto(uint8_t* record) {
     return true;
 }
 
+// Once, at the first VSync (the game's code is loaded): a card without the game's file gets one,
+// and an auto-save from before the card (saves/autosave.sav) is moved onto it.
+void card_prepare(R3000* c) {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    uint8_t r[kSaveRecordSize];
+    MemoryCard::FileInfo f;
+    if (!card_read_auto(r) && file_read_auto(r)) card_write_auto(c, r);
+    else card_file(c, &f);
+}
+
 // The auto-save: the save record the game has just made for its progress point, onto the card
 // (into saves/autosave.sav when there is no card or no room on it).
 bool save_record(R3000* c) {
@@ -372,14 +384,7 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
 
     state_poll_load(c);
     state_poll_restart(c);
-    static bool card_checked = false;
-    if (!card_checked) {
-        card_checked = true;
-        uint8_t r[kSaveRecordSize];
-        MemoryCard::FileInfo f;
-        if (!card_read_auto(r) && file_read_auto(r)) card_write_auto(c, r);
-        else card_file(c, &f);
-    }
+    card_prepare(c);
     if (g_autoload_request) {  // Settings -> Load auto-save
         g_autoload_request = false;
         if (frame < g_level_render_frame + 30) load_record_in_level(c);

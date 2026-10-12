@@ -477,11 +477,12 @@ void mix_sample(int16_t& out_l, int16_t& out_r) {
         g_rev_hist[3][0] = g_rev_out[0], g_rev_hist[3][1] = g_rev_out[1];
     }
     if (cnt & 0x80) {
-        for (int ch = 0; ch < 2; ch++) {
-            const int32_t v = g_rev_odd ? g_rev_hist[2][ch]
-                                        : cubic(g_rev_hist[0][ch], g_rev_hist[1][ch], g_rev_hist[2][ch], g_rev_hist[3][ch], 2048);
-            (ch ? r : l) += v;
-        }
+        const auto rev = [](int ch) {  // a step and a half behind: the middle of the last two but one
+            const int32_t(*h)[2] = g_rev_hist;
+            return g_rev_odd ? h[2][ch] : cubic(h[0][ch], h[1][ch], h[2][ch], h[3][ch], 2048);
+        };
+        l += rev(0);
+        r += rev(1);
     }
     g_rev_odd = !g_rev_odd;
 
