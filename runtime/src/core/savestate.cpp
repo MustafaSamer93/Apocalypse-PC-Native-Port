@@ -216,11 +216,80 @@ void record_name(uint8_t* r, uint32_t addr, size_t n, const char* s) {  // a nam
     std::memcpy(r + (addr - kSaveRecord), s, std::min(n - 1, std::strlen(s)));
 }
 
-// The auto-save: the save record the game has just made for its progress point.
+// The auto-save lives on memory card 1, in the game's own file (bu00:BASLUS-00373APC, one block):
+// 512 bytes of header (title, icon), then its 8 saves of 136 bytes. The game reads and writes only
+// the first 1728 bytes (80010450 / 80010530), so the auto-save goes further in, behind a tag. A
+// card without the file (a new player) gets one, made as the game makes it: its header from
+// 800102C0, which fills in the game's copy of the file at 800A493C before each card access, and
+// no saves.
+constexpr const char* kCardFile = "BASLUS-00373APC";
+constexpr uint32_t kCardCopy = 0x800A493C, kCardHeader = 512;
+constexpr uint32_t kMakeHeader = 0x800102C0;
+constexpr uint32_t kCardAuto = 4096;  // tag, then the record
+constexpr char kCardAutoTag[4] = {'A', 'U', 'T', 'O'};
+
+// The game's file on card 1 (made if missing; false: no card, or no free block).
+bool card_file(R3000* c, MemoryCard::FileInfo* f) {
+    MemoryCard& mc = memcard(0);
+    if (!mc.present()) return false;
+    if (mc.find(kCardFile, f)) return true;
+    if (!mc.create(kCardFile, 1, f)) {
+        log_msg(LogCat::Core, "memory card 1: no free block for the game's save file");
+        return false;
+    }
+    R3000 saved = *c;  // (the game's header code, as it runs before saving)
+    call_indirect(c, kMakeHeader);
+    const uint64_t cycles = c->cycles, next = c->next_event;
+    *c = saved;
+    c->cycles = cycles;
+    c->next_event = next;
+    for (uint32_t i = 0; i < kCardHeader; i++) mc.data()[mc.file_offset(*f, i)] = (uint8_t)MEM_R8(c, kCardCopy + i);
+    mc.mark_dirty();
+    mc.flush();
+    log_msg(LogCat::Core, "memory card 1: save file made");
+    return true;
+}
+
+bool card_write_auto(R3000* c, const uint8_t* r) {
+    MemoryCard::FileInfo f;
+    if (!card_file(c, &f)) return false;
+    MemoryCard& mc = memcard(0);
+    for (uint32_t i = 0; i < 4; i++) mc.data()[mc.file_offset(f, kCardAuto + i)] = (uint8_t)kCardAutoTag[i];
+    for (uint32_t i = 0; i < kSaveRecordSize; i++) mc.data()[mc.file_offset(f, kCardAuto + 4 + i)] = r[i];
+    mc.mark_dirty();
+    mc.flush();
+    return true;
+}
+
+bool card_read_auto(uint8_t* r) {
+    MemoryCard& mc = memcard(0);
+    MemoryCard::FileInfo f;
+    if (!mc.present() || !mc.find(kCardFile, &f)) return false;
+    for (uint32_t i = 0; i < 4; i++)
+        if (mc.data()[mc.file_offset(f, kCardAuto + i)] != (uint8_t)kCardAutoTag[i]) return false;
+    for (uint32_t i = 0; i < kSaveRecordSize; i++) r[i] = mc.data()[mc.file_offset(f, kCardAuto + 4 + i)];
+    return record_ok(r);
+}
+
+// Before the card: saves/autosave.sav (still read when the card has none).
+bool file_read_auto(uint8_t* record) {
+    FILE* f = std::fopen(kAutoFile, "rb");
+    if (!f) return false;
+    uint8_t r[kSaveRecordSize + 1];
+    const size_t n = std::fread(r, 1, sizeof r, f);
+    std::fclose(f);
+    if (n != kSaveRecordSize || !record_ok(r)) return false;
+    std::memcpy(record, r, kSaveRecordSize);
+    return true;
+}
+
+// The auto-save: the save record the game has just made for its progress point, onto the card
+// (into saves/autosave.sav when there is no card or no room on it).
 bool save_record(R3000* c) {
     uint8_t r[kSaveRecordSize];
     for (uint32_t i = 0; i < kSaveRecordSize; i++) r[i] = (uint8_t)MEM_R8(c, kSaveRecord + i);
     if (!record_ok(r)) return false;
+    if (card_write_auto(c, r)) return true;
     std::filesystem::create_directories("saves");
     const std::string tmp = std::string(kAutoFile) + ".tmp";
     FILE* f = std::fopen(tmp.c_str(), "wb");
@@ -254,16 +323,7 @@ void load_record_in_level(R3000* c) {
 
 }  // namespace
 
-bool state_read_autosave(uint8_t* record) {
-    FILE* f = std::fopen(kAutoFile, "rb");
-    if (!f) return false;
-    uint8_t r[kSaveRecordSize + 1];
-    const size_t n = std::fread(r, 1, sizeof r, f);
-    std::fclose(f);
-    if (n != kSaveRecordSize || !record_ok(r)) return false;
-    std::memcpy(record, r, kSaveRecordSize);
-    return true;
-}
+bool state_read_autosave(uint8_t* record) { return card_read_auto(record) || file_read_auto(record); }
 
 uint64_t g_level_render_frame = 0;
 
@@ -312,6 +372,14 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
 
     state_poll_load(c);
     state_poll_restart(c);
+    static bool card_checked = false;
+    if (!card_checked) {
+        card_checked = true;
+        uint8_t r[kSaveRecordSize];
+        MemoryCard::FileInfo f;
+        if (!card_read_auto(r) && file_read_auto(r)) card_write_auto(c, r);
+        else card_file(c, &f);
+    }
     if (g_autoload_request) {  // Settings -> Load auto-save
         g_autoload_request = false;
         if (frame < g_level_render_frame + 30) load_record_in_level(c);
@@ -361,10 +429,12 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
             for (uint32_t i = 0; i < kSaveRecordSize; i++) g_start_record[i] = (uint8_t)MEM_R8(c, kSaveRecord + i);
         }
         save_chapter(level, restart, c, pc);
+        uint8_t have[kSaveRecordSize];
         if (g_saved_level.empty()) {  // the first point of this session (new game or loaded save)
             g_saved_level = level;
             g_saved_restart = restart;
-            return;
+            if (state_read_autosave(have)) return;  // (kept: it may be further on than this)
+            g_saved_level.clear();                  // none yet (a new player): saved now
         }
         if (level == g_saved_level && restart == g_saved_restart) return;  // respawn at the same point
         if (!g_autosave) return;  // switched off (Options -> Enhancements -> Autosave)
@@ -477,7 +547,10 @@ void state_request_load(int slot) {
     else g_load_request = slot;
 }
 
-bool state_slot_exists(int slot) { return std::filesystem::exists(slot_path(slot)); }
+bool state_slot_exists(int slot) {
+    uint8_t r[kSaveRecordSize];
+    return slot == kAutoSlot ? state_read_autosave(r) : std::filesystem::exists(slot_path(slot));
+}
 
 std::vector<std::string> state_chapter_names() {
     std::vector<std::string> names;

@@ -4,7 +4,7 @@
 # FFmpeg (movie formats only) and the C++ runtime are built in; the rest (OpenGL / Vulkan,
 # X11 / Wayland, sound) comes from the system as with any game.
 #   needs, besides build.sh's packages: nasm make curl
-# Then copy assets/ (image, bios, replacements) next to dist/linux/repocalypse.
+# Then copy assets/ (image, replacements) next to dist/linux/repocalypse.
 set -e
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -36,4 +36,4 @@ for f in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf /usr/share/fonts/TTF/De
     [ -f "$f" ] && mkdir -p dist/linux/assets && cp "$f" dist/linux/assets/font.ttf && break
 done
 echo "glibc needed: $(objdump -T dist/linux/repocalypse 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
-echo "Done: dist/linux (add assets/image, assets/bios, assets/replacements)"
+echo "Done: dist/linux (add assets/image, assets/replacements)"

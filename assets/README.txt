@@ -7,8 +7,9 @@ assets\replacements\textures  optional - HD textures: <file>\<index>.png for eve
                                 from the disc (Settings -> Texture replacements to compare)
 assets\replacements\fmvs      optional - HD movies: <NAME>.mkv or .mp4 plays instead of the
                                 disc's <NAME>.STR (INTRO, ATVILOGO, SEWER, ...)
-assets\fonts                  optional - a .ttf or .otf font for the game's own letters
-                                (Recomp Enhancements -> Font)
+assets\fonts                  for building only - a .ttf or .otf font for the game's own
+                                letters (Recomp Enhancements -> Font type); the build puts
+                                it in the exe, players never need a font file
 assets\icon.png               optional - the exe's icon (a PNG up to 256 x 256), used by the
                                 build instead of the game's lives icon
 

@@ -128,6 +128,7 @@ void save_settings() {
     std::fprintf(f, "texreplace %d\n", g_tex_replace ? 1 : 0);
     std::fprintf(f, "fullscreen %d\n", g_fullscreen ? 1 : 0);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
+    std::fprintf(f, "soundfilter %d\n", g_sound_filter);
     std::fprintf(f, "msaa %d\n", g_gfx.msaa);
     std::fprintf(f, "renderer %s\n", g_gfx.vulkan ? "vulkan" : "opengl");
     if (!g_input.empty()) std::fprintf(f, "input %s\n", g_input.c_str());
@@ -170,7 +171,7 @@ void load_settings() {
         {"fpscounter", &g_fps_counter}, {"subtitles", &g_subtitles}, {"autosave", &g_autosave},
         {"gamefont", &g_game_font},
         {"menuzoom", nullptr, &g_menu_zoom, 30, 80}, {"drawdist", nullptr, &g_draw_distance, 100, 400},
-        {"aa", nullptr, &g_gfx.aa, 0, 3},
+        {"aa", nullptr, &g_gfx.aa, 0, 3}, {"soundfilter", nullptr, &g_sound_filter, 0, 2},
     };
     char line[1024];
     while (std::fgets(line, sizeof line, f)) {
@@ -251,8 +252,9 @@ const char* enh_name(int id) {
     static const char* names[] = {"Frame rate", "Draw distance", "Smooth font",
                                   "Font upscaling", "Renderer", "Screen mode", "Display", "Autosave", "One-liners",
                                   "Anti-aliasing", "Infinite health", "Infinite lives", "Unlock all weapons", "Infinite ammo",
-                                  "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font type", "Smooth textures", "HD replacements"};
-    static_assert(std::size(names) == E_REPLACE + 1, "one name per EnhSetting");
+                                  "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font type", "Smooth textures", "HD replacements",
+                                  "Sound filter"};
+    static_assert(std::size(names) == E_SOUND_FILTER + 1, "one name per EnhSetting");
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -274,8 +276,9 @@ std::string enh_value(int id) {
         case E_CRT: return g_gfx.crt ? "On" : "Off";
         case E_TEX_SMOOTH: return g_gfx.texture_filter ? "On" : "Off (original)";
         case E_REPLACE: return g_tex_replace ? "On" : "Off (original)";
+        case E_SOUND_FILTER: return g_sound_filter == 0 ? "Original" : g_sound_filter == 2 ? "Sharp" : "Smooth";
         case E_GAME_FONT: {
-            if (texreplace_font_name().empty()) return "Original (no font in assets/fonts)";
+            if (texreplace_font_name().empty()) return "Original (no font built in)";
             return g_game_font ? "Remastered" : "Original";
         }
         case E_CHEAT_HEALTH:
@@ -321,6 +324,7 @@ void enh_change(int id, int dir) {
             g_tex_replace = !g_tex_replace;
             texreplace_vram_changed();
             break;
+        case E_SOUND_FILTER: g_sound_filter = (g_sound_filter + dir + 3) % 3; break;
         case E_GAME_FONT:
             g_game_font = !g_game_font;
             texreplace_font_changed();

@@ -511,8 +511,9 @@ void draw_polygon(const uint32_t* w) {
         }
         const Tilt* tilt = g_gpu_packet_addr && !g_tilts.empty() ? tilt_of(g_gpu_packet_addr) : nullptr;
         if (const Tilt* t = tilt) {
-            // turned on the screen, where a VRAM pixel is 0.625 lines wide (320 x 240 shown as 4:3)
-            constexpr float kPixel = 320.0f / 512.0f;
+            // turned on the screen, where a VRAM pixel is 0.625 lines wide (320 x 240 shown as 4:3),
+            // wider on a wider screen (the text above is narrowed by g_gte_widescreen to keep its shape)
+            const float kPixel = 320.0f / 512.0f / g_gte_widescreen;
             float px = t->x + (float)S.off_x, py = t->y + (float)S.off_y;
             if (k != 1.0f) px = cx + (px - cx) * k;
             const float cs = std::cos(t->angle), sn = std::sin(t->angle);

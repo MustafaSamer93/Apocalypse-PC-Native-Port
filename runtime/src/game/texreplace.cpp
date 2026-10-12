@@ -33,9 +33,10 @@
 #include "game/game.h"
 #include "render/gpu_hw.h"
 #include "stb_truetype.h"  // (its code is in ui_text.cpp)
+#include "game_font.h"     // kEmbeddedFont (CMakeLists.txt)
 
 bool g_tex_replace = true;  // setting (settings.ini "texreplace"; on: whatever is in the folder is used)
-bool g_game_font = true;    // setting (settings.ini "gamefont"): the game's letters in assets/fonts' font
+bool g_game_font = true;    // setting (settings.ini "gamefont"): the game's letters in the built-in font
 
 namespace {
 
@@ -53,13 +54,14 @@ struct Tex {
     int key_dx = 0, key_dy = 0;  // where its first non-zero 4-word window is (the scan key)
     std::vector<uint32_t> hd[3];  // the replacement at kScale, kScale/2, 1 (mip levels; loaded when first used)
     bool tried = false;
-    uint32_t glyph = 0;  // a letter of the game's fonts (bits.psx): its character, drawn in assets/fonts' font
+    uint32_t glyph = 0;  // a letter of the game's fonts (bits.psx): its character, drawn in the built-in font
 };
 
 // ---- the game's fonts in a TrueType font (Enhancements -> Font)
 // Both fonts are textures in bits.psx, one per letter, cut to the letter's ink: the big bronze one
 // (menus, titles) and the small white one (HUD, messages). Each letter is drawn again in the font
-// from assets/fonts (the first .ttf/.otf there) to fill the same box, coloured row by row like the
+// built into the exe (CMakeLists.txt: the first .ttf/.otf in assets/fonts at build time; players
+// need no font file) to fill the same box, coloured row by row like the
 // game's letter, and goes in as that texture's replacement: the game still places, spaces, tints and
 // fades its letters itself.
 uint32_t font_glyph(int idx) {
@@ -78,25 +80,11 @@ bool font_loaded() {
     static bool tried = false;
     if (tried) return !g_ttf_name.empty();
     tried = true;
-    std::error_code ec;
-    std::vector<std::filesystem::path> found;
-    for (const auto& e : std::filesystem::directory_iterator("assets/fonts", ec)) {
-        std::string x = e.path().extension().string();
-        for (char& ch : x) ch = (char)std::tolower((unsigned char)ch);
-        if (x == ".ttf" || x == ".otf") found.push_back(e.path());
-    }
-    if (found.empty()) return false;
-    std::sort(found.begin(), found.end());
-    FILE* f = std::fopen(found[0].string().c_str(), "rb");
-    if (!f) return false;
-    std::fseek(f, 0, SEEK_END);
-    g_ttf_data.resize((size_t)std::max(0L, std::ftell(f)));
-    std::fseek(f, 0, SEEK_SET);
-    const bool read = std::fread(g_ttf_data.data(), 1, g_ttf_data.size(), f) == g_ttf_data.size();
-    std::fclose(f);
-    if (!read || !stbtt_InitFont(&g_ttf, g_ttf_data.data(), stbtt_GetFontOffsetForIndex(g_ttf_data.data(), 0))) return false;
-    g_ttf_name = found[0].stem().string();
-    log_msg(LogCat::Host, "game font: %s", found[0].string().c_str());
+    if (sizeof kEmbeddedFont <= 1) return false;  // (built without one: the game's own letters)
+    g_ttf_data.assign(kEmbeddedFont, kEmbeddedFont + sizeof kEmbeddedFont - 1);
+    if (!stbtt_InitFont(&g_ttf, g_ttf_data.data(), stbtt_GetFontOffsetForIndex(g_ttf_data.data(), 0))) return false;
+    g_ttf_name = kEmbeddedFontName;
+    log_msg(LogCat::Host, "game font: %s", kEmbeddedFontName);
     return true;
 }
 

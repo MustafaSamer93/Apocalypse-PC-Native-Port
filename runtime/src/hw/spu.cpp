@@ -2,6 +2,7 @@
 // reverb and CD audio input. Samples are produced in emulated time (caught up on every
 // register access and every scanline) and handed to the host once per frame.
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -11,6 +12,8 @@
 #include "core/state_io.h"
 #include "game/game.h"
 #include "host/host.h"
+
+int g_sound_filter = 1;  // host.h
 
 namespace {
 
@@ -79,6 +82,10 @@ struct Voice {
     int32_t last_out = 0;  // ADSR-scaled output, feeds the next voice's pitch modulation
 };
 Voice g_voice[24];
+// A voice's samples with more history and a look ahead, for Sharp (not saved in states: rebuilt
+// as the voice plays): ext[e] = buf[e - 3] for buf indices -3..34 (31..34: the next block's first).
+int16_t g_ext[24][38];
+bool g_ext_ok[24];
 uint32_t g_endx = 0;
 uint32_t g_transfer_addr = 0;
 bool g_irq_flag = false;
@@ -92,15 +99,18 @@ uint16_t g_noise_level = 1;
 uint32_t g_rev_addr = 0;
 int32_t g_rev_out[2] = {};
 bool g_rev_odd = false;
+int32_t g_rev_hist[4][2] = {};  // the last four reverb outputs (not saved in states)
 
 // CD audio input, resampled to 44.1 kHz stereo
 std::deque<int16_t> g_cd_fifo;
 double g_cd_phase = 0;
 int16_t g_cd_prev[2] = {};
+int16_t g_cd_hist[16][2] = {};  // the last 16 input frames (resample_into; not saved in states)
 // A voice line played beside the drive (cdrom.cpp g_side), mixed over the CD input
 std::deque<int16_t> g_side_fifo;
 double g_side_phase = 0;
 int16_t g_side_prev[2] = {};
+int16_t g_side_hist[16][2] = {};
 
 // sample production in emulated time
 uint64_t g_last_cycles = 0;
@@ -119,23 +129,43 @@ void check_irq(uint32_t addr) {
     }
 }
 
-void decode_block(Voice& v) {
-    const uint8_t* b = &g_ram[v.addr & (SPU_RAM - 1)];
-    check_irq(v.addr);
+// The first n samples of the ADPCM block at b, with its filter history prev (updated).
+void decode_samples(const uint8_t* b, int16_t prev[2], int16_t* out, int n) {
     int shift = b[0] & 0xF;
     if (shift > 12) shift = 9;
     int filter = std::min((b[0] >> 4) & 7, 4);
-    v.flags = b[1];
-    if (v.flags & 4) v.repeat = v.addr;  // loop start
-    for (int i = 0; i < 28; i++) {
+    for (int i = 0; i < n; i++) {
         int nib = (b[2 + i / 2] >> ((i & 1) * 4)) & 0xF;
         int32_t t = (int32_t)((uint32_t)nib << 28) >> 28;
-        int32_t s = ((t << 12) >> shift) + ((v.prev[0] * kPos[filter] + v.prev[1] * kNeg[filter] + 32) >> 6);
+        int32_t s = ((t << 12) >> shift) + ((prev[0] * kPos[filter] + prev[1] * kNeg[filter] + 32) >> 6);
         s = std::clamp(s, -32768, 32767);
-        v.prev[1] = v.prev[0];
-        v.prev[0] = (int16_t)s;
-        v.buf[3 + i] = (int16_t)s;
+        prev[1] = prev[0];
+        prev[0] = (int16_t)s;
+        out[i] = (int16_t)s;
     }
+}
+
+void decode_block(Voice& v) {
+    const uint8_t* b = &g_ram[v.addr & (SPU_RAM - 1)];
+    check_irq(v.addr);
+    v.flags = b[1];
+    if (v.flags & 4) v.repeat = v.addr;  // loop start
+    decode_samples(b, v.prev, v.buf + 3, 28);
+}
+
+// Sharp: the voice's longer history after a block was decoded (fresh: a key on, no history), and
+// the first samples of the block that comes next (where the loop flags say; none after the end).
+void ext_update(int n, bool fresh) {
+    const Voice& v = g_voice[n];
+    int16_t* e = g_ext[n];
+    if (fresh) std::memset(e, 0, 6 * sizeof(int16_t));
+    else std::memmove(e, e + 28, 6 * sizeof(int16_t));  // the last block's buf[25..30] -> buf[-3..2]
+    std::memcpy(e + 6, v.buf + 3, 28 * sizeof(int16_t));
+    int16_t prev[2] = {v.prev[0], v.prev[1]};
+    if (!(v.flags & 1)) decode_samples(&g_ram[(v.addr + 16) & (SPU_RAM - 1)], prev, e + 34, 4);
+    else if (v.flags & 2) decode_samples(&g_ram[v.repeat & (SPU_RAM - 1)], prev, e + 34, 4);
+    else std::memset(e + 34, 0, 4 * sizeof(int16_t));
+    g_ext_ok[n] = true;
 }
 
 void run_adsr(Voice& v, int n) {
@@ -175,11 +205,80 @@ void key_on(int n) {
     v.adsr.counter = 0;
     g_endx &= ~(1u << n);
     decode_block(v);
+    ext_update(n, true);
 }
 
 void key_off(int n) {
     if (g_voice[n].phase != Off) g_voice[n].phase = Release;
 }
+
+// The voices' interpolation (Recomp Enhancements -> Sound filter), between p1 and p2 of the
+// samples around the pitch counter (frac: 0..4095 of the way):
+//   0 Original: the hardware's 4-point Gaussian (its table, psx-spx), a little muffled;
+//   1 Smooth: 4-point cubic (Catmull-Rom);
+//   2 Sharp: 8-point windowed sinc (Lanczos, a = 4), from a longer history of the voice (g_ext).
+const int16_t kGauss[512] = {
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3,
+    3, 4, 4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 12, 13, 14,
+    15, 16, 17, 18, 19, 21, 22, 24, 25, 27, 28, 30, 32, 33, 35, 37,
+    39, 41, 44, 46, 48, 51, 53, 56, 58, 61, 64, 67, 70, 73, 77, 80,
+    84, 87, 91, 95, 99, 103, 107, 111, 116, 120, 125, 130, 135, 140, 145, 150,
+    156, 161, 167, 173, 179, 186, 192, 199, 205, 212, 219, 227, 234, 242, 250, 257,
+    266, 274, 283, 291, 300, 309, 319, 328, 338, 348, 358, 369, 379, 390, 401, 412,
+    424, 436, 448, 460, 473, 485, 498, 512, 525, 539, 553, 567, 582, 597, 612, 627,
+    643, 659, 675, 692, 708, 726, 743, 761, 779, 797, 816, 835, 854, 874, 894, 914,
+    935, 956, 977, 999, 1020, 1043, 1066, 1089, 1112, 1136, 1160, 1184, 1209, 1234, 1260, 1286,
+    1312, 1339, 1366, 1394, 1422, 1450, 1479, 1508, 1537, 1567, 1598, 1628, 1660, 1691, 1723, 1756,
+    1789, 1822, 1856, 1890, 1924, 1959, 1995, 2031, 2067, 2104, 2141, 2179, 2217, 2256, 2295, 2334,
+    2374, 2415, 2456, 2497, 2539, 2582, 2624, 2668, 2712, 2756, 2801, 2846, 2892, 2938, 2985, 3032,
+    3079, 3128, 3176, 3225, 3275, 3325, 3376, 3427, 3479, 3531, 3584, 3637, 3691, 3745, 3799, 3855,
+    3910, 3967, 4023, 4081, 4138, 4197, 4255, 4315, 4374, 4435, 4495, 4557, 4619, 4681, 4744, 4807,
+    4871, 4935, 5000, 5065, 5131, 5197, 5264, 5332, 5399, 5468, 5536, 5606, 5676, 5746, 5817, 5888,
+    5959, 6032, 6104, 6177, 6251, 6325, 6400, 6475, 6550, 6626, 6702, 6779, 6856, 6934, 7012, 7091,
+    7170, 7249, 7329, 7409, 7490, 7571, 7653, 7735, 7817, 7900, 7983, 8066, 8150, 8234, 8319, 8404,
+    8489, 8575, 8661, 8748, 8834, 8922, 9009, 9097, 9185, 9273, 9362, 9451, 9541, 9630, 9720, 9811,
+    9901, 9992, 10083, 10174, 10266, 10358, 10450, 10542, 10635, 10727, 10820, 10913, 11007, 11100, 11194, 11288,
+    11382, 11476, 11571, 11665, 11760, 11855, 11950, 12045, 12140, 12236, 12331, 12427, 12522, 12618, 12714, 12809,
+    12905, 13001, 13097, 13193, 13289, 13385, 13481, 13577, 13673, 13769, 13865, 13961, 14056, 14152, 14248, 14343,
+    14439, 14534, 14630, 14725, 14820, 14915, 15010, 15104, 15199, 15293, 15387, 15481, 15575, 15669, 15762, 15855,
+    15948, 16041, 16133, 16226, 16317, 16409, 16500, 16592, 16682, 16773, 16863, 16953, 17042, 17131, 17220, 17308,
+    17396, 17484, 17571, 17658, 17744, 17830, 17916, 18001, 18086, 18170, 18254, 18337, 18420, 18502, 18584, 18665,
+    18746, 18826, 18905, 18985, 19063, 19141, 19219, 19295, 19372, 19447, 19522, 19597, 19671, 19744, 19816, 19888,
+    19959, 20030, 20100, 20169, 20238, 20306, 20373, 20439, 20505, 20570, 20634, 20698, 20760, 20822, 20884, 20944,
+    21004, 21063, 21121, 21178, 21235, 21290, 21345, 21399, 21452, 21505, 21556, 21607, 21657, 21706, 21754, 21801,
+    21848, 21893, 21938, 21982, 22025, 22066, 22107, 22148, 22187, 22225, 22262, 22299, 22334, 22369, 22402, 22435,
+    22467, 22498, 22527, 22556, 22584, 22611, 22637, 22662, 22686, 22709, 22731, 22752, 22772, 22791, 22809, 22826,
+    22842, 22857, 22872, 22885, 22897, 22908, 22918, 22927, 22935, 22942, 22948, 22953, 22957, 22960, 22962, 22963
+};
+
+int32_t gauss(int32_t p0, int32_t p1, int32_t p2, int32_t p3, int32_t frac) {
+    const int i = frac >> 4;
+    return ((kGauss[0xFF - i] * p0) >> 15) + ((kGauss[0x1FF - i] * p1) >> 15) + ((kGauss[0x100 + i] * p2) >> 15) +
+           ((kGauss[i] * p3) >> 15);
+}
+
+// Windowed-sinc weights for `taps` points around the position (fraction 0..1 of the way from point
+// taps/2 - 1 to point taps/2), 256 phases, each set summing to 1.
+template <int taps>
+struct SincTable {
+    float w[256][taps];
+    SincTable() {
+        constexpr double a = taps / 2, pi = 3.14159265358979323846;
+        for (int i = 0; i < 256; i++) {
+            double sum = 0;
+            for (int k = 0; k < taps; k++) {
+                const double x = (k - (taps / 2 - 1)) - i / 256.0;
+                const double s = x == 0 ? 1 : std::sin(pi * x) / (pi * x) * std::sin(pi * x / a) / (pi * x / a);
+                w[i][k] = (float)s;
+                sum += s;
+            }
+            for (int k = 0; k < taps; k++) w[i][k] = (float)(w[i][k] / sum);
+        }
+    }
+};
+const SincTable<8> kSinc8;    // voices (Sharp)
+const SincTable<16> kSinc16;  // CD audio, speech and streamed music (resample_into)
 
 // 4-point cubic (Catmull-Rom) through p0..p3, evaluated between p1 and p2.
 int32_t cubic(int32_t p0, int32_t p1, int32_t p2, int32_t p3, int32_t frac /* 0..4095 */) {
@@ -297,7 +396,17 @@ void mix_sample(int16_t& out_l, int16_t& out_r) {
             continue;
         }
         int32_t idx = (int32_t)(v.counter >> 12), frac = (int32_t)(v.counter & 0xFFF);
-        int32_t sample = cubic(v.buf[idx], v.buf[idx + 1], v.buf[idx + 2], v.buf[idx + 3], frac);
+        int32_t sample;
+        if (g_sound_filter == 0) {
+            sample = gauss(v.buf[idx], v.buf[idx + 1], v.buf[idx + 2], v.buf[idx + 3], frac);
+        } else if (g_sound_filter == 2 && g_ext_ok[n]) {  // ext[idx + 1 .. idx + 8] = buf[idx - 2 .. idx + 5]
+            const float* w = kSinc8.w[frac >> 4];
+            float s = 0;
+            for (int k = 0; k < 8; k++) s += w[k] * g_ext[n][idx + 1 + k];
+            sample = (int32_t)std::lround(s);
+        } else {
+            sample = cubic(v.buf[idx], v.buf[idx + 1], v.buf[idx + 2], v.buf[idx + 3], frac);
+        }
         sample = std::clamp(sample, -32768, 32767);
         if (non & (1u << n)) sample = (int16_t)g_noise_level;
         run_adsr(v, n);
@@ -330,6 +439,7 @@ void mix_sample(int16_t& out_l, int16_t& out_r) {
                 v.addr = (v.addr + 16) & (SPU_RAM - 1);
             }
             decode_block(v);
+            ext_update(n, false);
         }
     }
 
@@ -359,13 +469,21 @@ void mix_sample(int16_t& out_l, int16_t& out_r) {
         if (cnt & 4) { rev_l += cl; rev_r += cr; }
     }
 
-    // reverb runs at 22.05 kHz; its output is held for two samples
-    if (!g_rev_odd) reverb_step(sat16(rev_l), sat16(rev_r));
-    g_rev_odd = !g_rev_odd;
-    if (cnt & 0x80) {
-        l += g_rev_out[0];
-        r += g_rev_out[1];
+    // Reverb runs at 22.05 kHz: between its steps the output is interpolated (cubic, a step and a
+    // half behind) instead of each one held for two samples, which left a grainy edge on the tails.
+    if (!g_rev_odd) {
+        reverb_step(sat16(rev_l), sat16(rev_r));
+        std::memmove(g_rev_hist[0], g_rev_hist[1], 3 * sizeof g_rev_hist[0]);
+        g_rev_hist[3][0] = g_rev_out[0], g_rev_hist[3][1] = g_rev_out[1];
     }
+    if (cnt & 0x80) {
+        for (int ch = 0; ch < 2; ch++) {
+            const int32_t v = g_rev_odd ? g_rev_hist[2][ch]
+                                        : cubic(g_rev_hist[0][ch], g_rev_hist[1][ch], g_rev_hist[2][ch], g_rev_hist[3][ch], 2048);
+            (ch ? r : l) += v;
+        }
+    }
+    g_rev_odd = !g_rev_odd;
 
     int32_t ml = g_main_vol[0].tick(reg(0x180)), mr = g_main_vol[1].tick(reg(0x182));
     if (!(cnt & 0x4000)) { l = 0; r = 0; }  // muted
@@ -481,21 +599,27 @@ uint32_t spu_dma_read() {
 }
 
 namespace {
-void resample_into(std::deque<int16_t>& fifo, double& phase, int16_t prev[2], const int16_t* stereo, int frames,
-                   int rate) {
+// To 44.1 kHz with a 16-point windowed sinc (speech and music at 37.8 / 18.9 kHz come out clean,
+// without the harsh top a straight line between samples gave), 8 input frames behind.
+void resample_into(std::deque<int16_t>& fifo, double& phase, int16_t prev[2], int16_t hist[16][2], const int16_t* stereo,
+                   int frames, int rate) {
     catch_up();
-    // linear resample to 44.1 kHz
     double step = (double)rate / 44100.0;
     for (int i = 0; i < frames; i++) {
-        int16_t cur[2] = {stereo[i * 2], stereo[i * 2 + 1]};
-        while (phase < 1.0) {
-            for (int ch = 0; ch < 2; ch++)
-                fifo.push_back((int16_t)(prev[ch] + (cur[ch] - prev[ch]) * phase));
+        std::memmove(hist[0], hist[1], 15 * sizeof hist[0]);
+        hist[15][0] = stereo[i * 2], hist[15][1] = stereo[i * 2 + 1];
+        while (phase < 1.0) {  // between hist[7] and hist[8]
+            const float* w = kSinc16.w[std::min(255, (int)(phase * 256.0))];
+            for (int ch = 0; ch < 2; ch++) {
+                float s = 0;
+                for (int k = 0; k < 16; k++) s += w[k] * hist[k][ch];
+                fifo.push_back(sat16((int32_t)std::lround(s)));
+            }
             phase += step;
         }
         phase -= 1.0;
-        prev[0] = cur[0];
-        prev[1] = cur[1];
+        prev[0] = hist[15][0];
+        prev[1] = hist[15][1];
     }
     // keep latency bounded if the game streams faster than it plays
     const size_t max_samples = 44100 * 2;
@@ -504,10 +628,10 @@ void resample_into(std::deque<int16_t>& fifo, double& phase, int16_t prev[2], co
 }  // namespace
 
 void spu_push_cd_audio(const int16_t* stereo, int frames, int rate) {
-    resample_into(g_cd_fifo, g_cd_phase, g_cd_prev, stereo, frames, rate);
+    resample_into(g_cd_fifo, g_cd_phase, g_cd_prev, g_cd_hist, stereo, frames, rate);
 }
 void spu_push_side_audio(const int16_t* stereo, int frames, int rate) {
-    resample_into(g_side_fifo, g_side_phase, g_side_prev, stereo, frames, rate);
+    resample_into(g_side_fifo, g_side_phase, g_side_prev, g_side_hist, stereo, frames, rate);
 }
 
 size_t spu_cd_queued() { return g_cd_fifo.size() / 2; }
@@ -539,5 +663,8 @@ void spu_state(StateIO& s) {
     s.raw(g_cd_prev, sizeof g_cd_prev);
     s(g_last_cycles);
     s(g_cycle_accum);
-    if (s.loading()) g_out.clear(), g_side_fifo.clear();
+    if (s.loading()) {
+        g_out.clear(), g_side_fifo.clear();
+        std::fill(std::begin(g_ext_ok), std::end(g_ext_ok), false);  // (Sharp: cubic until each voice's next key on)
+    }
 }
