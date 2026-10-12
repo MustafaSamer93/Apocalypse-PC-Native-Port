@@ -191,9 +191,9 @@ void mdec_dma_in(uint32_t word);
 uint32_t mdec_dma_out();
 bool mdec_out_ready();
 
-// The controller port (hw.cpp): the last completed reading of the pad on port 1, its ID and data
-// bytes (buttons, then the sticks in analog mode); false: none yet.
-bool pad_last_reading(uint8_t* id, uint8_t* data, int* n);
+// The controller port (hw.cpp): the pad on port 1 read now, as a reading of it would come back: its
+// ID and data bytes (buttons, then the sticks in analog mode); false: none (unplugged, config mode).
+bool pad_read_now(uint8_t* id, uint8_t* data, int* n);
 
 // ---------------------------------------------------------------- core (core.cpp)
 
