@@ -1,8 +1,8 @@
 # Repocalypse
 
-**Apocalypse** (PlayStation, 1998), rebuilt as a native PC game for Windows, Linux and Steam Deck.
+**Apocalypse** (PlayStation, 1998), rebuilt as a native PC game for Windows and Linux.
 
-Not an emulator. The game's original code was translated into native code ahead of time, so it
+The game's original code was translated into native code ahead of time, so it
 runs at modern resolutions, frame rates and aspect ratios while playing exactly like the
 original.
 
