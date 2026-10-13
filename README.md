@@ -56,6 +56,12 @@ Game Mode.
 | `assets/replacements/textures` | HD textures and full-screen pictures |
 | `assets/replacements/fmvs` | HD movies (`INTRO.mp4`, `SEWER.mkv`, ...) that play instead of the disc's |
 
+**HD texture pack**: download it from either mirror and unzip it into `assets/replacements/textures`.
+Turn it on or off in Recomp Enhancements -> Performance.
+
+- [MEGA](https://mega.nz/file/yfggBBoY#ijh44u6oTl00ymCoodslxWjnGDUJ5mETg_D7iKRzigM)
+- [Google Drive](https://drive.google.com/file/d/13z80YW9m7M75-uJTianhRG1lQWiB364R/view?usp=sharing)
+
 ## Controls
 
 | Action | Keyboard and mouse | Controller |
