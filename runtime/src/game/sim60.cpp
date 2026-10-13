@@ -82,6 +82,10 @@ void sim60_note_file(const std::string& file) {
         g_sim60_level = f.substr(0, t);
         g_sim60_demo = false;
     }
+    // back at the title (quit, end of a demo): no level any more, the front end runs as at boot
+    // (a level's 60 Hz left on put in-between images over the title, which keeps its picture
+    // from one upload: they showed PRESS START on black)
+    if (f == "title.bmr") g_sim60_level.clear(), g_sim60_demo = false;
     if (f.find(".dem") != std::string::npos) g_sim60_demo = true;
     sim60_apply();
 }
