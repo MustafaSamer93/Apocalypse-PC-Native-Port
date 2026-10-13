@@ -1,4 +1,4 @@
-// The settings screen (Select + Start held): states, chapters, graphics, controls and the Recomp
+// The settings screen (Select + Start held): states, chapters, graphics and the Recomp
 // Enhancements page, drawn over the paused game.
 #include <algorithm>
 #include <cmath>
@@ -100,111 +100,98 @@ void pad_keys(uint16_t& prev, std::vector<SDL_Scancode>& keys, bool shoulders) {
     push(B_CIRCLE, SDL_SCANCODE_ESCAPE);
 }
 
-// ================================================================ button setup
+// ================================================================ the controls screen
 
-// Snapshot of a joystick's inputs, used to detect "the next thing the user pressed".
-struct JoySnapshot {
-    std::vector<bool> buttons;
-    std::vector<Uint8> hats;
-    std::vector<Sint16> axes;
+// Its look: the game's colours (dark panel, orange), in the overlay's 640x480 units.
+struct Rgb {
+    Uint8 r, g, b, a = 255;
 };
-
-JoySnapshot snapshot(SDL_Joystick* j) {
-    JoySnapshot s;
-    for (int i = 0; i < SDL_GetNumJoystickButtons(j); i++) s.buttons.push_back(SDL_GetJoystickButton(j, i));
-    for (int i = 0; i < SDL_GetNumJoystickHats(j); i++) s.hats.push_back(SDL_GetJoystickHat(j, i));
-    for (int i = 0; i < SDL_GetNumJoystickAxes(j); i++) s.axes.push_back(SDL_GetJoystickAxis(j, i));
-    return s;
+constexpr Rgb kInk{243, 227, 204}, kDim{168, 134, 106}, kAccent{200, 80, 30}, kGlow{255, 138, 60}, kTitle{255, 170, 90},
+              kPanel{18, 13, 10, 240}, kRowSel{48, 28, 16}, kCap{30, 21, 16}, kCapEdge{107, 74, 48}, kNone{122, 96, 80};
+void set(SDL_Renderer* r, Rgb c) { SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a); }
+void fill(SDL_Renderer* r, float x, float y, float w, float h, Rgb c) {
+    set(r, c);
+    SDL_FRect f{x, y, w, h};
+    SDL_RenderFillRect(r, &f);
+}
+void frame(SDL_Renderer* r, float x, float y, float w, float h, Rgb c) {
+    set(r, c);
+    SDL_FRect f{x, y, w, h};
+    SDL_RenderRect(r, &f);
+}
+void text(SDL_Renderer* r, float x, float y, const std::string& s, float size, Rgb c) {
+    set(r, c);
+    ui_text(r, x, y, s.c_str(), size);
 }
 
-// Returns true and fills `out` when something changed from `base` to a new press.
-bool detect_press(SDL_Joystick* j, const JoySnapshot& base, Bind* out) {
-    for (int i = 0; i < (int)base.buttons.size(); i++)
-        if (!base.buttons[i] && SDL_GetJoystickButton(j, i)) { *out = {Bind::Button, (uint8_t)i, 0}; return true; }
-    for (int i = 0; i < (int)base.hats.size(); i++) {
-        Uint8 h = SDL_GetJoystickHat(j, i);
-        for (Uint8 dir : {SDL_HAT_UP, SDL_HAT_DOWN, SDL_HAT_LEFT, SDL_HAT_RIGHT})
-            if ((h & dir) && !(base.hats[i] & dir)) { *out = {Bind::Hat, (uint8_t)i, (int8_t)dir}; return true; }
+// The actions in groups, as the screen lists them.
+struct Group {
+    const char* name;
+    int first, count;
+};
+constexpr Group kActionGroups[] = {{"MOVEMENT", A_UP, 4}, {"COMBAT", A_AIM, 9}, {"MENU", A_PAUSE, 2}};
+
+void draw_controls(int mode, int sel, int slot, bool waiting, const std::string& status) {
+    SDL_Renderer* r = present_overlay_begin();
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    fill(r, 0, 0, 640, 480, {0, 0, 0, 110});
+    constexpr float x0 = 70, y0 = 8, w = 500, h = 464, pad = 18;
+    fill(r, x0, y0, w, h, kPanel);
+    frame(r, x0, y0, w, h, kAccent);
+    text(r, x0 + pad, y0 + 10, "CONTROLS", 22, kTitle);
+
+    // the two devices as tabs: the one picked is the one played with
+    float tx = x0 + pad;
+    const float ty = y0 + 42;
+    for (int m = 0; m < M_COUNT; m++) {
+        const char* label = m == M_KEYBOARD ? "Keyboard and mouse" : "Controller";
+        const float tw = ui_text_width(r, label, 14) + 24;
+        if (m == mode) fill(r, tx, ty, tw, 22, kAccent);
+        else frame(r, tx, ty, tw, 22, kCapEdge);
+        text(r, tx + 12, ty + 4, label, 14, m == mode ? Rgb{255, 255, 255} : kDim);
+        tx += tw + 8;
     }
-    for (int i = 0; i < (int)base.axes.size(); i++) {
-        int v = SDL_GetJoystickAxis(j, i);
-        if (std::abs(v - base.axes[i]) > 20000 && std::abs(v) > 16000) {
-            *out = {Bind::Axis, (uint8_t)i, (int8_t)(v > 0 ? 1 : -1)};
-            return true;
-        }
-    }
-    return false;
-}
+    if (mode == M_CONTROLLER && g_devices.empty()) text(r, tx + 6, ty + 5, "none connected", 12, kNone);
+    else if (mode == M_CONTROLLER) text(r, tx + 6, ty + 5, std::string(device_name(g_devices[0])).substr(0, 24), 12, kDim);
 
-bool any_input_held(SDL_Joystick* j) {
-    for (int i = 0; i < SDL_GetNumJoystickButtons(j); i++)
-        if (SDL_GetJoystickButton(j, i)) return true;
-    for (int i = 0; i < SDL_GetNumJoystickHats(j); i++)
-        if (SDL_GetJoystickHat(j, i) != SDL_HAT_CENTERED) return true;
-    return false;
-}
-
-std::string step_line(int step) {
-    return "Step " + std::to_string(step + 1) + " of " + std::to_string((int)std::size(kRemapOrder));
-}
-
-// Walks the user through pressing each PS1 button on `dev`. Returns false if cancelled.
-bool remap_device(const InputDevice& dev, Layout* out, bool* quit) {
-    SDL_Joystick* j = device_joystick(dev);
-    Layout lay;
-    for (int step = 0; step < (int)std::size(kRemapOrder); step++) {
-        // wait until everything is released so one press is not taken twice
-        while (any_input_held(j)) {
-            std::vector<SDL_Scancode> keys;
-            if (!pump_menu_events(keys)) { *quit = true; return false; }
-            SDL_Delay(10);
-        }
-        const JoySnapshot base = snapshot(j);
-        for (;;) {
-            std::vector<SDL_Scancode> keys;
-            if (!pump_menu_events(keys)) { *quit = true; return false; }
-            bool skip = false;
-            for (auto k : keys) {
-                if (k == SDL_SCANCODE_ESCAPE) return false;
-                if (k == SDL_SCANCODE_BACKSPACE || k == SDL_SCANCODE_DELETE) skip = true;
+    const float cx[3] = {x0 + pad, x0 + 220, x0 + 360};
+    float y = ty + 34;
+    text(r, cx[0] + 8, y, "Action", 12, kDim);
+    text(r, cx[1], y, "Input 1", 12, kDim);
+    text(r, cx[2], y, "Input 2", 12, kDim);
+    y += 16;
+    for (const Group& g : kActionGroups) {
+        y += 2;
+        text(r, cx[0], y, g.name, 11, kDim);
+        y += 13;
+        for (int a = g.first; a < g.first + g.count; a++) {
+            const bool on = a == sel;
+            if (on) fill(r, x0 + pad - 6, y - 1, w - 2 * pad + 12, 17, kRowSel);
+            text(r, cx[0] + 8, y, action_label(a), 13, kInk);
+            if (*action_shoulder(a))
+                text(r, cx[0] + 14 + ui_text_width(r, action_label(a), 13), y + 2, action_shoulder(a), 10, kDim);
+            for (int s = 0; s < kSlots; s++) {
+                const Input& in = g_binds[mode][a][s];
+                const bool hl = on && s == slot;
+                std::string label = in.kind == Input::None ? "none" : input_name(in);
+                if (hl && waiting) label = mode == M_KEYBOARD ? "Press a key..." : a == A_AIM ? "Push a stick..." : "Press a button...";
+                const float bw = std::max(30.0f, ui_text_width(r, label.c_str(), 12) + 16);
+                fill(r, cx[1 + s], y - 1, bw, 15, hl ? Rgb{58, 32, 16} : kCap);
+                frame(r, cx[1 + s], y - 1, bw, 15, hl ? kGlow : in.kind == Input::None ? Rgb{70, 50, 36} : kCapEdge);
+                text(r, cx[1 + s] + 8, y + 0.5f, label, 12, hl && waiting ? kTitle : in.kind == Input::None ? kNone : kInk);
             }
-            if (skip) break;
-            Bind b;
-            if (detect_press(j, base, &b)) {
-                lay.bind[bit_index(kRemapOrder[step].bit)] = b;
-                break;
-            }
-            draw_panel({"CONTROLLER SETUP", std::string(device_name(dev)).substr(0, 36), "", step_line(step), "",
-                        "Press the button for:", "", std::string("   ") + kRemapOrder[step].name, "", "",
-                        "Backspace: skip this button", "Esc: cancel"},
-                       -1);
-            SDL_Delay(10);
+            y += 17;
         }
     }
-    *out = lay;
-    return true;
-}
-
-// Keyboard version of remap_device: the next key pressed is taken for each button.
-// Delete skips a button (keeps it unbound), Esc cancels.
-bool remap_keyboard(SDL_Scancode* out, bool* quit) {
-    SDL_Scancode keys_out[16] = {};
-    for (int step = 0; step < (int)std::size(kRemapOrder);) {
-        std::vector<SDL_Scancode> keys;
-        if (!pump_menu_events(keys)) { *quit = true; return false; }
-        if (!keys.empty()) {
-            if (keys[0] == SDL_SCANCODE_ESCAPE) return false;
-            if (keys[0] != SDL_SCANCODE_DELETE) keys_out[bit_index(kRemapOrder[step].bit)] = keys[0];
-            step++;
-            continue;
-        }
-        draw_panel({"KEYBOARD SETUP", "", step_line(step), "", "Press the key for:", "",
-                    std::string("   ") + kRemapOrder[step].name, "", "", "Delete: leave unbound", "Esc: cancel"},
-                   -1);
-        SDL_Delay(10);
-    }
-    std::memcpy(out, keys_out, sizeof keys_out);
-    return true;
+    const float fy = y0 + h - 40;
+    fill(r, x0 + pad, fy, w - 2 * pad, 1, {58, 42, 30});
+    if (!status.empty()) text(r, x0 + pad, fy - 18, status, 12, kTitle);
+    const bool pad_nav = input_mode() == M_CONTROLLER;
+    text(r, x0 + pad, fy + 6, pad_nav ? "D-pad: move      Cross / A: change      Square / X: clear" : "Arrows: move      Enter: change      Delete: clear", 12, kDim);
+    text(r, x0 + pad, fy + 20, pad_nav ? "L1 / R1: device      Triangle / Y: defaults      Circle / B: back" : "Tab: device      R: defaults      Esc: back", 12, kDim);
+    present_redraw(present_options());
+    present_overlay_end();
+    present_swap();
 }
 
 // ================================================================ chapters
@@ -265,12 +252,12 @@ bool pick_chapter(const std::vector<std::string>& chapters, int* chapter, bool* 
 
 enum Row {
     R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
-    R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK,
+    R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_BACK,
     // the Enhancements page: rows of enhancement settings (enh_of)
     R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK,
 };
 const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT,
-                                    R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_DEVICE, R_REMAP, R_RESET, R_BACK};
+                                    R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_BACK};
 const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK};
 
 // The enhancement setting a row shows (-1: none).
@@ -297,6 +284,98 @@ struct MenuOpen {  // (core.cpp watchdog: the game stops on purpose while a menu
 
 }  // namespace
 
+// The controls screen: up/down an action, left/right its first or second input, Enter (Cross) sets
+// it from the next input pressed (Esc cancels, Delete clears), Tab (L1/R1) switches between keyboard
+// and mouse and controller (the one played with), R (Triangle) restores the defaults.
+void run_controls_menu() {
+    MenuOpen open_flag;
+    if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
+    int sel = A_UP, slot = 0;
+    bool waiting = false, quit = false;
+    std::string status;
+    uint16_t prev = host_pad(0).buttons;
+    for (bool open = true; open && !quit;) {
+        const int mode = g_input_mode >= 0 ? g_input_mode : input_mode();
+        std::vector<SDL_Scancode> keys;
+        mouse_autohide(nullptr);
+        for (SDL_Event e; SDL_PollEvent(&e);) {
+            mouse_autohide(&e);
+            device_event(e);
+            if (e.type == SDL_EVENT_QUIT) { quit = true; break; }
+            if (!waiting) {
+                if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) keys.push_back(e.key.scancode);
+                continue;
+            }
+            if (e.type == SDL_EVENT_KEY_DOWN && (e.key.scancode == SDL_SCANCODE_ESCAPE || e.key.scancode == SDL_SCANCODE_DELETE)) {
+                if (e.key.scancode == SDL_SCANCODE_DELETE) g_binds[mode][sel][slot] = {}, save_settings();
+                waiting = false;
+                status = "";
+                continue;
+            }
+            Input in;
+            if (!input_capture(mode, e, &in)) continue;
+            if (sel == A_AIM && mode == M_CONTROLLER) {  // aiming on a controller is a stick
+                if (in.kind != Input::Axis || in.code > SDL_GAMEPAD_AXIS_RIGHTY) continue;
+                in = {Input::Stick, (int16_t)(in.code >= SDL_GAMEPAD_AXIS_RIGHTX ? 1 : 0), 0};
+            }
+            status = std::string(action_label(sel)) + ": " + input_name(in);
+            for (int a = 0; a < A_COUNT; a++)  // an input does one thing: taken from any other action
+                for (int s = 0; s < kSlots; s++)
+                    if (g_binds[mode][a][s] == in && !(a == sel && s == slot)) {
+                        g_binds[mode][a][s] = {};
+                        status += std::string("  (taken from ") + action_label(a) + ")";
+                    }
+            g_binds[mode][sel][slot] = in;
+            save_settings();
+            waiting = false;
+        }
+        // a controller drives the screen too (its buttons through the bindings: d-pad, Cross, Circle...)
+        const uint16_t pad = host_pad(0).buttons, pressed = (uint16_t)(prev & ~pad);
+        prev = pad;
+        if (!waiting && input_mode() == M_CONTROLLER) {
+            auto push = [&](uint16_t bit, SDL_Scancode k) { if (pressed & bit) keys.push_back(k); };
+            push(B_UP, SDL_SCANCODE_UP), push(B_DOWN, SDL_SCANCODE_DOWN), push(B_LEFT, SDL_SCANCODE_LEFT),
+                push(B_RIGHT, SDL_SCANCODE_RIGHT), push(B_CROSS, SDL_SCANCODE_RETURN), push(B_CIRCLE, SDL_SCANCODE_ESCAPE),
+                push(B_SQUARE, SDL_SCANCODE_DELETE), push(B_L1 | B_R1, SDL_SCANCODE_TAB), push(B_TRIANGLE, SDL_SCANCODE_R);
+        }
+        for (SDL_Scancode k : keys) {
+            switch (k) {
+                case SDL_SCANCODE_ESCAPE: open = false; break;
+                case SDL_SCANCODE_UP: sel = (sel + A_COUNT - 1) % A_COUNT; break;
+                case SDL_SCANCODE_DOWN: sel = (sel + 1) % A_COUNT; break;
+                case SDL_SCANCODE_LEFT:
+                case SDL_SCANCODE_RIGHT: slot ^= 1; break;
+                case SDL_SCANCODE_RETURN:
+                case SDL_SCANCODE_KP_ENTER: waiting = true, status = ""; break;
+                case SDL_SCANCODE_DELETE:
+                case SDL_SCANCODE_BACKSPACE:
+                    g_binds[mode][sel][slot] = {};
+                    save_settings();
+                    status = "Cleared.";
+                    break;
+                case SDL_SCANCODE_TAB:
+                    g_input_mode = mode == M_KEYBOARD ? M_CONTROLLER : M_KEYBOARD;
+                    save_settings();
+                    status = "";
+                    break;
+                case SDL_SCANCODE_R:
+                    binds_default(mode);
+                    save_settings();
+                    status = "Defaults restored.";
+                    break;
+                default: break;
+            }
+            if (!open || waiting) break;
+        }
+        draw_controls(g_input_mode >= 0 ? g_input_mode : input_mode(), sel, slot, waiting, status);
+        SDL_Delay(15);
+    }
+    if (quit) g_quit = true;
+    input_mute();  // (the key or button that closed it is still down)
+    if (g_audio) SDL_ResumeAudioStreamDevice(g_audio);
+    g_next_frame_ns = SDL_GetTicksNS();
+}
+
 void run_settings_menu() {
     MenuOpen open_flag;
     if (g_audio) SDL_PauseAudioStreamDevice(g_audio);
@@ -304,10 +383,6 @@ void run_settings_menu() {
     int& chapter = g_chapter_sel;
     const std::vector<std::string> chapters = state_chapter_names();
     if (chapter >= (int)chapters.size()) chapter = 0;
-    size_t dev_index = 0;  // the Controls row: 0 = all, 1 = keyboard & mouse, 2.. = controllers
-    if (g_input == "keyboard") dev_index = 1;
-    for (size_t i = 0; i < g_devices.size(); i++)
-        if (!g_input.empty() && device_guid(g_devices[i]) == g_input) dev_index = 2 + i;
     int sel = 0;
     std::string status;
     uint16_t prev_pad = host_pad(0).buttons;  // buttons held as the menu opens (Select + Start) are no presses
@@ -318,9 +393,6 @@ void run_settings_menu() {
         if (!pump_menu_events(keys)) { quit = true; break; }
         pad_keys(prev_pad, keys, false);
 
-        const size_t entries = 2 + g_devices.size();
-        if (dev_index >= entries) dev_index = 0;
-        const bool is_all = dev_index == 0, is_keyboard = dev_index == 1;
         bool gfx_changed = false;
         auto open_page = [&](bool enh) {  // back to the main page lands on "Enhancements"
             sel = enh ? 0 : (int)(std::find(kMainRows.begin(), kMainRows.end(), R_ENHANCE) - kMainRows.begin());
@@ -380,11 +452,6 @@ void run_settings_menu() {
                     case R_CHAPTER:
                         if (dir && !chapters.empty()) chapter = (chapter + step + (int)chapters.size()) % (int)chapters.size();
                         break;
-                    case R_DEVICE:
-                        dev_index = (dev_index + entries + step) % entries;
-                        g_input = dev_index == 0 ? "" : dev_index == 1 ? "keyboard" : device_guid(g_devices[dev_index - 2]);
-                        save_settings();
-                        break;
                     case R_SAVE:
                     case R_LOAD:
                         if (dir) g_slot = (g_slot - 1 + step + kStateSlots) % kStateSlots + 1;
@@ -416,29 +483,6 @@ void run_settings_menu() {
                     open = false;
                 }
                 prev_pad = host_pad(0).buttons;
-            } else if ((row == R_REMAP || row == R_RESET) && is_all) {
-                status = "Pick the keyboard or a controller first.";
-            } else if (row == R_REMAP) {
-                bool done;
-                if (is_keyboard) {
-                    SDL_Scancode keys_new[16];
-                    if ((done = remap_keyboard(keys_new, &quit))) {
-                        std::memcpy(g_keys, keys_new, sizeof g_keys);
-                        g_key_custom = true;
-                    }
-                } else {
-                    const InputDevice dev = g_devices[dev_index - 2];
-                    Layout lay;
-                    if ((done = remap_device(dev, &lay, &quit))) g_layouts[device_guid(dev)] = lay;
-                }
-                if (done) save_settings(), status = "Saved. This layout is used every time.";
-                else if (!quit) status = "Cancelled, layout unchanged.";
-                prev_pad = host_pad(0).buttons;
-            } else if (row == R_RESET) {
-                if (is_keyboard) g_key_custom = false;
-                else g_layouts.erase(device_guid(g_devices[dev_index - 2]));
-                save_settings();
-                status = "Restored the default layout.";
             }
         }
         if (gfx_changed) {
@@ -452,10 +496,6 @@ void run_settings_menu() {
                                            : std::to_string(g_gfx.scale) + "x  (" + std::to_string(240 * g_gfx.scale) + " lines)";
         if (g_gfx.scale > 0 && g_active_scale > g_gfx.scale)
             res = std::to_string(g_gfx.scale) + "x, SSAA: " + std::to_string(g_active_scale) + "x";
-        const std::string dev_line = is_all        ? std::string("All (keyboard + controllers)")
-                                     : is_keyboard ? std::string("Keyboard & mouse")
-                                                   : std::string(device_name(g_devices[dev_index - 2])).substr(0, 22);
-        const bool custom = is_all ? false : is_keyboard ? g_key_custom : g_layouts.count(device_guid(g_devices[dev_index - 2])) > 0;
         auto choice = [](const char* label, const std::string& value) { return std::string(label) + "\t< " + value + " >"; };
         const std::string slot_line = std::to_string(g_slot) + ": " + state_slot_label(g_slot);
         auto line = [&](Row r) -> std::string {
@@ -474,9 +514,6 @@ void run_settings_menu() {
                 case R_DUMP_TEX: return choice("Dump textures", g_tex_dump ? "On (assets/dumps/textures)" : "Off");
                 case R_TEX_REPLACE: return choice("HD replacements (textures, movies)", g_tex_replace ? "[x] On" : "[ ] Off (original)");
                 case R_ENHANCE: return "Recomp Enhancements\t>";
-                case R_DEVICE: return choice("Controls", dev_line);
-                case R_REMAP: return std::string("Set up buttons\t") + (is_all ? "" : custom ? "(custom)" : "(default)");
-                case R_RESET: return "Reset buttons to default";
                 case R_BACK: return "Back to game";
                 case R_ENH_BACK: return "Back";
                 default: return "";

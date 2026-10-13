@@ -39,6 +39,10 @@ struct DrawState {
     uint32_t e1 = 0;
 };
 DrawState S;
+// An extension of ours (game_menu.cpp, the menu flames): GP0 E6 bit 2 draws only on pixels whose mask bit
+// is set (the reverse of bit 1). Not in DrawState, so saved states keep their layout; the sequence that
+// sets it clears it again.
+bool g_mask_inside = false;
 
 struct DisplayState {
     bool enabled = false;
@@ -171,6 +175,7 @@ inline void plot(int x, int y, uint16_t color, bool semi) {
     if (x < S.area_x1 || x > S.area_x2 || y < S.area_y1 || y > S.area_y2) return;
     uint16_t& dst = vram(x, y);
     if (S.check_mask && (dst & 0x8000)) return;
+    if (g_mask_inside && !(dst & 0x8000)) return;
     if (semi) color = blend(dst, color, S.semi_mode);
     dst = color | (S.set_mask ? 0x8000 : 0);
 }
@@ -306,6 +311,7 @@ HwState hw_state() {
     s.area_x1 = S.area_x1; s.area_y1 = S.area_y1; s.area_x2 = S.area_x2; s.area_y2 = S.area_y2;
     s.tw_mask_x = S.tw_mask_x; s.tw_mask_y = S.tw_mask_y; s.tw_off_x = S.tw_off_x; s.tw_off_y = S.tw_off_y;
     s.set_mask = S.set_mask; s.check_mask = S.check_mask;
+    s.mask_inside = g_mask_inside;
     return s;
 }
 
@@ -893,7 +899,7 @@ void execute(const std::vector<uint32_t>& w) {
             S.off_x = (int32_t)(w[0] << 21) >> 21;
             S.off_y = (int32_t)((w[0] >> 11) << 21) >> 21;
             return;
-        case 0xE6: S.set_mask = w[0] & 1; S.check_mask = (w[0] >> 1) & 1; return;
+        case 0xE6: S.set_mask = w[0] & 1; S.check_mask = (w[0] >> 1) & 1; g_mask_inside = (w[0] >> 2) & 1; return;
         default:
             LOG(Gpu, "unhandled GP0 %08X", w[0]);
             return;
@@ -1140,6 +1146,7 @@ extern "C" void psx_hook_2d(R3000* c, int stage) {
 // (its blinking "Press start", str#2 at 800A0818, was drawn this recently) and while one of the
 // game's menus is drawn (game_menu.cpp: front end, Start's pause menu); not in play or movies.
 uint64_t g_press_start_seen = 0, g_menu_drawn = 0;
+std::vector<TextCall>* g_text_calls = nullptr;
 bool gpu_title_screen() {
     const uint64_t f = host_frame_count();
     // (both are drawn every frame - "Press start" blinks by colour - so a few frames of grace suffice)
@@ -1196,6 +1203,7 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
     }
     const float tilt = which == 0 ? subtitle_tilt(c->r[6]) : 0.0f;  // (a2 = the text)
     const float tx = (float)(int32_t)c->r[4], ty = (float)(int32_t)c->r[5];
+    const uint32_t text = c->r[6];
     inside[which] = true;
     g_flames.clear();
     call_indirect(c, kFn[which]);
@@ -1203,6 +1211,7 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
     const uint32_t to = MEM_R32(c, kNextPacket) & 0x1FFFFC;
     if (which == 0) flames_behind(c, from, to);
     if (to > from && g_text_packets.size() < 256) g_text_packets.push_back({from, to});
+    if (which == 0 && g_text_calls && g_text_calls->size() < 32) g_text_calls->push_back({text, from, to});
     if (to > from && tilt != 0.0f && g_tilts.size() < 16) g_tilts.push_back({from, to, tx, ty, tilt});
     c->r[31] = ra;
     c->r[29] = sp;

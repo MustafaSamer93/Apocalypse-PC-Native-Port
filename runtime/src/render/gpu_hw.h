@@ -38,6 +38,7 @@ struct HwState {
     int area_x1, area_y1, area_x2, area_y2;  // drawing area (inclusive)
     int tw_mask_x, tw_mask_y, tw_off_x, tw_off_y;
     bool set_mask, check_mask;
+    bool mask_inside;  // (gpu.cpp g_mask_inside)
 };
 
 bool hw_init(int scale);            // needs a current GL context

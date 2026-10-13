@@ -59,9 +59,9 @@ void rec_touch(int x0, int y0, int x1, int y1) {
 // state ends the batch.
 void begin_prim(const HwPrim& p, const HwState& s) {
     static bool warned_mask = false;
-    if (s.check_mask && !warned_mask) {
+    if (s.check_mask && p.semi && (p.semi_mode == 0 || p.semi_mode == 3) && !warned_mask) {
         warned_mask = true;
-        log_msg(LogCat::Gpu, "hardware renderer: mask-bit test is not emulated");
+        log_msg(LogCat::Gpu, "hardware renderer: mask-bit test is emulated for opaque, B + F and B - F drawing only");
     }
     if (p.textured && g_dirty) {
         const int pw = p.depth == 0 ? 64 : p.depth == 1 ? 128 : 256;
@@ -77,6 +77,8 @@ void begin_prim(const HwPrim& p, const HwState& s) {
     k.semi = p.semi;
     k.semi_mode = p.semi_mode;
     k.set_mask = s.set_mask;
+    k.check_mask = s.check_mask;
+    k.mask_inside = s.mask_inside;
     k.ztest = p.ztest;
     k.tw[0] = s.tw_mask_x; k.tw[1] = s.tw_mask_y; k.tw[2] = s.tw_off_x; k.tw[3] = s.tw_off_y;
     k.sc[0] = s.area_x1; k.sc[1] = s.area_y1; k.sc[2] = s.area_x2; k.sc[3] = s.area_y2;

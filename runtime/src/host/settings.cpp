@@ -129,25 +129,17 @@ void save_settings() {
     std::fprintf(f, "fullscreen %d\n", g_fullscreen ? 1 : 0);
     std::fprintf(f, "aa %d\n", g_gfx.aa);
     std::fprintf(f, "soundfilter %d\n", g_sound_filter);
+    std::fprintf(f, "menuflames %d\n", g_menu_flames ? 1 : 0);
     std::fprintf(f, "msaa %d\n", g_gfx.msaa);
     std::fprintf(f, "renderer %s\n", g_gfx.vulkan ? "vulkan" : "opengl");
-    if (!g_input.empty()) std::fprintf(f, "input %s\n", g_input.c_str());
-    if (g_key_custom) {
-        std::fprintf(f, "keys");
-        for (int i = 0; i < 16; i++)
-            if (g_keys[i] != SDL_SCANCODE_UNKNOWN) std::fprintf(f, " %d=%d", i, (int)g_keys[i]);
-        std::fprintf(f, "\n");
-    }
-    for (auto& [guid, lay] : g_layouts) {
-        std::fprintf(f, "pad %s", guid.c_str());
-        for (int i = 0; i < 16; i++) {
-            const Bind& b = lay.bind[i];
-            if (b.kind == Bind::Button) std::fprintf(f, " %d=b%d", i, b.index);
-            if (b.kind == Bind::Hat) std::fprintf(f, " %d=h%d:%d", i, b.index, b.value);
-            if (b.kind == Bind::Axis) std::fprintf(f, " %d=a%d%c", i, b.index, b.value > 0 ? '+' : '-');
+    if (g_input_mode >= 0) std::fprintf(f, "controls %s\n", g_input_mode == M_KEYBOARD ? "keyboard" : "controller");
+    for (int m = 0; m < M_COUNT; m++)  // "bind kbm jump=k44,m3": each action's inputs (settings screen -> Set up buttons)
+        for (int a = 0; a < A_COUNT; a++) {
+            std::string list;
+            for (const Input& in : g_binds[m][a])
+                if (in.kind != Input::None) list += (list.empty() ? "" : ",") + input_token(in);
+            std::fprintf(f, "bind %s %s=%s\n", m == M_KEYBOARD ? "kbm" : "pad", action_key(a), list.c_str());
         }
-        std::fprintf(f, "\n");
-    }
     const bool ok = std::fflush(f) == 0 && !std::ferror(f);
 #ifdef _WIN32
     if (ok) _commit(_fileno(f));
@@ -163,13 +155,14 @@ void save_settings() {
 }
 
 void load_settings() {
+    for (int m = 0; m < M_COUNT; m++) binds_default(m);
     FILE* f = std::fopen(settings_file(), "r");
     if (!f) return;
     // "name N" lines for on/off and number settings
     const struct { const char* name; bool* flag; int* value; int lo, hi; } kSimple[] = {
         {"fullscreen", &g_fullscreen}, {"font", &g_smooth_font}, {"texreplace", &g_tex_replace},
         {"fpscounter", &g_fps_counter}, {"subtitles", &g_subtitles}, {"autosave", &g_autosave},
-        {"gamefont", &g_game_font},
+        {"gamefont", &g_game_font}, {"menuflames", &g_menu_flames},
         {"menuzoom", nullptr, &g_menu_zoom, 30, 80}, {"drawdist", nullptr, &g_draw_distance, 100, 400},
         {"aa", nullptr, &g_gfx.aa, 0, 3}, {"soundfilter", nullptr, &g_sound_filter, 0, 2},
     };
@@ -202,40 +195,27 @@ void load_settings() {
             g_gfx.vulkan = std::strcmp(rn, "vulkan") == 0;
             continue;
         }
-        if (char in[64]; std::sscanf(line, "input %63s", in) == 1) {
-            g_input = in;
+        if (char in[16]; std::sscanf(line, "controls %15s", in) == 1) {
+            g_input_mode = std::strcmp(in, "keyboard") == 0 ? M_KEYBOARD : M_CONTROLLER;
             continue;
         }
-        if (std::strncmp(line, "keys", 4) == 0) {
-            g_key_custom = true;
-            const char* p = line + 4;
-            int bit, key;
-            while (std::sscanf(p, " %d=%d%n", &bit, &key, &used) == 2) {
-                if (bit >= 0 && bit < 16) g_keys[bit] = (SDL_Scancode)key;
-                p += used;
+        if (char dev[8], act[16]; std::sscanf(line, "bind %7s %15[^=]=", dev, act) == 2) {
+            const int m = std::strcmp(dev, "kbm") == 0 ? M_KEYBOARD : M_CONTROLLER;
+            for (int a = 0; a < A_COUNT; a++) {
+                if (std::strcmp(act, action_key(a)) != 0) continue;
+                Input* slot = g_binds[m][a];
+                for (int i = 0; i < kSlots; i++) slot[i] = {};
+                const std::string list = std::strchr(line, '=') + 1;
+                int n = 0;
+                for (size_t p = 0; p < list.size() && n < kSlots;) {
+                    size_t e = list.find_first_of(",\r\n", p);
+                    if (e == std::string::npos) e = list.size();
+                    if (Input in; input_from_token(list.substr(p, e - p), &in)) slot[n++] = in;
+                    p = e + 1;
+                }
             }
-            continue;
         }
-        char guid[64];
-        int n = 0;
-        if (std::sscanf(line, "pad %63s%n", guid, &n) != 1) continue;
-        Layout lay;
-        const char* p = line + n;
-        int bit, idx, val;
-        char kind, sign;
-        for (;;) {
-            while (*p == ' ') p++;
-            if (std::sscanf(p, "%d=%c%n", &bit, &kind, &used) != 2 || bit < 0 || bit > 15) break;
-            p += used;
-            Bind b;
-            if (kind == 'b' && std::sscanf(p, "%d%n", &idx, &used) == 1) b = {Bind::Button, (uint8_t)idx, 0};
-            else if (kind == 'h' && std::sscanf(p, "%d:%d%n", &idx, &val, &used) == 2) b = {Bind::Hat, (uint8_t)idx, (int8_t)val};
-            else if (kind == 'a' && std::sscanf(p, "%d%c%n", &idx, &sign, &used) == 2) b = {Bind::Axis, (uint8_t)idx, (int8_t)(sign == '+' ? 1 : -1)};
-            else break;
-            p += used;
-            lay.bind[bit] = b;
-        }
-        g_layouts[guid] = lay;
+        // (older files' "input", "keys" and "pad" lines, PS1-button layouts, are no longer read)
     }
     std::fclose(f);
     // older settings files had 150 / 300 too: the nearest of the three
@@ -253,8 +233,8 @@ const char* enh_name(int id) {
                                   "Font upscaling", "Renderer", "Screen mode", "Display", "Autosave", "One-liners",
                                   "Anti-aliasing", "Infinite health", "Infinite lives", "Unlock all weapons", "Infinite ammo",
                                   "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font type", "Smooth textures", "HD replacements",
-                                  "Sound filter"};
-    static_assert(std::size(names) == E_SOUND_FILTER + 1, "one name per EnhSetting");
+                                  "Sound filter", "Selection highlight"};
+    static_assert(std::size(names) == E_MENU_FLAMES + 1, "one name per EnhSetting");
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -277,6 +257,7 @@ std::string enh_value(int id) {
         case E_TEX_SMOOTH: return g_gfx.texture_filter ? "On" : "Off (original)";
         case E_REPLACE: return g_tex_replace ? "On" : "Off (original)";
         case E_SOUND_FILTER: return g_sound_filter == 0 ? "Original" : g_sound_filter == 2 ? "Sharp" : "Smooth";
+        case E_MENU_FLAMES: return g_menu_flames ? "Remastered" : "Original";
         case E_GAME_FONT: {
             if (texreplace_font_name().empty()) return "Original (no font built in)";
             return g_game_font ? "Remastered" : "Original";
@@ -325,6 +306,7 @@ void enh_change(int id, int dir) {
             texreplace_vram_changed();
             break;
         case E_SOUND_FILTER: g_sound_filter = (g_sound_filter + dir + 3) % 3; break;
+        case E_MENU_FLAMES: g_menu_flames = !g_menu_flames; break;
         case E_GAME_FONT:
             g_game_font = !g_game_font;
             texreplace_font_changed();

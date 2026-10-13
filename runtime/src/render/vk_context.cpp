@@ -523,6 +523,34 @@ VkPipeline make_pipeline(const PipelineDesc& d) {
             ba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
             ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             break;
+        case Blend::MaskOpaque:  // a pixel with its mask bit (alpha) set keeps colour and bit
+            ba.blendEnable = VK_TRUE;
+            ba.srcColorBlendFactor = ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            ba.dstColorBlendFactor = ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_DST_ALPHA;
+            break;
+        case Blend::InsideOpaque:  // (ours) only where the mask bit is set; the bits stay
+            ba.blendEnable = VK_TRUE;
+            ba.srcColorBlendFactor = VK_BLEND_FACTOR_DST_ALPHA;
+            ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            break;
+        case Blend::InsideAdd:  // B + F only where the mask bit is set
+            ba.blendEnable = VK_TRUE;
+            ba.srcColorBlendFactor = VK_BLEND_FACTOR_DST_ALPHA;
+            ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            break;
+        case Blend::MaskAdd:  // B + F where the mask bit is clear; the bits stay
+        case Blend::MaskSubtract:  // B - F likewise
+            ba.blendEnable = VK_TRUE;
+            if (d.blend == Blend::MaskSubtract) ba.colorBlendOp = VK_BLEND_OP_REVERSE_SUBTRACT;
+            ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            break;
     }
     VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cb.attachmentCount = 1;

@@ -68,46 +68,59 @@ std::string msaa_label();
 
 // ---------------------------------------------------------------- input.cpp
 
-// Every connected controller can drive player 1 (Apocalypse is single-player). Devices SDL
-// has a mapping for are opened as gamepads; anything else (e.g. some 8BitDo modes) as a raw
-// joystick with a generic layout.
+// Player 1 is played with the keyboard and mouse or with a controller (Apocalypse is single-player):
+// the settings screen picks which, and each game action can be put on up to two inputs of each.
+// Devices SDL has a mapping for are opened as gamepads; anything else (e.g. some 8BitDo modes) as
+// a raw joystick read through a generic layout, so the same controller bindings work for it.
 struct InputDevice {
     SDL_JoystickID id;
     SDL_Gamepad* pad = nullptr;
     SDL_Joystick* joy = nullptr;
 };
-// A custom button layout (settings screen -> Set up buttons), one per controller model (GUID).
-struct Bind {
-    enum Kind : uint8_t { None, Button, Hat, Axis } kind = None;
-    uint8_t index = 0;
-    int8_t value = 0;  // hat direction mask, or axis direction (+1/-1)
-};
-struct Layout {
-    Bind bind[16];  // indexed by PS1 pad bit number
-};
 extern std::vector<InputDevice> g_devices;
-extern std::map<std::string, Layout> g_layouts;
-extern SDL_Scancode g_keys[16];  // remapped keyboard: one key per PS1 button (bit number)
-extern bool g_key_custom;        // ... in use
-// Player 1's input: "" = keyboard and every controller, "keyboard" = keyboard & mouse only, else
-// one controller's GUID (unplugged: all, so a missing pad never leaves the game without input).
-extern std::string g_input;
 
-struct RemapStep {
-    uint16_t bit;
-    const char* name;
+enum InputMode { M_KEYBOARD, M_CONTROLLER, M_COUNT };
+// The game's actions. Shoulder actions go to whichever shoulder button the game's own controller
+// config gives them; the rest to a fixed PS1 button.
+enum Action : uint8_t {
+    A_UP, A_DOWN, A_LEFT, A_RIGHT, A_AIM, A_FIRE_UP, A_FIRE_DOWN, A_FIRE_LEFT, A_FIRE_RIGHT,
+    A_JUMP, A_CROUCH, A_WEAPON, A_BOMB, A_PAUSE, A_SELECT, A_COUNT
 };
-extern const RemapStep kRemapOrder[14];  // the order the settings screen asks for buttons in
+// One input: a key (SDL scancode), mouse button (1-5), the mouse wheel (either way), a gamepad
+// button (SDL_GamepadButton), a gamepad axis pushed one way (SDL_GamepadAxis, dir +1/-1), or a stick
+// (0 left, 1 right: aiming).
+struct Input {
+    enum Kind : uint8_t { None, Key, Mouse, Wheel, Button, Axis, Stick } kind = None;
+    int16_t code = 0;
+    int8_t dir = 0;
+    bool operator==(const Input& o) const { return kind == o.kind && code == o.code && dir == o.dir; }
+};
+constexpr int kSlots = 2;
+extern Input g_binds[M_COUNT][A_COUNT][kSlots];
+extern int g_input_mode;  // the chosen InputMode, -1 = not chosen (a controller when one is connected)
+
+int input_mode();                       // the mode in use (a chosen controller that is unplugged: keyboard)
+std::string input_name(const Input& i); // "Space", "Mouse right", "RB", "Left stick up"...
+const char* action_label(int a);       // "Jump"
+const char* action_shoulder(int a);    // "R1" for a shoulder action (where the game's config puts it), else ""
+void input_mute();                     // the game sees no input until everything is let go
+void binds_default(int mode);
+std::string input_token(const Input& i);              // settings.ini form
+bool input_from_token(const std::string& t, Input* out);
+const char* action_key(int a);                        // settings.ini name of an action
+void input_event(const SDL_Event& e);  // every event (the mouse wheel)
+// The input of `mode` this event presses (true = *out filled).
+bool input_capture(int mode, const SDL_Event& e, Input* out);
 
 bool device_event(const SDL_Event& e);  // a controller connected or disconnected (true: handled)
-SDL_Joystick* device_joystick(const InputDevice& d);
-std::string device_guid(const InputDevice& d);
 const char* device_name(const InputDevice& d);
-int bit_index(uint16_t bit);
 
 // ---------------------------------------------------------------- settings_menu.cpp
 
 // The settings screen (Select + Start held). Modal: the game is paused while it is open.
 void run_settings_menu();
+// The controls screen (game's Options -> Controls). Modal too.
+void run_controls_menu();
+bool controls_requested();  // asked for (controls_open) since the last call
 
 }  // namespace host

@@ -103,6 +103,12 @@ extern bool g_display_flipped;   // the game set the display start since VBlank
 extern uint64_t g_display_flips; // ... how many times so far
 extern bool g_smooth_font;       // setting: the game's text and button icons with smoothed textures
 extern uint64_t g_menu_drawn;    // the last frame the game drew one of its menus
+// While game_menu.cpp draws a menu, every text the game draws (gpu.cpp, 8001AA28): the text and the
+// packets it made, so a menu knows where each item went (the mouse).
+struct TextCall {
+    uint32_t text, from, to;
+};
+extern std::vector<TextCall>* g_text_calls;
 
 // ---------------------------------------------------------------- GTE (gte.cpp)
 
@@ -144,6 +150,13 @@ struct MotionPrev {
 };
 void motion_frame_begin();       // a level render starts (not a ghost one)
 void motion_camera(R3000* c);    // the level renderer: the frame's camera (its first call counts)
+bool player_screen(float* sx, float* sy);  // the player (chest) on the game's screen, last level frame
+// game_menu.cpp: a packet is about to go to the GPU; a selected menu item's flame: the words to send instead,
+// each with the RAM packet and word it stands for (the GPU places 2D packets by them; word 0: made up)
+struct GpuWord {
+    uint32_t value, packet, word;
+};
+bool menu_flame_words(R3000* c, uint32_t addr, std::vector<GpuWord>& out);
 // gte.cpp: a model part (rotation, translation) begins; a vertex of it was projected exactly
 void motion_segment(const int16_t* rt, const int32_t* tr, uint32_t ra);
 void motion_vertex(int16_t vx, int16_t vy, int16_t vz, float px, float py, float pw, const int16_t* rt, const int32_t* tr,

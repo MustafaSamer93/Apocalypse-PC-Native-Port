@@ -81,7 +81,9 @@ VkShaderModule shader(const uint32_t* code, size_t bytes);
 // Pipelines for dynamic rendering: one colour attachment, dynamic viewport/scissor/blend
 // constants, set 0 = one combined image sampler, push constants for the fragment stage
 // (and vertex stage).
-enum class Blend { None, Half, Add, Subtract, AddQuarter, Alpha };  // PS1 semi modes 0..3, overlay
+// PS1 semi modes 0..3, overlay, the mask-bit test (opaque, B + F, B - F) and its reverse (ours: opaque, B + F;
+// see gpu_gl.cpp set_mask_test)
+enum class Blend { None, Half, Add, Subtract, AddQuarter, Alpha, MaskOpaque, MaskAdd, MaskSubtract, InsideOpaque, InsideAdd };
 enum class Vertices { None, Vram, Position };                       // fullscreen quad / Vtx layout
 struct PipelineDesc {
     VkShaderModule vs, fs;

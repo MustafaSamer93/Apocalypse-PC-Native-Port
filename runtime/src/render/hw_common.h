@@ -37,11 +37,13 @@ struct BatchKey {
     bool semi = false;
     int semi_mode = 0;
     bool set_mask = false;
+    bool check_mask = false;  // (GP0 E6 bit 1) emulated for opaque drawing, B + F and B - F; the halves draw as without it
+    bool mask_inside = false; // (ours, E6 bit 2: only where the mask bit is set) opaque drawing and B + F
     int ztest = 0;    // HwPrim::ztest
     int tw[4] = {};   // texture window mask x, y, offset x, y
     int sc[4] = {};   // scissor x1, y1, x2, y2 (native, inclusive)
     bool operator==(const BatchKey& o) const {
-        return semi == o.semi && (!semi || semi_mode == o.semi_mode) && set_mask == o.set_mask && ztest == o.ztest &&
+        return semi == o.semi && (!semi || semi_mode == o.semi_mode) && set_mask == o.set_mask && check_mask == o.check_mask && mask_inside == o.mask_inside && ztest == o.ztest &&
                std::memcmp(tw, o.tw, sizeof tw) == 0 && std::memcmp(sc, o.sc, sizeof sc) == 0;
     }
 };

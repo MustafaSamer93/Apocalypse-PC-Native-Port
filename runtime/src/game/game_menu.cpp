@@ -5,7 +5,8 @@
 //    settings - performance, cosmetics, cheats (host/settings.cpp enh_*) - drawn and driven as
 //    menus of the game's own.
 //  - Pause menu: "Options" (a list of pages of the game's own options: sound, game, controller
-//    config) and "Exit to desktop"; main menu: "exit to desktop".
+//    config, and "controls": our controls screen, host/settings_menu.cpp) and "Exit to desktop";
+//    main menu: "exit to desktop", and "controls" in Recomp Enhancements.
 //  - Main Menu -> Load Game: "Auto Save" at the top of the memory card saves (savestate.cpp).
 //  - game_message: text shown the way the game shows a pickup ("Auto Saved").
 //
@@ -24,6 +25,7 @@
 #include <iterator>
 #include <ctime>
 #include <string>
+#include <vector>
 
 #include "core/psx.h"
 #include "core/savestate.h"
@@ -31,6 +33,7 @@
 #include "host/host.h"
 
 int g_menu_zoom = 60;
+bool g_menu_flames = true;  // setting (host.h): Remastered
 int psx_opt_menu60 = 0;
 int psx_opt_menu_odd = 0;
 
@@ -51,7 +54,7 @@ constexpr uint32_t kGpRepeat = 0x800FEEBC + 344, kUpdateCount = 0x800FF2F0;
 
 // Our pages: their settings (host/settings.cpp enh_*), in order.
 constexpr int kPerformanceSettings[] = {E_RENDERER, E_SCREEN, E_DISPLAY, E_AA, E_TEX_SMOOTH, E_REPLACE, E_DRAWDIST, E_FPS, E_AUTOSAVE};
-constexpr int kCosmeticSettings[] = {E_SUBTITLES, E_CRT, E_GAME_FONT, E_FONT_SCALE, E_FPS_COUNTER, E_SOUND_FILTER};
+constexpr int kCosmeticSettings[] = {E_SUBTITLES, E_CRT, E_GAME_FONT, E_FONT_SCALE, E_MENU_FLAMES, E_FPS_COUNTER, E_SOUND_FILTER};
 constexpr int kCheatSettings[] = {E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO, E_CHEAT_BOMBS, E_CHEAT_ONEHIT};
 // The game's own options, for the pause menu (the front end has its own pages for them); ids
 // after the enhancement settings. Found in the front end (80011BA0) and 80016014 (options from
@@ -69,7 +72,9 @@ struct Page {
     const int* settings;
     int count;
     Group group;
+    bool main_menu = false;  // also in the main menu's Recomp Enhancements (it has no Options of ours)
 };
+// (no settings: the item opens the controls screen, host/settings_menu.cpp)
 constexpr Page g_pages[] = {
     {"performance", kPerformanceSettings, (int)std::size(kPerformanceSettings), kGroupEnhancements},
     {"cosmetics", kCosmeticSettings, (int)std::size(kCosmeticSettings), kGroupEnhancements},
@@ -77,6 +82,7 @@ constexpr Page g_pages[] = {
     {"sound", kSoundSettings, (int)std::size(kSoundSettings), kGroupOptions},
     {"game", kGameSettings, (int)std::size(kGameSettings), kGroupOptions},
     {"controller config", kPadSettings, (int)std::size(kPadSettings), kGroupOptions},
+    {"controls", nullptr, 0, kGroupOptions, true},
 };
 constexpr int kPages = (int)std::size(g_pages);
 
@@ -181,6 +187,16 @@ uint32_t pad_offset(R3000* c, int k) {
     static const uint32_t digital[4] = {6, 0, 2, 4}, analog[4] = {38, 32, 34, 36};
     return kPadOptions + (MEM_R32(c, kButtonTable + 364) == 0x41 ? digital : analog)[k];
 }
+}  // namespace
+
+// The shoulder button the game's controller config gives action k (0 weapon select, 1 crouch, 2 jump,
+// 3 smart bomb): 1 L2, 2 R2, 4 L1, 8 R1; 0 = not set up yet.
+int game_pad_action(R3000* c, int k) {
+    const uint16_t v = (uint16_t)MEM_R16(c, pad_offset(c, k));
+    return v == 1 || v == 2 || v == 4 || v == 8 ? v : 0;
+}
+
+namespace {
 constexpr uint32_t kSeqSetVol = 0x8008F56C, kGpSeq = 0x800FEEBC + 2032;  // music: (seq, left, right)
 
 int game_opt_get(R3000* c, const GameOptInfo& o) { return o.word ? (int32_t)MEM_R32(c, o.addr) : (int16_t)MEM_R16(c, o.addr); }
@@ -285,10 +301,10 @@ void finish_menu(R3000* c, uint32_t block) {
 }
 
 // The pages of group `g`, in order.
-int group_pages(int g, int* out) {
+int group_pages(int g, int* out, bool main_menu) {
     int n = 0;
     for (int i = 0; i < kPages; i++)
-        if (g_pages[i].group == g) out[n++] = i;
+        if (g_pages[i].group == g || (main_menu && g == kGroupEnhancements && g_pages[i].main_menu)) out[n++] = i;
     return n;
 }
 
@@ -349,7 +365,7 @@ void open_list(R3000* c, Host& h, int g) {
     const uint32_t block = start_menu(c, h, 444);
     if (!block) return;
     int pages[kPages];
-    const int n = group_pages(g, pages);
+    const int n = group_pages(g, pages, &h == &g_mainh);
     for (int k = 0; k < n; k++) game_call(c, kMenuAdd, block, host_text(h, kTextPage + pages[k]));
     game_call(c, kMenuAdd, block, host_text(h, kTextListBack));
     finish_menu(c, block);
@@ -460,6 +476,23 @@ void draw_zoomed(R3000* c, uint32_t menu, int window = 0) {
             MEM_W8(c, item(menu, i) + k, was_drawn && !ours ? drawn_items[i - top][k] : saved[i][k]);
         }
     }
+}
+
+// The selected item's flames, in its letters only. The game draws each letter three times (opaque
+// textured quads, GP0 2C: three packets in a row, the face drawn last) and its flame: a translucent
+// textured quad (2E, the next packet) and a gouraud one (3E, after it) fading up, added onto the screen
+// (texture page 0xA8: back + front), bigger than the letter, so the fire spread round the text. Every
+// colour of the font's palette has the PS1's mask bit, so a letter marks its own pixels, and the flames
+// are drawn only on marked pixels (GP0 E6 bit 2, our extension: gpu.cpp g_mask_inside). When the GPU is
+// about to draw either flame quad (hw.cpp sends the list), it gets instead: the marks in the flames'
+// area cleared (a black quad added on, unmarked: nothing changes but the mark), the letter's edge and
+// shadow, the marks cleared again, its face (marking its pixels), then the flames at kFlamePercent on
+// the face only; the other flame quad and the letter's own packets then draw nothing (length 0).
+constexpr int kFlamePercent = 70;
+uint32_t dim_colour(uint32_t w, int percent) {
+    uint32_t out = w & 0xFF000000u;
+    for (int s = 0; s < 24; s += 8) out |= ((((w >> s) & 0xFF) * (uint32_t)percent / 100) & 0xFF) << s;
+    return out;
 }
 
 }  // namespace
@@ -589,6 +622,43 @@ extern "C" int psx_hook_menu_update(R3000* c) {
     return 1;
 }
 
+// The mouse in a menu (host_menu_mouse): the item under the pointer is selected, a left click picks it
+// (a press of Cross), a right click goes back (Triangle) and the wheel moves up and down. Where each item
+// is, from the letters its text call made (texts: packets of three opaque textured quads a letter, then
+// the selected item's flame quads; the front end fills in packet lengths later, so they are walked by
+// their commands): from its top letter to its bottom one, any x (the items are lines across).
+void menu_mouse(R3000* c, uint32_t menu, const std::vector<TextCall>& texts) {
+    const MenuMouse m = host_menu_mouse();
+    if (m.wheel) host_menu_press(m.wheel < 0 ? 1u << 4 : 1u << 6);  // up / down
+    if (m.back) host_menu_press(1u << 12);                           // triangle
+    if (!m.on || !(m.moved || m.click)) return;
+    const int n = std::min<int>(MEM_R8(c, menu + 10), kMaxItems);
+    const float y = m.y * (float)gpu_display().h;
+    int hit = -1;
+    for (const TextCall& t : texts) {
+        int item_at = -1;
+        for (int i = 0; i < n; i++)
+            if (MEM_R32(c, item(menu, i)) == t.text && MEM_R8(c, item(menu, i) + 13)) item_at = i;
+        if (item_at < 0) continue;
+        int y0 = 4096, y1 = -4096;
+        for (uint32_t p = t.from; p + 4 < t.to;) {
+            const uint32_t cmd = MEM_R32(c, 0x80000000u | (p + 4)) >> 24;
+            const uint32_t words = cmd == 0x2C || cmd == 0x2D || cmd == 0x2E || cmd == 0x2F ? 9 : cmd == 0x3E ? 12 : 0;
+            if (!words) break;
+            if (cmd <= 0x2D)  // a letter (not its flames): its corners
+                for (uint32_t k : {2u, 4u, 6u, 8u}) {
+                    const int v = (int16_t)(MEM_R32(c, 0x80000000u | (p + 4 * k)) >> 16);
+                    y0 = std::min(y0, v), y1 = std::max(y1, v);
+                }
+            p += 4 * (words + 1);
+        }
+        if (y0 <= y1 && y >= (float)y0 - 1 && y <= (float)y1 + 1) hit = item_at;
+    }
+    if (hit < 0) return;
+    if (hit != MEM_R8(c, menu + 6)) game_call(c, kMenuSelect, menu, (uint32_t)hit);
+    if (m.click) host_menu_press(1u << 14);  // cross
+}
+
 // 800156E0 menu_draw(menu).
 extern "C" int psx_hook_menu_draw(R3000* c) {
     static bool inside = false;
@@ -637,7 +707,11 @@ extern "C" int psx_hook_menu_draw(R3000* c) {
     }
     const uint32_t ra = c->r[31], sp = c->r[29];
     inside = true;
+    std::vector<TextCall> texts;
+    if (!ghost) g_text_calls = &texts;
     draw_zoomed(c, menu, window);
+    g_text_calls = nullptr;
+    if (!ghost) menu_mouse(c, menu, texts);
     inside = false;
     c->r[31] = ra, c->r[29] = sp;
     return 1;
@@ -656,7 +730,7 @@ void host_keys(R3000* c, Host& h, uint32_t p_select, uint32_t p_back, uint16_t p
         const int sel = MEM_R8(c, h.pages[h.page] + 6);
         if (back || (select && sel >= p.count)) {
             int pages[kPages];
-            const int n = group_pages(p.group, pages);
+            const int n = group_pages(h.group, pages, &h == &g_mainh);
             const int was = (int)(std::find(pages, pages + n, h.page) - pages);
             close_page(c, h);
             game_call(c, kMenuSelect, h.list, was);
@@ -671,9 +745,10 @@ void host_keys(R3000* c, Host& h, uint32_t p_select, uint32_t p_back, uint16_t p
     if (h.group >= 0) {
         MEM_W32(c, p_back, 0);
         int pages[kPages];
-        const int n = group_pages(h.group, pages);
+        const int n = group_pages(h.group, pages, &h == &g_mainh);
         const int sel = MEM_R8(c, h.list + 6);
         if (back || (select && sel >= n)) close_list(c, h);
+        else if (select && !g_pages[pages[sel]].settings) controls_open();  // (a screen of its own)
         else if (select) open_page(c, h, pages[sel]);
         return;
     }
@@ -1037,4 +1112,76 @@ void game_menu_reset(bool state_loaded) {
         h->drawn = false;
     }
     g_main_drawn = false;
+}
+
+// hw.cpp: the packet at `addr` (24-bit) is about to go to the GPU. A selected menu item's flame quad: the
+// GP0 words to draw in its place go in `out` (see kFlamePercent), and its letter's and flames' packets are
+// made empty.
+bool menu_flame_words(R3000* c, uint32_t addr, std::vector<GpuWord>& out) {
+    if (!g_menu_flames || core_in_ghost()) return false;  // (Original: as the game draws them)
+    auto rd = [c](uint32_t p) { return MEM_R32(c, 0x80000000u | (p & 0x1FFFFC)); };
+    auto wr = [c](uint32_t p, uint32_t v) { MEM_W32(c, 0x80000000u | (p & 0x1FFFFC), v); };
+    auto packet = [&](uint32_t p, uint32_t len, uint32_t cmd) { return rd(p) >> 24 == len && rd(p + 4) >> 24 == cmd; };
+    auto tpage_word = [](uint32_t cmd) { return cmd == 0x2E ? 5u : 6u; };  // (with the second vertex's uv)
+    auto added = [&](uint32_t p, uint32_t cmd) { return ((rd(p + 4 * tpage_word(cmd)) >> 21) & 3) == 1; };
+    const uint32_t f = (rd(addr + 4) >> 24) == 0x3E ? addr - 40 : addr, g = f + 40;
+    if (!packet(f, 9, 0x2E) || !packet(g, 12, 0x3E) || !added(f, 0x2E) || !added(g, 0x3E)) return false;
+    uint32_t letters[3] = {f - 120, f - 80, f - 40};
+    for (uint32_t l : letters)
+        if (!packet(l, 9, 0x2C)) return false;
+    // in the order the game draws them (their links; the pause menu's and the front end's differ): the
+    // last one is the face
+    auto next = [&](uint32_t p) { return rd(p) & 0x1FFFFC; };
+    for (int k = 0; k < 3; k++) {
+        bool pointed = false;
+        for (uint32_t l : letters) pointed |= next(l) == letters[k];
+        if (pointed) continue;
+        const uint32_t first = letters[k];
+        uint32_t order[3] = {first, 0, 0};
+        int n = 1;
+        for (uint32_t at = next(first); n < 3; at = next(at)) {
+            bool ours = false;
+            for (uint32_t l : letters) ours |= l == at;
+            if (!ours) break;
+            order[n++] = at;
+        }
+        if (n == 3) std::copy(order, order + 3, letters);
+        break;
+    }
+    auto copy = [&](uint32_t src, uint32_t n, int percent, int semi_mode) {  // colours scaled, mode set
+        const uint32_t cmd = rd(src + 4) >> 24;
+        for (uint32_t i = 1; i <= n; i++) {
+            uint32_t v = rd(src + 4 * i);
+            const bool colour = i == 1 || (n == 12 && (i == 4 || i == 7 || i == 10));
+            if (colour && percent != 100) v = dim_colour(v, percent);
+            if (semi_mode >= 0 && i == tpage_word(cmd)) v = (v & ~(3u << 21)) | (uint32_t)semi_mode << 21;
+            out.push_back({v, src & 0x1FFFFC, (src + 4 * i) & 0x1FFFFC});
+        }
+    };
+    // the flames' area: their corners' bounds
+    int x0 = 4096, y0 = 4096, x1 = -4096, y1 = -4096;
+    auto corner = [&](uint32_t v) {
+        const int x = (int16_t)(v & 0xFFFF), y = (int16_t)(v >> 16);
+        x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+    };
+    for (uint32_t i : {2u, 4u, 6u, 8u}) corner(rd(f + 4 * i));
+    for (uint32_t i : {2u, 5u, 8u, 11u}) corner(rd(g + 4 * i));
+    auto xy = [](int x, int y) { return (uint32_t)(x & 0xFFFF) | (uint32_t)(y & 0xFFFF) << 16; };
+    const uint32_t mode = 0xE1000000u | (gpu_read_stat(c) & 0x600) | ((rd(f + 4 * 5) >> 16) & 0x1FF);  // the flame's page
+    auto put = [&](std::initializer_list<uint32_t> words) {  // made-up words, placed as the flame
+        for (uint32_t v : words) out.push_back({v, f & 0x1FFFFC, 0});
+    };
+    const std::initializer_list<uint32_t> clear = {0x2A000000u, xy(x0, y0), xy(x1, y0), xy(x0, y1), xy(x1, y1)};  // black, added
+    put({mode, 0xE6000000u});
+    put(clear);
+    copy(letters[0], 9, 100, -1);  // edge and shadow
+    copy(letters[1], 9, 100, -1);
+    put(clear);  // (their marks too: the flames go on the face only)
+    copy(letters[2], 9, 100, -1);
+    put({0xE6000004u});  // (ours: only on marked pixels, see gpu.cpp g_mask_inside)
+    copy(f, 9, kFlamePercent, 1);
+    copy(g, 12, kFlamePercent, 1);
+    put({0xE6000000u, mode});  // the draw mode as the flame left it
+    for (uint32_t p : {letters[0], letters[1], letters[2], f, g}) wr(p, rd(p) & 0xFFFFFF);  // empty now
+    return true;
 }

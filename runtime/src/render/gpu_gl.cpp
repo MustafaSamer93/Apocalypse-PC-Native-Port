@@ -347,6 +347,22 @@ void set_blend(int mode) {
     }
 }
 
+// The mask-bit test (a pixel whose mask bit, the alpha, is set keeps its colour), by blending with the
+// destination alpha: opaque drawing (and a translucent primitive's opaque texels, mode -1), B + F (1)
+// and B - F (2).
+void set_mask_test(int mode, bool inside = false) {
+    glEnable(GL_BLEND);
+    if (inside) {  // (ours) the reverse: only where the mask bit is set; the bits stay
+        glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+        if (mode >= 1) glBlendFuncSeparate(GL_DST_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
+        else glBlendFuncSeparate(GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_ZERO, GL_ONE);
+        return;
+    }
+    glBlendEquationSeparate(mode == 2 ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
+    if (mode >= 1) glBlendFuncSeparate(GL_ONE_MINUS_DST_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
+    else glBlendFuncSeparate(GL_ONE_MINUS_DST_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_DST_ALPHA);
+}
+
 void bind_draw_target() {
     glBindFramebuffer(GL_FRAMEBUFFER, g_draw_fbo);
     glViewport(0, 0, 1024 * S, 512 * S);
@@ -381,15 +397,19 @@ void draw_vertices(const Vtx* v, size_t n, const BatchKey& key, bool filter, con
     } else {
         glDisable(GL_DEPTH_TEST);
     }
+    if (key.mask_inside) set_mask_test(-1, true);
+    else if (key.check_mask) set_mask_test(-1);
+    else glDisable(GL_BLEND);
     if (!key.semi) {
-        glDisable(GL_BLEND);
         glUniform1i(u_pass, 0);
         glDrawArrays(GL_TRIANGLES, 0, (GLsizei)n);
-    } else {
         glDisable(GL_BLEND);
+    } else {
         glUniform1i(u_pass, 1);
         glDrawArrays(GL_TRIANGLES, 0, (GLsizei)n);
-        set_blend(key.semi_mode);
+        if (key.mask_inside && key.semi_mode == 1) set_mask_test(1, true);
+        else if (key.check_mask && (key.semi_mode == 1 || key.semi_mode == 2)) set_mask_test(key.semi_mode);
+        else set_blend(key.semi_mode);
         glUniform1i(u_pass, 2);
         glDrawArrays(GL_TRIANGLES, 0, (GLsizei)n);
         glDisable(GL_BLEND);

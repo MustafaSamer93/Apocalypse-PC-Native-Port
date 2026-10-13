@@ -35,6 +35,9 @@ void game_message(R3000* c, const char* text);
 void game_subtitle(R3000* c, const char* text, float seconds);
 void game_subtitle_keep(R3000* c);  // once per frame: shows a cleared subtitle again
 void game_voice_poll(R3000* c);     // once per frame: queued pickup lines
+// The shoulder button the game's controller config gives action k (0 weapon select, 1 crouch, 2 jump,
+// 3 smart bomb): 1 L2, 2 R2, 4 L1, 8 R1; 0 = not set up yet.
+int game_pad_action(R3000* c, int k);
 
 // ---------------------------------------------------------------- subtitles (subtitles.cpp)
 

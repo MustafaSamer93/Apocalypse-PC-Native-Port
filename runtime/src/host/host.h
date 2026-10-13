@@ -46,6 +46,23 @@ PadState host_pad(int port, bool analog = false);
 void host_rumble(int port, uint8_t small_motor, uint8_t large_motor);
 bool host_parse_press_script(const char* spec);  // --press BUTTON@FRAME[+FRAMES],...
 
+// The game's Options -> Controls (game_menu.cpp) opens the controls screen (settings_menu.cpp) at the
+// next host_poll: play with the keyboard and mouse (mode 0) or a controller (1), and each action's two
+// inputs.
+void controls_open();
+
+// The game's menus with the mouse (game_menu.cpp): the pointer's height over the game image (0..1, `on`:
+// over it, in the focused window) and what happened since the last look (a move, left / right click, wheel
+// notches: + = down). While a menu is up the mouse is the menu's only (no aiming or firing with it).
+struct MenuMouse {
+    bool on = false;
+    float y = 0;
+    bool moved = false, click = false, back = false;
+    int wheel = 0;
+};
+MenuMouse host_menu_mouse();
+void host_menu_press(uint16_t buttons);  // PS1 pad bits (1 = pressed), held a moment for the game to see
+
 // ---------------------------------------------------------------- enhancement settings (settings.cpp)
 // Shared by the settings screen and the game's own Options -> Recomp Enhancements page
 // (game_menu.cpp). A change applies and is saved at once.
@@ -54,7 +71,9 @@ enum EnhSetting {
     E_FPS, E_DRAWDIST, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_DISPLAY,
     E_AUTOSAVE, E_SUBTITLES, E_AA, E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO,
     E_CHEAT_BOMBS, E_CHEAT_ONEHIT, E_FPS_COUNTER, E_CRT, E_GAME_FONT, E_TEX_SMOOTH, E_REPLACE, E_SOUND_FILTER,
+    E_MENU_FLAMES,
 };
+extern bool g_menu_flames;  // the selected menu item's flames: in its letters (Remastered) or round them (Original)
 extern int g_sound_filter;  // the voices' interpolation: 0 Original (Gaussian), 1 Smooth (cubic), 2 Sharp (spu.cpp)
 const char* enh_name(int id);
 std::string enh_value(int id);

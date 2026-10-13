@@ -52,13 +52,23 @@ cmake --build build-clang
 
 ## Controls
 
-| PlayStation | Keyboard | Gamepad |
+Play with the keyboard and mouse or with a controller: settings screen -> Controls. Each action
+can be put on any two keys / buttons there (Set up buttons). The defaults:
+
+| Action | Keyboard and mouse | Controller |
 |---|---|---|
-| D-pad | WASD / arrow keys | D-pad / left stick |
-| Cross / Circle / Square / Triangle | K / L / J / I | South / East / West / North |
-| L1 / R1 / L2 / R2 | Q / E / Z / C | shoulders / triggers |
-| Start / Select | Enter / Backspace | Start / Back |
-| fire toward a direction | left mouse button (toward the cursor) | right stick |
+| Move | WASD / arrow keys | D-pad / left stick |
+| Aim and fire | left mouse button (toward the pointer) | right stick |
+| Fire up / down / left / right | I / K / J / L | Y / A / X / B (Triangle / Cross / Square / Circle) |
+| Jump (R1) | Space / right mouse button | RB / R1 |
+| Crouch (L1) | Left Shift | LB / L1 |
+| Weapon select (L2) | mouse wheel / Q | LT / L2 |
+| Smart bomb (R2) | F / middle mouse button | RT / R2 |
+| Pause / Select | Enter / Backspace | Start / Back |
+
+Jump, crouch, weapon select and smart bomb follow the game's own controller config (pause menu).
+In the game's menus (main menu, pause menu and their pages) the mouse works too: point at an item to
+select it, left click to choose it, right click to go back, and the wheel moves up and down.
 
 Hold **Select + Start** (Backspace + Enter) for the settings screen: save/load states, chapters
 (restart points reached so far), renderer, resolution, anti-aliasing, aspect ratio, CRT filter,
@@ -138,3 +148,9 @@ Things the game does that the tools have to handle:
   rendering twice), so everything moves every frame.
 - **The game reads controllers directly over SIO.** Byte and `/ACK` timing are modelled,
   because the driver clears IRQ flags between the reply and the `/ACK`.
+
+## Contributors
+
+- **Mustafa Samer** ([@MustafaSamer93](https://github.com/MustafaSamer93)): project lead
+- **Claude** (Anthropic's AI, through [Claude Code](https://claude.com/claude-code)): co-author of the
+  recompiler, runtime and enhancements; its commits carry a `Co-Authored-By: Claude` line

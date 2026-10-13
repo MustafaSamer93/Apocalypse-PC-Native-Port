@@ -88,9 +88,22 @@ void reprojection() {
     g_cut = cut;
 }
 
+// The player's spot on the screen, for mouse aim (host/input.cpp): taken with the frame's camera.
+constexpr uint32_t kPlayerList = 0x800FF5A0;
+constexpr double kChest = 48;  // whole units above the player's origin (its waist): about where it fires from
+bool g_player_seen = false;      // this frame's is taken
+bool g_player_ok = false;
+float g_player_sx = 0, g_player_sy = 0;
+
 }  // namespace
 
+bool player_screen(float* sx, float* sy) {
+    *sx = g_player_sx, *sy = g_player_sy;
+    return g_player_ok;
+}
+
 void motion_frame_begin() {
+    g_player_seen = false;
     g_prev.swap(g_cur);
     g_cur.clear();
     g_next = 0;
@@ -103,6 +116,18 @@ void motion_frame_begin() {
 }
 
 void motion_camera(R3000* c) {
+    if (!g_player_seen && !core_in_ghost() && g_gte_blend != GteBlendMode::Record) {
+        g_player_seen = true;
+        const uint32_t p = n3d::rd(c, kPlayerList);
+        g_player_ok = false;
+        if (p && (p & 0x1FFFFF) < 0x200000) {
+            const n3d::View v = n3d::view_now(c);
+            const n3d::Pt pt = v.see((int32_t)n3d::rd(c, p + 4) / 4096.0, (int32_t)n3d::rd(c, p + 8) / 4096.0 - kChest,
+                                     (int32_t)n3d::rd(c, p + 12) / 4096.0);
+            g_player_ok = pt.z > 0;
+            g_player_sx = pt.sx, g_player_sy = pt.sy;
+        }
+    }
     if (!g_motion_on || g_have_view || core_in_ghost() || g_gte_blend == GteBlendMode::Record) return;
     g_view = n3d::view_now(c);
     g_have_view = true;

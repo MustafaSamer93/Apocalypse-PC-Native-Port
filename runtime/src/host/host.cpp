@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -113,11 +114,35 @@ void draw_toast() {
     present_overlay_end();
 }
 
+// F12: the next image shown (an in-between one too) goes to debug/shot_<date>_<time>.bmp, for bug
+// reports (a second one in the same second gets _2, _3...).
+bool g_shot_key = false;
+void save_shot() {
+    g_shot_key = false;
+    std::error_code ec;
+    std::filesystem::create_directories("debug", ec);
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm);
+    std::string path = std::string("debug/shot_") + stamp + ".bmp";
+    for (int n = 2; std::filesystem::exists(path, ec); n++) path = std::string("debug/shot_") + stamp + "_" + std::to_string(n) + ".bmp";
+    present_save_bmp(path.c_str());
+    log_msg(LogCat::Host, "===== F12 screenshot %s: frame %llu =====", path.c_str(), (unsigned long long)g_frame);
+    host_toast("Screenshot saved: " + path);
+}
+
 // Over the game image: the screenshot first (the game alone), then the toast, the version (on
 // the title screen and while the game's menus are up) and the FPS counter; then the swap.
 void finish_frame(bool version) {
     for (uint64_t f : g_shot_frames)
         if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
+    if (g_shot_key) save_shot();
     draw_toast();
     if (version && (gpu_title_screen() || replace_title_shown(gpu_display().y)))
         draw_badge(1, kVersion, (int)std::strlen(kVersion) + 1, true);
@@ -541,8 +566,10 @@ void host_poll() {
     while (SDL_PollEvent(&e)) {
         mouse_autohide(&e);
         if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_ESCAPE)) g_quit = true;
+        if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) g_shot_key = true;
         if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) apply_graphics();
         device_event(e);
+        input_event(e);
     }
     g_turbo = g_force_turbo || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_TAB];
     // Holding SELECT + START for ~1.5 s opens the settings from a controller.
@@ -551,6 +578,7 @@ void host_poll() {
     combo_frames = ((held & B_SELECT) && (held & B_START)) ? combo_frames + 1 : 0;
     mouse_autohide(nullptr);
     if (combo_frames == 90 && g_video_ok) run_settings_menu();
+    if (controls_requested() && g_video_ok) run_controls_menu();
 }
 
 void host_set_turbo(bool on) { g_force_turbo = on; }

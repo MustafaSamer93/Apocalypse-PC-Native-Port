@@ -1009,6 +1009,12 @@ void retime(R3000* c, const Before& b, bool odd) {
             for (int k = 0; k < 3; k++) own.v[k] = g_own.end[i].v[k] - g_own.begin[i].v[k];
             halve(c, p + kPlayerVecs[i], b.pv[i], g_raw[0][i], split ? &own : nullptr);
         }
+        // Landing (the time in the air back to 0): the game puts the player on the floor and stops the fall.
+        // That height and vertical speed are set, not moved towards: halved, the player hung above the
+        // floor for two frames after every jump.
+        if (!placed && b.counters[1] && !MEM_R16(c, p + kPlayerCounters[1]))
+            for (int i : {0, 1})
+                if (g_raw[0][i].addr == p + kPlayerVecs[i]) MEM_W32(c, p + kPlayerVecs[i] + 4, (uint32_t)g_raw[0][i].v.v[1]);
         if (MEM_R8(c, p + kAnimId) == b.anim_id && MEM_R16(c, p + kAnimStart) == b.anim_start) {
             const int32_t was = (int32_t)b.clock[2] << 16 | b.clock[1];
             const int32_t now = (int32_t)MEM_R16(c, p + 0x134) << 16 | MEM_R16(c, p + 0x12C);

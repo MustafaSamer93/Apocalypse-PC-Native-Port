@@ -27,7 +27,7 @@ using namespace hwc;
 VkImg g_draw, g_read, g_stage;  // stage: native 1024x512, for uploads
 VkShaderModule g_vs, g_fs, g_copy_vs, g_copy_fs;
 VkPipelineLayout g_layout = VK_NULL_HANDLE, g_copy_layout = VK_NULL_HANDLE;
-VkPipeline g_pipes[5] = {};          // opaque, then semi modes 0..3
+VkPipeline g_pipes[10] = {};         // opaque, semi modes 0..3; mask test: opaque, B + F, B - F; its reverse: opaque, B + F
 VkPipeline g_copy_pipe = VK_NULL_HANDLE;  // copy pass into `draw` (its sample count)
 VkImg g_hd;  // replacement textures' atlas (texreplace.cpp), sampler set 1; made on first use
 // Z-buffer: depth image beside `draw` (same size and sample count); HwPrim::ztest batches test
@@ -93,14 +93,16 @@ void draw_vertices(const Vtx* v, size_t n, const BatchKey& key, bool filter, con
         vkCmdPushConstants(c, g_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
         vkCmdDraw(c, (uint32_t)n, 1, 0, 0);
     };
+    const VkPipeline opaque = key.mask_inside ? g_pipes[8] : key.check_mask ? g_pipes[5] : g_pipes[0];
     if (!key.semi) {
-        draw(g_pipes[0], 0);
+        draw(opaque, 0);
     } else {
         float k = key.semi_mode == 0 ? 0.5f : 0.25f;
         const float consts[4] = {0, 0, 0, k};
         vkCmdSetBlendConstants(c, consts);
-        draw(g_pipes[0], 1);
-        draw(g_pipes[1 + (key.semi_mode & 3)], 2);
+        draw(opaque, 1);
+        const bool masked = key.check_mask && (key.semi_mode == 1 || key.semi_mode == 2);
+        draw(key.mask_inside && key.semi_mode == 1 ? g_pipes[9] : masked ? g_pipes[5 + key.semi_mode] : g_pipes[1 + (key.semi_mode & 3)], 2);
     }
 }
 
@@ -269,9 +271,11 @@ bool vk_hw_init(int scale) {
     }
     const VkFormat zfmt = g_zbuf.image ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED;
     g_zbuf_clear = true;
-    const vkc::Blend modes[5] = {vkc::Blend::None, vkc::Blend::Half, vkc::Blend::Add, vkc::Blend::Subtract,
-                                 vkc::Blend::AddQuarter};
-    for (int i = 0; i < 5; i++)
+    const vkc::Blend modes[10] = {vkc::Blend::None,         vkc::Blend::Half,       vkc::Blend::Add,
+                                  vkc::Blend::Subtract,     vkc::Blend::AddQuarter, vkc::Blend::MaskOpaque,
+                                  vkc::Blend::MaskAdd,      vkc::Blend::MaskSubtract, vkc::Blend::InsideOpaque,
+                                  vkc::Blend::InsideAdd};
+    for (int i = 0; i < 10; i++)
         g_pipes[i] = vkc::make_pipeline({g_vs, g_fs, g_layout, VK_FORMAT_R8G8B8A8_UNORM, sc, modes[i], vkc::Vertices::Vram, zfmt});
     g_copy_pipe = vkc::make_pipeline(
         {g_copy_vs, g_copy_fs, g_copy_layout, VK_FORMAT_R8G8B8A8_UNORM, sc, vkc::Blend::None, vkc::Vertices::Position, zfmt});

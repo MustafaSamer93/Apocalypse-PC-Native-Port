@@ -62,10 +62,26 @@ uint32_t ot_depth(uint32_t addr) {
 uint32_t gpu_run_list(R3000* c, uint32_t addr) {
     addr &= 0x1FFFFC;
     uint32_t guard = 0, words = 0;
+    std::vector<GpuWord> menu_words;
     for (;;) {
         uint32_t header;
         std::memcpy(&header, psx_ram + addr, 4);
         uint32_t n = header >> 24;
+        if (n == 9 || n == 12) {  // a menu item's flame (game_menu.cpp): drawn in its letter only
+            uint32_t w;
+            std::memcpy(&w, psx_ram + ((addr + 4) & 0x1FFFFC), 4);
+            menu_words.clear();
+            if (((w >> 24) == 0x2E || (w >> 24) == 0x3E) && menu_flame_words(c, addr, menu_words)) {
+                for (const GpuWord& w2 : menu_words) {
+                    g_gpu_packet_addr = w2.packet, g_gpu_word_addr = w2.word;
+                    gpu_write_gp0(c, w2.value);
+                }
+                g_gpu_packet_addr = g_gpu_word_addr = 0;
+                words += (uint32_t)menu_words.size();
+                std::memcpy(&header, psx_ram + addr, 4);
+                n = header >> 24;
+            }
+        }
         if (n == 0) g_gpu_ot_z = ot_depth(addr);
         g_gpu_packet_addr = addr;
         for (uint32_t i = 0; i < n; i++) {
