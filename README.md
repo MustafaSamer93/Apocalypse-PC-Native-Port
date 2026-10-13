@@ -6,7 +6,7 @@ Not an emulator. The game's original code was translated into native code ahead 
 runs at modern resolutions, frame rates and aspect ratios while playing exactly like the
 original.
 
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](DISCORD_INVITE)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fnRND5rZq)
 [![Download](https://img.shields.io/github/v/release/MustafaSamer93/Project_Repocalypse?label=download)](https://github.com/MustafaSamer93/Project_Repocalypse/releases/latest)
 
 <!-- screenshots / gif here -->
@@ -76,7 +76,7 @@ Every action can be rebound in the settings screen.
 
 ## Problems?
 
-- Ask on [Discord](DISCORD_INVITE) or open an
+- Ask on [Discord](https://discord.gg/fnRND5rZq) or open an
   [issue](https://github.com/MustafaSamer93/Project_Repocalypse/issues).
 - Attach `debug/repocalypse.log` (and any `debug/crash_*.log`) from the game folder.
 - An error on first start almost always means the disc image is missing or wrong: check that the
