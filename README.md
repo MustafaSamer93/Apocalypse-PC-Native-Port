@@ -76,8 +76,7 @@ Every action can be rebound in the settings screen.
 
 ## Problems?
 
-- Ask on [Discord](https://discord.gg/fnRND5rZq) or open an
-  [issue](https://github.com/MustafaSamer93/Project_Repocalypse/issues).
+- Ask on [Discord](https://discord.gg/fnRND5rZq).
 - Attach `debug/repocalypse.log` (and any `debug/crash_*.log`) from the game folder.
 - An error on first start almost always means the disc image is missing or wrong: check that the
   `.bin` files are in `assets/image/` and are a dump of the USA version.
