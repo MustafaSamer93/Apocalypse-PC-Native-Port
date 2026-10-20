@@ -1,6 +1,6 @@
 <img width="1376" height="768" alt="title" src="https://github.com/user-attachments/assets/c0886274-de51-4642-8683-ad393fd30712" />
 
-# Repocalypse
+# Repocalypse: A Static Recompiled Native Port of PSX Game Apocalypse 
 
 **Apocalypse** (PlayStation, 1998), rebuilt as a native PC game for Windows and Linux.
 
