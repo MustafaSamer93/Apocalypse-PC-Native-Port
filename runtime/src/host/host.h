@@ -32,6 +32,7 @@ void host_toast(const std::string& text);  // a short message in the corner ("St
 // A line with an action's button prompt for a few seconds ("Hold [pad] / [key] to rewind"); `action`
 // is a host action id (host_internal.h Action). prompts.cpp.
 void host_prompt_hint(const std::string& before, int action, const std::string& after);
+void host_rewind_hint();  // "Hold [pad] / [key] to rewind" (a death, savestate.cpp)
 
 // Scripted runs: --chapter, --screenshot
 extern int g_start_state;                // state slot loaded at frame 30 (-1: none)

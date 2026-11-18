@@ -278,3 +278,5 @@ void draw_game_prompts() {
 void host_prompt_hint(const std::string& before, int action, const std::string& after) {
     host::g_hint = {before, after, action, SDL_GetTicksNS() + 4000000000ull};
 }
+
+void host_rewind_hint() { host_prompt_hint("Hold", host::A_REWIND, "to rewind"); }

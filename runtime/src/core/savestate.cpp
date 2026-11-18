@@ -357,6 +357,7 @@ void state_restore(const std::vector<uint8_t>& data, R3000* c) {
     if (!s.ok()) log_msg(LogCat::Core, "rewind: a damaged state; the game state may be inconsistent");
     sched_refresh(c);
     host_audio_clear();
+    g_restart_at = 0;  // a game over rewound: no restart (the lives are back with the state)
     g_resume_pc = pc;
     g_resume_pending = true;
     game_menu_reset(true);
@@ -413,7 +414,7 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
     state_poll_restart(c);
     card_prepare(c);
     // (a restore resumes at this safe point and never returns here)
-    rewind_frame(c, pc, g_level_render_frame && frame <= g_level_render_frame + 2 && g_restart_at == 0 && g_load_request < 0 &&
+    rewind_frame(c, pc, g_level_render_frame && frame <= g_level_render_frame + 2 && g_load_request < 0 &&
                             g_after_load_lives < 0 && !bios_files_busy() && !gpu_movie_playing() && !movie_replacing() &&
                             !g_host_menu_open && !sim60_in_render());
     if (g_autoload_request) {  // Settings -> Load auto-save
@@ -501,6 +502,7 @@ extern "C" void psx_hook_game_over(R3000* c) {
         log_msg(LogCat::Core, "death in the boss fight: back to its checkpoint with %u lives", c->r[3]);
         return;
     }
+    if (rewind_available()) host_rewind_hint();  // (not for the boss fight: its reload starts afresh)
     if (c->r[3] != 0) return;
     // Game over: the player respawns here as for a death with a life left, then
     // state_poll_restart loads a level start through the game's continue path (level state 3, as
@@ -526,6 +528,8 @@ extern "C" void psx_hook_game_over(R3000* c) {
             std::string restart;
             read_progress(&g_start_level, &restart);
             for (uint32_t i = 0; i < kSaveRecordSize; i++) g_start_record[i] = (uint8_t)MEM_R8(c, kSaveRecord + i);
+            // (after a loaded state its checksum is not set yet: the game sets it at a checkpoint)
+            if (g_start_record[4]) record_fix(g_start_record);
         }
         if (g_start_level.empty() || !record_ok(g_start_record)) return;
         std::memcpy(rec, g_start_record, sizeof rec);
@@ -541,7 +545,8 @@ extern "C" void psx_hook_game_over(R3000* c) {
     }
     record_fix(rec);
     std::memcpy(g_restart_record, rec, sizeof rec);
-    g_restart_at = host_frame_count() + 30;
+    // (with rewind on, a moment longer: the player can still go back to before the death)
+    g_restart_at = host_frame_count() + (rewind_available() ? 180 : 30);
     MEM_W32(c, kLives, 1);
     c->r[3] = 1;
     g_progress_pending = false;
