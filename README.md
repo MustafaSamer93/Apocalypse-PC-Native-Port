@@ -30,6 +30,10 @@ original.
   for both, with low input lag
 - **Draw distance**: reworked to support a much larger draw distance than the original
 - **Asset replacements**: support for custom textures and FMV replacements
+- **Rewind**: hold R to go back up to 10 seconds, even after a death
+- **Button prompts**: controller button and keyboard key shown together, as icons in the game's
+  style for PlayStation, Xbox, Steam Deck and keyboard & mouse
+- **Automatic setup**: the best settings for your PC picked on first start
 - **Saving**: autosave at every checkpoint, and memory card saves compatible with emulators
 - **One-liners**: subtitles for the voice lines, printed on screen with effects
 - **Cheats**: added a dedicated new menu for in-game cheats
