@@ -153,12 +153,13 @@ def marked(icon, a):
     The gaps between the other pieces (a stick's ring) become a light bronze line with black shading."""
     mask = fill_holes(a.filter(ImageFilter.MaxFilter(11)).filter(ImageFilter.MinFilter(11)))
     ps = pieces(a)
-    marks = Image.new("L", a.size, 0)
+    cap = fill_holes(centre_piece(a, ps))
+    marks = ImageChops.subtract(cap, a)  # the letter cut out of the cap (an R's island stays bronze)
     for m in ps:
-        if m.histogram()[255] < N * N * 0.06:
+        size = m.histogram()[255]
+        inside = ImageChops.subtract(m, cap).getbbox() is None
+        if 8 <= size < N * N * 0.06 and not inside:  # (specks of a pixel or two are not marks)
             marks = ImageChops.lighter(marks, m)
-    cap = centre_piece(a, ps)
-    marks = ImageChops.lighter(marks, ImageChops.subtract(fill_holes(cap), cap))
     out = plate(mask)
     gaps = ImageChops.subtract(ImageChops.subtract(mask, a), marks)
     out = Image.composite(Image.new("RGBA", (N, N), RING + (255,)), out, gaps)
