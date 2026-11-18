@@ -6,7 +6,7 @@
 #include "host/autodetect.h"
 
 int main() {
-    HwProfile deck{.linux = true, .deck_like = true, .vulkan = true, .vram_mb = 1024, .desktop_w = 1280, .desktop_h = 800, .refresh_hz = 90};
+    HwProfile deck{.on_linux = true, .deck_like = true, .vulkan = true, .vram_mb = 1024, .desktop_w = 1280, .desktop_h = 800, .refresh_hz = 90};
     AutoSettings s = autodetect_choose(deck);
     assert(s.scale == 4 && s.aa == 1 && s.msaa == 1 && s.fps == 60 && s.aspect == Aspect::A16_10);
 

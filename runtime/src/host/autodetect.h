@@ -7,7 +7,7 @@
 
 // What the machine is, filled in once at start-up (host.cpp). The rules below only read this.
 struct HwProfile {
-    bool linux = false;
+    bool on_linux = false;
     bool deck_like = false;   // Steam Deck: Linux on a 1280x800 screen, or its AMD APU by name
     bool vulkan = false;      // the Vulkan renderer started (else OpenGL: nothing is known about the GPU)
     bool discrete = false;    // a discrete GPU (not integrated)

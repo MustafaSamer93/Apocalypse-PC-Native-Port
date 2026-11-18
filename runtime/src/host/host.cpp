@@ -464,7 +464,7 @@ using namespace host;
 static void auto_configure(const SDL_DisplayMode* desktop) {
     HwProfile hw;
 #ifdef __linux__
-    hw.linux = true;
+    hw.on_linux = true;
 #endif
     hw.vulkan = render_backend() == Backend::Vulkan;
     std::string gpu = "OpenGL";
@@ -480,14 +480,14 @@ static void auto_configure(const SDL_DisplayMode* desktop) {
         hw.vram_mb = vram >> 20;
         gpu = p.deviceName;
         // the Deck's APU: "AMD Custom GPU 0405" (Van Gogh)
-        hw.deck_like = hw.linux && (std::strstr(p.deviceName, "Custom GPU") || std::strstr(p.deviceName, "VANGOGH"));
+        hw.deck_like = hw.on_linux && (std::strstr(p.deviceName, "Custom GPU") || std::strstr(p.deviceName, "VANGOGH"));
     }
     if (desktop) {
         hw.desktop_w = desktop->w;
         hw.desktop_h = desktop->h;
         hw.refresh_hz = (int)std::lround(desktop->refresh_rate);
     }
-    if (hw.linux && hw.desktop_w == 1280 && hw.desktop_h == 800) hw.deck_like = true;
+    if (hw.on_linux && hw.desktop_w == 1280 && hw.desktop_h == 800) hw.deck_like = true;
     const AutoSettings s = autodetect_choose(hw);
     g_gfx.scale = s.scale;
     g_gfx.aa = s.aa;
