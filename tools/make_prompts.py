@@ -123,7 +123,7 @@ def face_kind(name):
     return None
 
 
-LETTER_SCALE = 1.3  # the letters' size on a round plate (Kenney's are small)
+LETTER_SCALE = 1.15  # the letters' size on a round plate (Kenney's are small)
 letter_height = 0.0  # main(): the height that gives them, which the PlayStation shapes match
 
 
