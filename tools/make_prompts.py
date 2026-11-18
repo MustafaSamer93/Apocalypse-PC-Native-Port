@@ -151,15 +151,23 @@ def shaped(icon, a, name):
 def marked(icon, a):
     """Bronze with white marks: the small pieces (arrows, label letters) and the letter in the centre piece.
     The gaps between the other pieces (a stick's ring) become a light bronze line with black shading."""
-    mask = fill_holes(a.filter(ImageFilter.MaxFilter(11)).filter(ImageFilter.MinFilter(11)))
     ps = pieces(a)
     cap = fill_holes(centre_piece(a, ps))
     marks = ImageChops.subtract(cap, a)  # the letter cut out of the cap (an R's island stays bronze)
+    loose = Image.new("L", a.size, 0)  # arrows, label letters
     for m in ps:
         size = m.histogram()[255]
         inside = ImageChops.subtract(m, cap).getbbox() is None
         if 8 <= size < N * N * 0.06 and not inside:  # (specks of a pixel or two are not marks)
-            marks = ImageChops.lighter(marks, m)
+            loose = ImageChops.lighter(loose, m)
+    marks = ImageChops.lighter(marks, loose)
+    # thin gaps closed (a stick's ring, also where an arrow breaks it), but only next to the body: a
+    # label's letters, away from it, stay as drawn
+    def close(m):
+        return fill_holes(m.filter(ImageFilter.MaxFilter(11)).filter(ImageFilter.MinFilter(11)))
+    body = ImageChops.subtract(a, loose)
+    near_body = ImageChops.multiply(close(a), body.filter(ImageFilter.MaxFilter(13)))
+    mask = ImageChops.lighter(ImageChops.lighter(close(body), loose), near_body)
     out = plate(mask)
     gaps = ImageChops.subtract(ImageChops.subtract(mask, a), marks)
     out = Image.composite(Image.new("RGBA", (N, N), RING + (255,)), out, gaps)
