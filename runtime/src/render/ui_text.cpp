@@ -3,9 +3,22 @@
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+// (also replace.cpp's image loader on Linux: PNG, JPEG, BMP)
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_BMP
+#include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize2.h"
 
+#include "prompt_icons.h"
+
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <tuple>
 #include <iterator>
 #include <map>
 #include <string>
@@ -93,11 +106,69 @@ Atlas* atlas_for(SDL_Renderer* r, float size, float* scale) {
     return &a;
 }
 
+// The icons: decoded once (straight RGBA), then made at each pixel size they are drawn at, so a
+// 128-pixel icon shrunk to 30 stays smooth (the renderer's own scaling would skip pixels).
+struct Decoded {
+    int w = 0, h = 0;
+    std::vector<unsigned char> rgba;
+};
+std::map<std::string, Decoded> g_decoded;
+std::map<std::tuple<SDL_Renderer*, std::string, int>, SDL_Texture*> g_icons;
+
+const Decoded* decoded(const char* name) {
+    auto it = g_decoded.find(name);
+    if (it != g_decoded.end()) return it->second.rgba.empty() ? nullptr : &it->second;
+    Decoded& d = g_decoded[name];
+    for (const EmbeddedPng& p : kPromptPngs) {
+        if (std::strcmp(p.name, name) != 0) continue;
+        int n = 0;
+        if (unsigned char* px = stbi_load_from_memory(p.data, (int)p.size, &d.w, &d.h, &n, 4)) {
+            d.rgba.assign(px, px + (size_t)d.w * d.h * 4);
+            stbi_image_free(px);
+        }
+    }
+    return d.rgba.empty() ? nullptr : &d;
+}
+
 }  // namespace
+
+bool ui_icon_exists(const char* name) { return decoded(name) != nullptr; }
+
+bool ui_icon(SDL_Renderer* r, const char* name, float x, float y, float size) {
+    const Decoded* d = decoded(name);
+    if (!d) return false;
+    float sx, sy;
+    SDL_GetRenderScale(r, &sx, &sy);
+    const int px = std::max(1, (int)std::lround(size * sy));
+    SDL_Texture*& tex = g_icons[{r, name, px}];
+    if (!tex) {
+        std::vector<unsigned char> out((size_t)px * px * 4);
+        stbir_resize_uint8_srgb(d->rgba.data(), d->w, d->h, 0, out.data(), px, px, 0, STBIR_RGBA);
+        SDL_Surface* s = SDL_CreateSurfaceFrom(px, px, SDL_PIXELFORMAT_ABGR8888, out.data(), px * 4);
+        tex = s ? SDL_CreateTextureFromSurface(r, s) : nullptr;
+        SDL_DestroySurface(s);
+        if (!tex) return false;
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_NEAREST);
+    }
+    Uint8 cr, cg, cb, ca;
+    SDL_GetRenderDrawColor(r, &cr, &cg, &cb, &ca);
+    SDL_SetTextureAlphaMod(tex, ca);
+    SDL_SetRenderScale(r, 1, 1);  // drawn 1:1 in pixels
+    SDL_FRect dst{std::round(x * sx), std::round(y * sy), (float)px, (float)px};
+    SDL_RenderTexture(r, tex, nullptr, &dst);
+    SDL_SetRenderScale(r, sx, sy);
+    return true;
+}
 
 void ui_text_reset(SDL_Renderer* r) {  // the textures go with their renderer
     for (auto it = g_atlases.begin(); it != g_atlases.end();)
         it = it->first.first == r ? g_atlases.erase(it) : std::next(it);
+    for (auto it = g_icons.begin(); it != g_icons.end();) {
+        if (std::get<0>(it->first) != r) { ++it; continue; }
+        if (it->second) SDL_DestroyTexture(it->second);
+        it = g_icons.erase(it);
+    }
 }
 
 float ui_text_width(SDL_Renderer* r, const char* s, float size) {

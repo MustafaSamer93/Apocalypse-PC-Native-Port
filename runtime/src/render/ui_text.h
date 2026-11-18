@@ -10,5 +10,11 @@
 void ui_text(SDL_Renderer* r, float x, float y, const char* s, float size);
 float ui_text_width(SDL_Renderer* r, const char* s, float size);
 
-// Forgets the glyph textures made on `r`; call before destroying that renderer.
+// A picture built into the exe (the button prompts: Kenney's icons by file name, such as
+// "xbox_button_color_a"), `size` units square with its top left at x, y. Uses the draw color's
+// alpha. False: there is no such picture.
+bool ui_icon(SDL_Renderer* r, const char* name, float x, float y, float size);
+bool ui_icon_exists(const char* name);
+
+// Forgets the glyph and icon textures made on `r`; call before destroying that renderer.
 void ui_text_reset(SDL_Renderer* r);

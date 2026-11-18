@@ -103,6 +103,7 @@ int input_mode();                       // the mode in use (a chosen controller 
 std::string input_name(const Input& i); // "Space", "Mouse right", "RB", "Left stick up"...
 const char* action_label(int a);       // "Jump"
 const char* action_shoulder(int a);    // "R1" for a shoulder action (where the game's config puts it), else ""
+uint16_t action_bit(int a);            // the PS1 button an action presses (a shoulder action: as the game's config has it)
 void input_mute();                     // the game sees no input until everything is let go
 void binds_default(int mode);
 std::string input_token(const Input& i);              // settings.ini form
@@ -114,6 +115,36 @@ bool input_capture(int mode, const SDL_Event& e, Input* out);
 
 bool device_event(const SDL_Event& e);  // a controller connected or disconnected (true: handled)
 const char* device_name(const InputDevice& d);
+
+// ---------------------------------------------------------------- prompts.cpp
+
+// Button prompts: "[pad] / [key]", the controller button and the keyboard key (or mouse button) that do
+// the same thing, as icons (Kenney's Input Prompts) in the style of the controller.
+enum class PromptStyle { Auto, PlayStation, Xbox, SteamDeck };
+extern PromptStyle g_prompt_style;  // the setting (Auto: from the connected controller)
+PromptStyle prompt_style();         // the style in use (never Auto)
+// One side of a prompt: an icon (its file name), or for an input with no icon its name in a key cap.
+// Both empty: nothing (no controller connected, or nothing bound).
+struct PromptIcon {
+    std::string icon, text;
+    bool empty() const { return icon.empty() && text.empty(); }
+};
+struct Prompt {
+    PromptIcon pad, key;
+};
+PromptIcon pad_icon(const Input& in);         // empty when no controller is connected
+PromptIcon key_icon(const Input& in);
+PromptIcon pad_icon_named(const char* what);  // "dpad_vertical": the style's d-pad up/down
+Prompt prompt_for_action(int a);              // its first input of each kind
+Prompt prompt_for_button(uint16_t bit);       // ... of the action that presses this PS1 button
+// A row of prompts with labels ("[pad] / [key] back   ..."), in the overlay's 640x480 units, `h` the
+// icons' height, in the draw color. Returns its width (nothing is drawn when `draw` is false).
+struct Hint {
+    Prompt prompt;
+    std::string label;
+};
+float draw_hints(SDL_Renderer* r, float x, float y, float h, const std::vector<Hint>& hints, bool draw = true);
+void draw_game_prompts();  // over the game image: the game's own prompts (gpu_prompts) and host_prompt_hint
 
 // ---------------------------------------------------------------- settings_menu.cpp
 

@@ -19,15 +19,26 @@ namespace {
 
 // ================================================================ drawing and keys
 
+// A menu's button prompts: a PS1 button (the controller's button for it) and a fixed key, or a
+// d-pad / arrow keys icon for a direction.
+Hint hint(uint16_t bit, SDL_Scancode key, const char* label) {
+    return {{prompt_for_button(bit).pad, key_icon({Input::Key, (int16_t)key, 0})}, label};
+}
+Hint hint_dirs(const char* dirs, const char* label) {  // "vertical", "horizontal", "" (all)
+    const std::string d = *dirs ? std::string("_") + dirs : "";
+    return {{pad_icon_named(("dpad" + d).c_str()), {"keyboard_arrows" + (*dirs ? d : "_all"), ""}}, label};
+}
+
 // A centred menu box over the game. lines[0] is the title; a '\t' splits a line into a label
-// and a value column. Sizes are in the overlay's 640x480 units.
-void draw_panel(const std::vector<std::string>& lines, int highlight) {
-    constexpr float kLine = 15.0f, kTitle = 21.0f, kPad = 12.0f, kGap = 26.0f;
+// and a value column; the button prompts go at the bottom. Sizes are in the overlay's 640x480 units.
+void draw_panel(const std::vector<std::string>& lines, int highlight, const std::vector<Hint>& hints) {
+    constexpr float kLine = 15.0f, kTitle = 21.0f, kPad = 12.0f, kGap = 26.0f, kHint = 18.0f;
     SDL_Renderer* r = present_overlay_begin();
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 
     const int n = (int)lines.size();
-    float label_w = 0, value_w = 0, whole_w = n ? ui_text_width(r, lines[0].c_str(), kTitle) : 0;
+    const float hints_w = draw_hints(r, 0, 0, kHint, hints, false);
+    float label_w = 0, value_w = 0, whole_w = std::max(hints_w, n ? ui_text_width(r, lines[0].c_str(), kTitle) : 0);
     for (int i = 1; i < n; i++) {
         const size_t tab = lines[i].find('\t');
         if (tab == std::string::npos) {
@@ -39,7 +50,7 @@ void draw_panel(const std::vector<std::string>& lines, int highlight) {
     }
     const float col = label_w > 0 ? label_w + kGap : 0;
     const float w = std::min(620.0f, std::max({whole_w, col + value_w, 300.0f}) + 2 * kPad);
-    const float h = kPad + kTitle + 8 + kLine * (float)std::max(0, n - 1) + kPad;
+    const float h = kPad + kTitle + 8 + kLine * (float)std::max(0, n - 1) + (hints.empty() ? 0 : kHint + 4) + kPad;
     const float x0 = std::round((640 - w) * 0.5f), y0 = std::round(std::max(4.0f, (480 - h) * 0.5f));
 
     SDL_FRect box{x0, y0, w, h};
@@ -66,6 +77,8 @@ void draw_panel(const std::vector<std::string>& lines, int highlight) {
         ui_text(r, x0 + kPad, y, lines[i].substr(0, tab).c_str(), kLine);
         if (tab != std::string::npos) ui_text(r, x0 + kPad + col, y, lines[i].c_str() + tab + 1, kLine);
     }
+    SDL_SetRenderDrawColor(r, 255, 230, 180, 255);
+    draw_hints(r, x0 + (w - hints_w) * 0.5f, y0 + h - kPad - kHint, kHint, hints);
     present_redraw(present_options());
     present_overlay_end();
     present_swap();
@@ -186,9 +199,11 @@ void draw_controls(int mode, int sel, int slot, bool waiting, const std::string&
     const float fy = y0 + h - 40;
     fill(r, x0 + pad, fy, w - 2 * pad, 1, {58, 42, 30});
     if (!status.empty()) text(r, x0 + pad, fy - 18, status, 12, kTitle);
-    const bool pad_nav = input_mode() == M_CONTROLLER;
-    text(r, x0 + pad, fy + 6, pad_nav ? "D-pad: move      Cross / A: change      Square / X: clear" : "Arrows: move      Enter: change      Delete: clear", 12, kDim);
-    text(r, x0 + pad, fy + 20, pad_nav ? "L1 / R1: device      Triangle / Y: defaults      Circle / B: back" : "Tab: device      R: defaults      Esc: back", 12, kDim);
+    set(r, kDim);
+    draw_hints(r, x0 + pad, fy + 3, 17,
+               {hint_dirs("vertical", "move"), hint(B_CROSS, SDL_SCANCODE_RETURN, "change"), hint(B_SQUARE, SDL_SCANCODE_DELETE, "clear")});
+    draw_hints(r, x0 + pad, fy + 21, 17,
+               {hint(B_L1, SDL_SCANCODE_TAB, "device"), hint(B_TRIANGLE, SDL_SCANCODE_R, "defaults"), hint(B_CIRCLE, SDL_SCANCODE_ESCAPE, "back")});
     present_redraw(present_options());
     present_overlay_end();
     present_swap();
@@ -240,10 +255,9 @@ bool pick_chapter(const std::vector<std::string>& chapters, int* chapter, bool* 
         const int first = std::clamp(cur - kShown / 2, 0, std::max(0, n - kShown));
         std::vector<std::string> lines = {"CHAPTERS", ""};
         for (int i = first; i < std::min(n, first + kShown); i++) lines.push_back(" " + chapters[i].substr(0, 35));
-        lines.push_back("");
-        lines.push_back("Up/Down: choose  Left/Right: level");
-        lines.push_back("Enter/X: load    Esc/O: back");
-        draw_panel(lines, 2 + cur - first);
+        draw_panel(lines, 2 + cur - first,
+                   {hint_dirs("vertical", "choose"), hint_dirs("horizontal", "level"),
+                    hint(B_CROSS, SDL_SCANCODE_RETURN, "load"), hint(B_CIRCLE, SDL_SCANCODE_ESCAPE, "back")});
         SDL_Delay(10);
     }
 }
@@ -254,11 +268,11 @@ enum Row {
     R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
     R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_BACK,
     // the Enhancements page: rows of enhancement settings (enh_of)
-    R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_REWIND, R_ENH_BACK,
+    R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_REWIND, R_PROMPTS, R_ENH_BACK,
 };
 const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT,
                                     R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_BACK};
-const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_REWIND, R_ENH_BACK};
+const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_REWIND, R_PROMPTS, R_ENH_BACK};
 
 // The enhancement setting a row shows (-1: none).
 int enh_of(Row r) {
@@ -269,6 +283,7 @@ int enh_of(Row r) {
         case R_GAME_FONT: return E_GAME_FONT;
         case R_FONT: return E_SMOOTH_FONT;
         case R_MENU_SIZE: return E_FONT_SCALE;
+        case R_PROMPTS: return E_PROMPTS;
         case R_CRT: return E_CRT;
         case R_REWIND: return E_REWIND;
         default: return -1;
@@ -527,8 +542,8 @@ void run_settings_menu() {
             lines.push_back("Beyond the original game. Also in the game's");
             lines.push_back("own main menu: Recomp Enhancements.");
         }
-        lines.push_back("Arrows: change   Enter: pick   Esc: back");
-        draw_panel(lines, 1 + sel);
+        draw_panel(lines, 1 + sel,
+                   {hint_dirs("", "change"), hint(B_CROSS, SDL_SCANCODE_RETURN, "pick"), hint(B_CIRCLE, SDL_SCANCODE_ESCAPE, "back")});
         SDL_Delay(15);
     }
     if (quit) g_quit = true;

@@ -132,6 +132,7 @@ void save_settings() {
     std::fprintf(f, "soundfilter %d\n", g_sound_filter);
     std::fprintf(f, "menuflames %d\n", g_menu_flames ? 1 : 0);
     std::fprintf(f, "msaa %d\n", g_gfx.msaa);
+    std::fprintf(f, "prompts %d\n", (int)g_prompt_style);  // 0 auto, 1 PlayStation, 2 Xbox, 3 Steam Deck
     std::fprintf(f, "renderer %s\n", g_gfx.vulkan ? "vulkan" : "opengl");
     if (g_input_mode >= 0) std::fprintf(f, "controls %s\n", g_input_mode == M_KEYBOARD ? "keyboard" : "controller");
     for (int m = 0; m < M_COUNT; m++)  // "bind kbm jump=k44,m3": each action's inputs (settings screen -> Set up buttons)
@@ -190,6 +191,7 @@ bool load_settings() {
                 found = true;
             }
             if (!std::strcmp(name, "msaa")) g_gfx.msaa = v >= 8 ? 8 : v >= 4 ? 4 : v >= 2 ? 2 : 1, found = true;
+            if (!std::strcmp(name, "prompts")) g_prompt_style = (PromptStyle)std::clamp(v, 0, 3), found = true;
             if (found) continue;
         }
         if (char rn[16]; std::sscanf(line, "renderer %15s", rn) == 1) {
@@ -235,8 +237,8 @@ const char* enh_name(int id) {
                                   "Font upscaling", "Renderer", "Screen mode", "Display", "Autosave", "One-liners",
                                   "Anti-aliasing", "Infinite health", "Infinite lives", "Unlock all weapons", "Infinite ammo",
                                   "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font type", "Smooth textures", "HD replacements",
-                                  "Sound filter", "Selection highlight", "Rewind"};
-    static_assert(std::size(names) == E_REWIND + 1, "one name per EnhSetting");
+                                  "Sound filter", "Selection highlight", "Rewind", "Button prompts"};
+    static_assert(std::size(names) == E_PROMPTS + 1, "one name per EnhSetting");
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -261,6 +263,10 @@ std::string enh_value(int id) {
         case E_REPLACE: return g_tex_replace ? "On" : "Off (original)";
         case E_SOUND_FILTER: return g_sound_filter == 0 ? "Original" : g_sound_filter == 2 ? "Sharp" : "Smooth";
         case E_MENU_FLAMES: return g_menu_flames ? "Remastered" : "Original";
+        case E_PROMPTS: {
+            static const char* kStyles[] = {"Auto", "PlayStation", "Xbox", "Steam Deck"};
+            return kStyles[(int)g_prompt_style];
+        }
         case E_GAME_FONT: {
             if (texreplace_font_name().empty()) return "Original (no font built in)";
             return g_game_font ? "Remastered" : "Original";
@@ -311,6 +317,7 @@ void enh_change(int id, int dir) {
             break;
         case E_SOUND_FILTER: g_sound_filter = (g_sound_filter + dir + 3) % 3; break;
         case E_MENU_FLAMES: g_menu_flames = !g_menu_flames; break;
+        case E_PROMPTS: g_prompt_style = (PromptStyle)(((int)g_prompt_style + dir + 4) % 4); break;
         case E_GAME_FONT:
             g_game_font = !g_game_font;
             texreplace_font_changed();

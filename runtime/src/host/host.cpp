@@ -139,12 +139,13 @@ void save_shot() {
     host_toast("Screenshot saved: " + path);
 }
 
-// Over the game image: the screenshot first (the game alone), then the toast, the version (on
-// the title screen and while the game's menus are up) and the FPS counter; then the swap.
+// Over the game image: the screenshot first (the game alone), then the button prompts, the toast, the
+// version (on the title screen and while the game's menus are up) and the FPS counter; then the swap.
 void finish_frame(bool version) {
     for (uint64_t f : g_shot_frames)
         if (f == g_frame) present_save_bmp((g_shot_prefix + "_" + std::to_string(f) + ".bmp").c_str());
     if (g_shot_key) save_shot();
+    draw_game_prompts();
     draw_toast();
     if (version && (gpu_title_screen() || replace_title_shown(gpu_display().y)))
         draw_badge(1, kVersion, (int)std::strlen(kVersion) + 1, true);

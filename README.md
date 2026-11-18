@@ -100,6 +100,7 @@ runtime/
   include/recomp.h       ABI of the generated code (CPU state, inline memory access, hooks)
   shaders/               Vulkan shaders (SPIR-V at build time); the CRT filter's GLSL, also used by OpenGL
   data/subtitles.txt     the voice lines' text (built into the exe)
+  assets/prompts/        button prompt icons, Kenney's Input Prompts, CC0 (built into the exe)
   src/main.cpp           start-up: the disc, the executable, the hardware, the entry point
   src/core/              the machine: memory map, scheduler, interrupts, COP0, dispatch (core.cpp),
                          kernel A0/B0/C0 functions (bios.cpp), the fallback interpreter, memory
@@ -140,3 +141,8 @@ Things the game does that the tools have to handle:
 - **Mustafa Samer** ([@MustafaSamer93](https://github.com/MustafaSamer93)): project lead
 - **Claude** (Anthropic's AI, through [Claude Code](https://claude.com/claude-code)): co-author of the
   recompiler, runtime and enhancements; its commits carry a `Co-Authored-By: Claude` line
+
+## Credits
+
+- Button prompt icons: [Input Prompts](https://kenney.nl/assets/input-prompts) by Kenney
+  ([www.kenney.nl](https://www.kenney.nl)), CC0 (`runtime/assets/prompts/License.txt`)

@@ -90,6 +90,8 @@ int shoulder_value(int k) {
     const int v = g_cpu ? game_pad_action(g_cpu, k) : 0;
     return v ? v : kGameDefaults[k];
 }
+}  // namespace
+
 uint16_t action_bit(int a) {
     if (kActions[a].shoulder < 0) return kActions[a].bit;
     switch (shoulder_value(kActions[a].shoulder)) {
@@ -99,6 +101,8 @@ uint16_t action_bit(int a) {
         default: return B_R1;
     }
 }
+
+namespace {
 
 // ================================================================ reading inputs
 
@@ -239,16 +243,6 @@ uint64_t g_menu_pulse_until = 0;
 constexpr uint64_t kPulseMs = 100;
 bool game_menu_up() { return g_menu_drawn && host_frame_count() - g_menu_drawn < 4; }
 
-// The buttons named as the controller in use names them.
-bool playstation_pad() {
-    for (auto& d : g_devices) {
-        if (!d.pad) continue;
-        const SDL_GamepadType t = SDL_GetGamepadType(d.pad);
-        return t == SDL_GAMEPAD_TYPE_PS3 || t == SDL_GAMEPAD_TYPE_PS4 || t == SDL_GAMEPAD_TYPE_PS5;
-    }
-    return false;
-}
-
 // Scripted input (--press): a button held on port 0 for a frame range (bit 0: Rewind).
 struct ScriptedPress {
     uint16_t bit;
@@ -275,7 +269,7 @@ std::string input_name(const Input& in) {
                                          "L1", "R1", "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Mute",
                                          "Paddle R1", "Paddle L1", "Paddle R2", "Paddle L2", "Touchpad"};
     static const char* kMouse[] = {"Mouse", "Mouse left", "Mouse middle", "Mouse right", "Mouse 4", "Mouse 5"};
-    const bool ps = playstation_pad();
+    const bool ps = prompt_style() == PromptStyle::PlayStation;  // (the buttons named as the prompts show them)
     switch (in.kind) {
         case Input::Key: {
             const char* n = SDL_GetScancodeName((SDL_Scancode)in.code);

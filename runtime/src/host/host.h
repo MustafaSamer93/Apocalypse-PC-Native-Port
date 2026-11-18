@@ -29,6 +29,9 @@ void host_audio_push(const int16_t* stereo, int frames);
 void host_audio_clear();
 bool host_rewind_held();  // the Rewind button (input.cpp)
 void host_toast(const std::string& text);  // a short message in the corner ("State 1 saved")
+// A line with an action's button prompt for a few seconds ("Hold [pad] / [key] to rewind"); `action`
+// is a host action id (host_internal.h Action). prompts.cpp.
+void host_prompt_hint(const std::string& before, int action, const std::string& after);
 
 // Scripted runs: --chapter, --screenshot
 extern int g_start_state;                // state slot loaded at frame 30 (-1: none)
@@ -73,7 +76,7 @@ enum EnhSetting {
     E_FPS, E_DRAWDIST, E_SMOOTH_FONT, E_FONT_SCALE, E_RENDERER, E_SCREEN, E_DISPLAY,
     E_AUTOSAVE, E_SUBTITLES, E_AA, E_CHEAT_HEALTH, E_CHEAT_LIVES, E_CHEAT_WEAPONS, E_CHEAT_AMMO,
     E_CHEAT_BOMBS, E_CHEAT_ONEHIT, E_FPS_COUNTER, E_CRT, E_GAME_FONT, E_TEX_SMOOTH, E_REPLACE, E_SOUND_FILTER,
-    E_MENU_FLAMES, E_REWIND,
+    E_MENU_FLAMES, E_REWIND, E_PROMPTS,
 };
 extern bool g_menu_flames;  // the selected menu item's flames: in its letters (Remastered) or round them (Original)
 extern int g_sound_filter;  // the voices' interpolation: 0 Original (Gaussian), 1 Smooth (cubic), 2 Sharp (spu.cpp)

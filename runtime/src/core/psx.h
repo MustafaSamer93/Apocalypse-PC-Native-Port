@@ -109,6 +109,15 @@ struct TextCall {
     uint32_t text, from, to;
 };
 extern std::vector<TextCall>* g_text_calls;
+// The game's button prompts in the frame shown (gpu.cpp): the front end's button legends (their icon is
+// no longer drawn) and PRESS START, for the host to draw its own button icons there (host/prompts.cpp).
+// The rectangle is the game's icon or text in screen pixels; `after`: the icons go after it (text).
+struct ScreenPrompt {
+    int x0, y0, x1, y1;
+    uint16_t button;  // PS1 pad bit (host_internal.h B_*)
+    bool after;
+};
+std::vector<ScreenPrompt> gpu_prompts();
 
 // ---------------------------------------------------------------- GTE (gte.cpp)
 
