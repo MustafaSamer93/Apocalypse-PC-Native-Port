@@ -22,5 +22,9 @@ int main() {
     s = autodetect_choose(big);
     assert(s.scale == 9 && s.aa == 3 && s.msaa == 8 && s.fps == 60 && s.aspect == Aspect::A16_9);
 
+    HwProfile mine{.vulkan = true, .discrete = true, .vram_mb = 16112, .desktop_w = 1920, .desktop_h = 1080, .refresh_hz = 75};
+    s = autodetect_choose(mine);
+    assert(s.scale == 5 && s.aa == 3 && s.msaa == 8 && s.fps == 75 && s.aspect == Aspect::A16_9);
+
     std::puts("autodetect ok");
 }
