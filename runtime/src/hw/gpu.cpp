@@ -77,11 +77,6 @@ std::vector<std::pair<uint32_t, uint32_t>> g_text_packets;
 // Button prompts (gpu_prompts): the legends noted while a frame is built, and in the frame drawn last.
 std::vector<ScreenPrompt> g_prompts_building, g_prompts_shown;
 uint64_t g_prompts_frame = 0;
-// PRESS START (8001AA28 with this text) is drawn once, into the title picture, and stays on screen until
-// the game draws its next frame (the main menu, the attract demo).
-constexpr uint32_t kPressStartText = 0x800A0818;
-ScreenPrompt g_press_start{0, 0, -1, -1, 1 << 3, true};
-int g_frames_since_press_start = 2;  // frames drawn (gpu_list_done) since it was
 void draw_polygon(const uint32_t* w);
 // HwPrim::box for texels u0..u1, v0..v1 at the vertices (the far ones are not drawn).
 uint32_t smooth_box(int u0, int v0, int u1, int v1) {
@@ -1189,7 +1184,7 @@ void flames_behind(R3000* c, uint32_t from, uint32_t to) {
 }
 
 // Button prompts (gpu_prompts): the front end's legends at the bottom of its screens, a button icon
-// (8006D0D4 places the icon's quad) and its text, and PRESS START on the title.
+// (8006D0D4 places the icon's quad) and its text.
 constexpr uint32_t kButtonSprites = 0x800FF01C;  // the legends' icons: +0 Cross, +8 Triangle
 constexpr struct { uint32_t offset; uint16_t button; } kLegendIcons[] = {{0, 1 << 14}, {8, 1 << 12}};
 
@@ -1200,38 +1195,13 @@ void note_legend_icon(R3000* c, uint32_t sprite, uint32_t quad) {
     for (const auto& k : kLegendIcons)
         if (sprite == MEM_R32(c, kButtonSprites) + k.offset) button = k.button;
     if (!button) return;
-    ScreenPrompt p{4096, 4096, -4096, -4096, button, false};
+    ScreenPrompt p{4096, 4096, -4096, -4096, button};
     for (uint32_t k = 0; k < 4; k++) {  // corners at +8, +16, +24, +32 (x, y halfwords)
         const int x = (int16_t)MEM_R16(c, quad + 8 + 8 * k), y = (int16_t)MEM_R16(c, quad + 10 + 8 * k);
         p.x0 = std::min(p.x0, x), p.y0 = std::min(p.y0, y), p.x1 = std::max(p.x1, x), p.y1 = std::max(p.y1, y);
     }
     for (uint32_t k = 1; k < 4; k++) MEM_W32(c, quad + 8 + 8 * k, MEM_R32(c, quad + 8));
     if (g_prompts_building.size() < 8) g_prompts_building.push_back(p);
-}
-
-// PRESS START: where its letters went (three textured quads a letter, GP0 2C, then the unused room for its
-// flames, zeros; walked by their commands, as game_menu.cpp menu_mouse does).
-void note_press_start(R3000* c, uint32_t from, uint32_t to) {
-    ScreenPrompt p{4096, 4096, -4096, -4096, 1 << 3, true};
-    for (uint32_t a = from; a + 4 < to;) {
-        if (!MEM_R32(c, 0x80000000u | a)) {
-            a += 4;
-            continue;
-        }
-        const uint32_t cmd = MEM_R32(c, 0x80000000u | (a + 4)) >> 24;
-        const uint32_t words = cmd >= 0x2C && cmd <= 0x2F ? 9 : cmd == 0x3E ? 12 : 0;
-        if (!words) break;
-        if (cmd <= 0x2D)
-            for (uint32_t k : {2u, 4u, 6u, 8u}) {
-                const uint32_t xy = MEM_R32(c, 0x80000000u | (a + 4 * k));
-                const int x = (int16_t)(xy & 0xFFFF), y = (int16_t)(xy >> 16);
-                p.x0 = std::min(p.x0, x), p.y0 = std::min(p.y0, y), p.x1 = std::max(p.x1, x), p.y1 = std::max(p.y1, y);
-            }
-        a += 4 * (words + 1);
-    }
-    if (p.x0 > p.x1) return;
-    g_press_start = p;
-    g_frames_since_press_start = 0;
 }
 
 // Entry hooks on the text routine (8001AA28, a2 = the text) and the icon routines: run the
@@ -1253,7 +1223,7 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
     }
     g_last_text_from = from;
     const uint32_t icon_quad = c->r[6], icon_sprite = c->r[7];  // (8006D0D4: a2 = the quad 8006D028 made, a3 = the sprite)
-    if (which == 0 && c->r[6] == kPressStartText && !core_in_ghost()) {
+    if (which == 0 && c->r[6] == 0x800A0818 && !core_in_ghost()) {
         if (!g_press_start_seen) log_msg(LogCat::Host, "title screen (version shown)");
         g_press_start_seen = host_frame_count();
     }
@@ -1270,7 +1240,6 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
     if (which == 0 && g_text_calls && g_text_calls->size() < 32) g_text_calls->push_back({text, from, to});
     if (to > from && tilt != 0.0f && g_tilts.size() < 16) g_tilts.push_back({from, to, tx, ty, tilt});
     if (which == 2) note_legend_icon(c, icon_sprite, icon_quad);
-    if (which == 0 && text == kPressStartText) note_press_start(c, from, to);
     c->r[31] = ra;
     c->r[29] = sp;
     return 1;
@@ -1279,7 +1248,6 @@ extern "C" int psx_hook_2d_call(R3000* c, int which) {
 std::vector<ScreenPrompt> gpu_prompts() {
     std::vector<ScreenPrompt> p;
     if (host_frame_count() - g_prompts_frame < 4) p = g_prompts_shown;
-    if (g_frames_since_press_start <= 1) p.push_back(g_press_start);
     return p;
 }
 
@@ -1292,7 +1260,6 @@ void gpu_list_done() {
     g_text_packets.clear();
     g_tilts.clear();
     g_last_text_from = 0;
-    if (g_frames_since_press_start <= 1) g_frames_since_press_start++;
     if (!g_prompts_building.empty()) {
         g_prompts_shown.swap(g_prompts_building);
         g_prompts_building.clear();

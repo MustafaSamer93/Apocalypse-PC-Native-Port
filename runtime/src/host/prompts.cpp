@@ -1,7 +1,7 @@
 // Button prompts: the controller button and the keyboard key bound to the same thing, side by side
 // ("[pad] / [key]"), as Kenney's Input Prompts icons (runtime/assets/prompts, built into the exe) in the
 // style of the controller: PlayStation, Xbox or Steam Deck. Used by the settings and controls screens,
-// the game's own legends (gpu.cpp gpu_prompts: the front end's button icons and PRESS START) and
+// the game's own legends (gpu.cpp gpu_prompts: the front end's button icons) and
 // host_prompt_hint.
 #include <SDL3/SDL.h>
 
@@ -251,10 +251,10 @@ void draw_game_prompts() {
         game_to_overlay(d, (float)p.x0, (float)p.y0, &x0, &y0);
         game_to_overlay(d, (float)p.x1, (float)p.y1, &x1, &y1);
         const Prompt prompt = prompt_for_button(p.button);
-        // a legend's pair ends where the game's icon did (its text follows); PRESS START's follows the text
-        float h = (y1 - y0) * (p.after ? 1.15f : 1.05f);
-        if (!p.after) h *= std::min(1.0f, (x1 - 2) / std::max(1.0f, draw_prompt(r, prompt, 0, 0, h, false)));  // (on screen)
-        const float x = p.after ? x1 + h * 0.25f : x1 - draw_prompt(r, prompt, 0, 0, h, false);
+        // the pair ends where the game's icon did (its text follows)
+        float h = (y1 - y0) * 1.05f;
+        h *= std::min(1.0f, (x1 - 2) / std::max(1.0f, draw_prompt(r, prompt, 0, 0, h, false)));  // (on screen)
+        const float x = x1 - draw_prompt(r, prompt, 0, 0, h, false);
         draw_prompt(r, prompt, x, (y0 + y1 - h) * 0.5f, h, true);
     }
     if (hint) {  // a line in a dark box at the bottom
