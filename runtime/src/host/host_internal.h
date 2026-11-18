@@ -61,7 +61,7 @@ extern bool g_fullscreen;
 extern bool g_fps_counter;
 extern const char* const kAaNames[4];
 const char* settings_file();  // settings.ini (APOC_SETTINGS=PATH: another file, for test runs)
-void load_settings();
+bool load_settings();         // false: no settings file yet (first boot)
 void save_settings();          // written safely: a crash while saving keeps the old file
 void apply_graphics();         // the renderer, filters and aspect for the current settings
 std::string msaa_label();

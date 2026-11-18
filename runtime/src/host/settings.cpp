@@ -154,10 +154,10 @@ void save_settings() {
 #endif
 }
 
-void load_settings() {
+bool load_settings() {
     for (int m = 0; m < M_COUNT; m++) binds_default(m);
     FILE* f = std::fopen(settings_file(), "r");
-    if (!f) return;
+    if (!f) return false;
     // "name N" lines for on/off and number settings
     const struct { const char* name; bool* flag; int* value; int lo, hi; } kSimple[] = {
         {"fullscreen", &g_fullscreen}, {"font", &g_smooth_font}, {"texreplace", &g_tex_replace},
@@ -220,6 +220,7 @@ void load_settings() {
     std::fclose(f);
     // older settings files had 150 / 300 too: the nearest of the three
     g_draw_distance = g_draw_distance < 150 ? 100 : g_draw_distance < 300 ? 200 : 400;
+    return true;
 }
 
 }  // namespace host

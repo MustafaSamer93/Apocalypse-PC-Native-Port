@@ -13,11 +13,13 @@
 #include "core/psx.h"
 #include "core/savestate.h"
 #include "game/game.h"
+#include "host/autodetect.h"
 #include "host/host.h"
 #include "host/host_internal.h"
 #include "render/gpu_hw.h"
 #include "render/present.h"
 #include "render/render_backend.h"
+#include "render/vk_context.h"
 #include "render/ui_text.h"
 
 #ifdef _WIN32
@@ -457,6 +459,50 @@ PresentOptions present_options() {
 
 using namespace host;
 
+// First boot: pick the graphics settings from the hardware, then save them so this happens once.
+static void auto_configure(const SDL_DisplayMode* desktop) {
+    HwProfile hw;
+#ifdef __linux__
+    hw.linux = true;
+#endif
+    hw.vulkan = render_backend() == Backend::Vulkan;
+    std::string gpu = "OpenGL";
+    if (hw.vulkan && vkc::gpu) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(vkc::gpu, &p);
+        VkPhysicalDeviceMemoryProperties mem;
+        vkGetPhysicalDeviceMemoryProperties(vkc::gpu, &mem);
+        VkDeviceSize vram = 0;
+        for (uint32_t i = 0; i < mem.memoryHeapCount; i++)
+            if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max(vram, mem.memoryHeaps[i].size);
+        hw.discrete = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        hw.vram_mb = vram >> 20;
+        gpu = p.deviceName;
+        // the Deck's APU: "AMD Custom GPU 0405" (Van Gogh)
+        hw.deck_like = hw.linux && (std::strstr(p.deviceName, "Custom GPU") || std::strstr(p.deviceName, "VANGOGH"));
+    }
+    if (desktop) {
+        hw.desktop_w = desktop->w;
+        hw.desktop_h = desktop->h;
+        hw.refresh_hz = (int)std::lround(desktop->refresh_rate);
+    }
+    if (hw.linux && hw.desktop_w == 1280 && hw.desktop_h == 800) hw.deck_like = true;
+    const AutoSettings s = autodetect_choose(hw);
+    g_gfx.scale = s.scale;
+    g_gfx.aa = s.aa;
+    g_gfx.msaa = s.msaa;
+    g_gfx.fps = s.fps;
+    g_gfx.aspect = s.aspect;
+    g_gfx.vulkan = hw.vulkan;
+    g_fullscreen = true;
+    save_settings();
+    log_msg(LogCat::Host,
+            "first boot: %s (%s, %llu MB), desktop %dx%d at %d Hz%s -> %dx scale, aa %d, msaa %d, %d fps, aspect %d, %s",
+            gpu.c_str(), hw.discrete ? "discrete" : "integrated or unknown", (unsigned long long)hw.vram_mb, hw.desktop_w,
+            hw.desktop_h, hw.refresh_hz, hw.deck_like ? ", Steam Deck-like" : "", s.scale, s.aa, s.msaa, s.fps,
+            (int)s.aspect, hw.vulkan ? "Vulkan" : "OpenGL");
+}
+
 bool host_init(const char* title, int scale) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
         log_msg(LogCat::Host, "SDL_Init failed: %s", SDL_GetError());
@@ -465,7 +511,7 @@ bool host_init(const char* title, int scale) {
     // Community mappings (https://github.com/mdqinc/SDL_GameControllerDB), if the user adds the file.
     if (SDL_AddGamepadMappingsFromFile("gamecontrollerdb.txt") > 0)
         log_msg(LogCat::Host, "loaded extra controller mappings from gamecontrollerdb.txt");
-    load_settings();
+    const bool first_boot = !load_settings();
     report_header();
     // Fullscreen (on the desktop's own mode) unless the player chose a window. The window, for
     // then: shaped like the picture; `scale` N asks for 240*N lines; 0 (the default) asks for
@@ -516,7 +562,8 @@ bool host_init(const char* title, int scale) {
         g_window = nullptr;
         return false;
     };
-    const bool want_vulkan = g_renderer_override >= 0 ? g_renderer_override == 1 : g_gfx.vulkan;
+    // First boot: try Vulkan, which can also tell what the GPU is; OpenGL is the fallback as always.
+    const bool want_vulkan = g_renderer_override >= 0 ? g_renderer_override == 1 : first_boot || g_gfx.vulkan;
     g_video_ok = want_vulkan && open_window(Backend::Vulkan);
     if (want_vulkan && !g_video_ok) {
         log_msg(LogCat::Host, "Vulkan did not start; using OpenGL");
@@ -549,6 +596,7 @@ bool host_init(const char* title, int scale) {
     }
     present_set_vsync(g_vsync_pacing);
     g_vsync_active = g_vsync_pacing;
+    if (first_boot) auto_configure(desktop);
     apply_graphics();
 
     SDL_AudioSpec spec{SDL_AUDIO_S16, 2, 44100};
