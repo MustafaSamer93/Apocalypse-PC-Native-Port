@@ -93,6 +93,8 @@ static const unsigned char kEmbeddedFont[] = {@GAME_FONT_BYTES@ 0};
 # into the exe too, found by file name (ui_text.cpp ui_icon).
 file(GLOB PROMPT_PNGS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/assets/prompts/*/*.png)
 list(SORT PROMPT_PNGS)
+# (read here, at configure time: an edited icon must configure again)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PROMPT_PNGS})
 set(PROMPT_ARRAYS "")
 set(PROMPT_TABLE "")
 set(i 0)
