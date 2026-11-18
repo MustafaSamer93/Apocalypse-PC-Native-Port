@@ -1,10 +1,11 @@
-"""Button prompt icons in the game's style: bronze riveted plates like its own legend icons.
+"""Button prompt icons in the game's style: aged bronze plates like its own legend icons.
 
 Rebuilds runtime/assets/prompts/<style>/*.png from Kenney's "Input Prompts" pack (CC0, kenney.nl):
     python tools/make_prompts.py "<pack folder>"   (the folder with "PlayStation Series", ...)
 
-Every icon keeps Kenney's outline. Face buttons sit on an octagon plate with rivets, the symbol in the
-PlayStation colours or white; other buttons are bronze in their own shape with white letters. Sticks
+Every icon keeps Kenney's outline. The bronze is aged, with rust in the rim and a gold bevel on the upper
+left edges. Face buttons are round, the symbol in the PlayStation colours or white, all symbols as tall
+as the letters; other buttons are bronze in their own shape with white letters. Sticks
 (and the labelled buttons) stay bronze with only the direction arrows and the letter white, their ring a
 light bronze line shaded in black.
 """
@@ -56,8 +57,23 @@ def centre_piece(a, ps):
     return next(m for m in ps if m.getpixel(seed))
 
 
-def plate(mask):
-    """Bronze over the outline: light from the upper left, grain, a dark rim and a bevel."""
+def noise(seed, scale):
+    """Blotchy noise 0..255: random values blurred to patches `scale` px across."""
+    rnd = random.Random(seed)
+    small = Image.new("L", (N // scale + 2,) * 2)
+    small.putdata([rnd.randint(0, 255) for _ in range(small.width * small.height)])
+    return small.resize((N + 2 * scale,) * 2, Image.BICUBIC).crop((scale, scale, scale + N, scale + N))
+
+
+def edge_band(mask, width):
+    """255 at the outline, fading to 0 about `width` px inside."""
+    inner = mask.filter(ImageFilter.MinFilter(width | 1)).filter(ImageFilter.GaussianBlur(width / 2))
+    return ImageChops.subtract(mask, inner)
+
+
+def plate(mask, seed=3):
+    """Aged bronze over the outline: light from the upper left, grain, a dark rim, rust in the rim and a
+    few faint patches, and a gold bevel on the upper left edges (worn clean)."""
     w, h = mask.size
     rnd = random.Random(7)
     img = Image.new("RGB", (w, h))
@@ -71,25 +87,25 @@ def plate(mask):
     img = Image.composite(Image.new("RGB", (w, h), (40, 26, 16)), img, edge)
     hi = ImageChops.subtract(mask, ImageChops.offset(mask, 3, 3)).filter(ImageFilter.GaussianBlur(1))
     img = Image.composite(Image.new("RGB", (w, h), (230, 190, 140)), img, hi.point(lambda v: v // 2))
+    img = Image.blend(img, Image.new("RGB", (w, h), (70, 40, 22)), 0.18)
+    rim_rust = ImageChops.multiply(edge_band(mask, 10), noise(seed, 6).point(lambda v: 255 if v > 130 else 60))
+    patches = ImageChops.multiply(noise(seed + 5, 12).point(lambda v: max(0, v - 170) * 3), mask)
+    rust = ImageChops.lighter(rim_rust.point(lambda v: v * 3 // 5), patches.filter(ImageFilter.GaussianBlur(2)).point(lambda v: v // 2))
+    img = Image.composite(Image.new("RGB", (w, h), (125, 55, 25)), img, rust)
+    inset = mask.filter(ImageFilter.MinFilter(3))
+    line = ImageChops.subtract(inset, inset.filter(ImageFilter.MinFilter(5))).filter(ImageFilter.GaussianBlur(0.6))
+    light = Image.linear_gradient("L").rotate(45).resize((w, h)).transpose(Image.FLIP_TOP_BOTTOM)
+    light = light.transpose(Image.FLIP_LEFT_RIGHT).point(lambda v: max(0, v * 2 - 200))
+    img = Image.composite(Image.new("RGB", (w, h), (255, 225, 165)), img, ImageChops.multiply(line, light))
     out = img.convert("RGBA")
     out.putalpha(mask)
     return out
 
 
-def octagon(n, cut=0.22):
-    m = Image.new("L", (n, n), 0)
-    c = int(n * cut)
-    ImageDraw.Draw(m).polygon([(c, 2), (n - c, 2), (n - 2, c), (n - 2, n - c), (n - c, n - 2), (c, n - 2),
-                               (2, n - c), (2, c)], fill=255)
-    return m
-
-
-def rivets(img):
-    d = ImageDraw.Draw(img)
-    for fx, fy in ((0.3, 0.2), (0.72, 0.24), (0.25, 0.75), (0.75, 0.78)):
-        x, y = N * fx, N * fy
-        d.ellipse((x - 5, y - 5, x + 5, y + 5), fill=(70, 50, 35, 255))
-        d.ellipse((x - 3, y - 4, x + 2, y + 1), fill=(225, 210, 185, 255))
+def disc(n):
+    big = Image.new("L", (n * 4, n * 4), 0)
+    ImageDraw.Draw(big).ellipse((8, 8, n * 4 - 8, n * 4 - 8), fill=255)
+    return binary(big.resize((n, n), Image.LANCZOS))
 
 
 def symbol_of(icon, a):
@@ -107,15 +123,21 @@ def face_kind(name):
     return None
 
 
+LETTER_SCALE = 1.3  # the letters' size on a round plate (Kenney's are small)
+letter_height = 0.0  # main(): the height that gives them, which the PlayStation shapes match
+
+
 def face(icon, a, kind):
     sym = symbol_of(icon, a)
-    big = sym.resize((int(N * 1.55),) * 2, Image.LANCZOS)  # the original's symbol nearly fills the plate
+    scale = LETTER_SCALE
+    if kind in SYMBOL:
+        bb = sym.getbbox()
+        scale = letter_height / (bb[3] - bb[1])
+    big = sym.resize((int(N * scale),) * 2, Image.LANCZOS)
     o = (big.width - N) // 2
     sym = big.crop((o, o, o + N, o + N)).filter(ImageFilter.MaxFilter(3))
-    mask = octagon(N)
-    out = plate(mask)
-    rivets(out)
-    return finish(out, mask, sym, SYMBOL.get(kind, WHITE))
+    mask = disc(N)
+    return finish(plate(mask), mask, sym, SYMBOL.get(kind, WHITE))
 
 
 def shaped(icon, a, name):
@@ -168,6 +190,11 @@ def main():
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     pack = sys.argv[1]
+    global letter_height
+    ref = Image.open(os.path.join(pack, STYLES["xbox"], "Double", "xbox_button_color_a.png")).convert("RGBA")
+    ref = ref.resize((N, N), Image.LANCZOS)
+    bb = symbol_of(ref, binary(ref.getchannel("A"))).getbbox()
+    letter_height = (bb[3] - bb[1]) * LETTER_SCALE
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runtime", "assets", "prompts")
     for style, folder in STYLES.items():
         out_dir = os.path.join(root, style)
