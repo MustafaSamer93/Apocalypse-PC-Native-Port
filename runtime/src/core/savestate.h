@@ -32,6 +32,21 @@ bool state_read_autosave(uint8_t* record);
 extern uint64_t g_level_render_frame;  // the last frame the level render ran (sim60.cpp psx_hook_render)
 extern bool g_autosave;  // setting: auto-save at checkpoints
 
+// Rewind (rewind.cpp): hold a button and the game plays backwards, up to 10 seconds.
+extern bool g_rewind;       // setting
+extern bool g_rewind_used;  // rewound at least once since the game started (a speedrun is then assisted)
+bool rewind_available();    // on, and there is a past to go back to
+bool rewind_active();       // going back now (the game's sound is muted)
+void rewind_clear();
+struct R3000;
+// Once per frame at the safe point: keeps a state, or (the button held) goes back one and
+// resumes there. `allowed`: nothing in the way (a menu, a movie, a load, a level not running...).
+void rewind_frame(R3000* c, uint32_t pc, bool allowed);
+// The machine as a save state in memory (VRAM as the CPU copy has it), and back (only the VRAM that
+// changed goes to the GPU): a restore resumes at the safe point, as a loaded state does, and does not return.
+void state_capture(std::vector<uint8_t>& out, R3000* c, uint32_t pc);
+[[noreturn]] void state_restore(const std::vector<uint8_t>& data, R3000* c);
+
 // Auto-save triggers (see savestate.cpp).
 void state_note_level_start();
 void state_note_main_menu();  // the front end built its main menu (game over start point forgotten)

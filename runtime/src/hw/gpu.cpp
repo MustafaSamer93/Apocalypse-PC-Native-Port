@@ -1253,9 +1253,35 @@ void gpu_regs_state(StateIO& s) {
     s(g_gpuread);
 }
 
+// Rewind states skip the readback: the CPU copy has every upload, fill and copy, and what it lacks
+// (the polygons drawn) the game draws again before it shows a frame.
+bool g_state_cpu_vram = false;
+
 void gpu_state(StateIO& s) {
     s.marker(0x47505520);  // "GPU "
-    if (!s.loading() && hw_active()) hw_readback(0, 0, 1024, 512, g_vram);  // GPU-side VRAM is authoritative
+    if (!s.loading() && hw_active() && !g_state_cpu_vram) hw_readback(0, 0, 1024, 512, g_vram);  // GPU-side VRAM is authoritative
+    if (s.loading() && g_state_cpu_vram) {
+        // a rewind: only what changed goes to the GPU, so the frames it drew stay on screen
+        static uint16_t before[512][1024];
+        std::memcpy(before, g_vram, sizeof before);
+        s.raw(g_vram, sizeof g_vram);
+        gpu_regs_state(s);
+        int x0 = 1024, x1 = 0, y0 = 512, y1 = 0;
+        for (int y = 0; y < 512; y++) {
+            const uint16_t* now = &vram(0, y);
+            if (std::memcmp(now, before[y], sizeof before[y]) == 0) continue;
+            int a = 0, b = 1023;
+            while (now[a] == before[y][a]) a++;
+            while (now[b] == before[y][b]) b--;
+            x0 = std::min(x0, a), x1 = std::max(x1, b + 1), y0 = std::min(y0, y), y1 = y + 1;
+        }
+        if (x0 < x1) {
+            if (hw_active()) hw_upload(x0, y0, x1 - x0, y1 - y0, g_vram), hw_rec_note_write(x0, y0, x1 - x0, y1 - y0);
+            if (x1 > 512) texreplace_vram_changed(x0, y0, x1 - x0, y1 - y0);
+            texreplace_vram_written(x0, y0, x1 - x0, y1 - y0);
+        }
+        return;
+    }
     s.raw(g_vram, sizeof g_vram);
     gpu_regs_state(s);
     if (s.loading() && hw_active()) hw_upload_all(g_vram);

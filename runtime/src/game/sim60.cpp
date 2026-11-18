@@ -1182,7 +1182,6 @@ bool record_previous_pose(R3000* c, bool anim, bool joints) {
 
 // The level's render (800307F0): its frame noted, the draw distance applied, and with the 60 Hz
 // simulation drawn through sim60_render (which calls this hook again with the frame's values in place).
-bool sim60_in_render();
 int sim60_render(R3000* c);
 extern "C" int psx_hook_render(R3000* c) {
     if (core_in_ghost()) return 0;

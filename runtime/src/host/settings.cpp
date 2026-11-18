@@ -123,6 +123,7 @@ void save_settings() {
     std::fprintf(f, "font %d\n", g_smooth_font ? 1 : 0);
     std::fprintf(f, "menuzoom %d\n", g_menu_zoom);
     std::fprintf(f, "autosave %d\n", g_autosave ? 1 : 0);
+    std::fprintf(f, "rewind %d\n", g_rewind ? 1 : 0);
     std::fprintf(f, "subtitles %d\n", g_subtitles ? 1 : 0);
     std::fprintf(f, "fpscounter %d\n", g_fps_counter ? 1 : 0);
     std::fprintf(f, "texreplace %d\n", g_tex_replace ? 1 : 0);
@@ -161,7 +162,7 @@ bool load_settings() {
     // "name N" lines for on/off and number settings
     const struct { const char* name; bool* flag; int* value; int lo, hi; } kSimple[] = {
         {"fullscreen", &g_fullscreen}, {"font", &g_smooth_font}, {"texreplace", &g_tex_replace},
-        {"fpscounter", &g_fps_counter}, {"subtitles", &g_subtitles}, {"autosave", &g_autosave},
+        {"fpscounter", &g_fps_counter}, {"subtitles", &g_subtitles}, {"autosave", &g_autosave}, {"rewind", &g_rewind},
         {"gamefont", &g_game_font}, {"menuflames", &g_menu_flames},
         {"menuzoom", nullptr, &g_menu_zoom, 30, 80}, {"drawdist", nullptr, &g_draw_distance, 100, 400},
         {"aa", nullptr, &g_gfx.aa, 0, 3}, {"soundfilter", nullptr, &g_sound_filter, 0, 2},
@@ -234,8 +235,8 @@ const char* enh_name(int id) {
                                   "Font upscaling", "Renderer", "Screen mode", "Display", "Autosave", "One-liners",
                                   "Anti-aliasing", "Infinite health", "Infinite lives", "Unlock all weapons", "Infinite ammo",
                                   "Infinite smart bombs", "One hit kill", "FPS counter", "CRT filter", "Font type", "Smooth textures", "HD replacements",
-                                  "Sound filter", "Selection highlight"};
-    static_assert(std::size(names) == E_MENU_FLAMES + 1, "one name per EnhSetting");
+                                  "Sound filter", "Selection highlight", "Rewind"};
+    static_assert(std::size(names) == E_REWIND + 1, "one name per EnhSetting");
     return id >= 0 && id < (int)std::size(names) ? names[id] : "";
 }
 
@@ -251,6 +252,7 @@ std::string enh_value(int id) {
         case E_SCREEN: return g_fullscreen ? "Full" : "Window";
         case E_DISPLAY: return kDisplays[display_choice()].name;
         case E_AUTOSAVE: return g_autosave ? "On" : "Off";
+        case E_REWIND: return g_rewind ? "On" : "Off";
         case E_SUBTITLES: return g_subtitles ? "On" : "Off";
         case E_AA: return kAaNames[std::clamp(g_gfx.aa, 0, 3)];
         case E_FPS_COUNTER: return g_fps_counter ? "On" : "Off";
@@ -297,6 +299,7 @@ void enh_change(int id, int dir) {
             break;
         }
         case E_AUTOSAVE: g_autosave = !g_autosave; break;
+        case E_REWIND: g_rewind = !g_rewind; break;
         case E_SUBTITLES: g_subtitles = !g_subtitles; break;
         case E_AA: g_gfx.aa = (g_gfx.aa + dir + 4) % 4; break;
         case E_FPS_COUNTER: g_fps_counter = !g_fps_counter; break;

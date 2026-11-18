@@ -15,6 +15,7 @@ extern bool g_sim60_fps30;     // frame rate 30 chosen: no 60 Hz simulation
 extern std::string g_sim60_level;
 extern bool g_sim60_demo;
 void sim60_apply();
+bool sim60_in_render();
 void sim60_note_file(const std::string& file);
 
 // ---------------------------------------------------------------- native 3D (mesh.cpp)

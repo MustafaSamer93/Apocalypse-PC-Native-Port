@@ -244,6 +244,7 @@ void bios_vblank(R3000* c);          // BIOS-side pad/card polling at VBlank
 void bios_pad_refresh(R3000* c);     // the pads into their BIOS buffers
 void bios_deliver_event(R3000* c, uint32_t cls, uint32_t spec);
 bool bios_in_exception();
+bool bios_files_busy();  // a memory card file is open or its results are still to come
 
 // ---------------------------------------------------------------- save states
 // Each module saves and loads its state through one function (state_io.h).
@@ -252,6 +253,7 @@ void core_state(StateIO& s);
 void bios_state(StateIO& s);
 void bios_ghost_state(StateIO& s);  // what a ghost render may change
 void gpu_state(StateIO& s);
+extern bool g_state_cpu_vram;  // gpu_state saves VRAM as the CPU copy has it (rewind: no slow readback)
 void gpu_regs_state(StateIO& s);
 void hw_state(StateIO& s);
 void cdrom_state(StateIO& s);

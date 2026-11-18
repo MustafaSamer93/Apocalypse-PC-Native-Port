@@ -129,7 +129,7 @@ struct Group {
     const char* name;
     int first, count;
 };
-constexpr Group kActionGroups[] = {{"MOVEMENT", A_UP, 4}, {"COMBAT", A_AIM, 9}, {"MENU", A_PAUSE, 2}};
+constexpr Group kActionGroups[] = {{"MOVEMENT", A_UP, 4}, {"COMBAT", A_AIM, 9}, {"MENU", A_PAUSE, 2}, {"RECOMP", A_REWIND, 1}};
 
 void draw_controls(int mode, int sel, int slot, bool waiting, const std::string& status) {
     SDL_Renderer* r = present_overlay_begin();
@@ -161,9 +161,9 @@ void draw_controls(int mode, int sel, int slot, bool waiting, const std::string&
     text(r, cx[2], y, "Input 2", 12, kDim);
     y += 16;
     for (const Group& g : kActionGroups) {
-        y += 2;
+        y += 1;
         text(r, cx[0], y, g.name, 11, kDim);
-        y += 13;
+        y += 12;
         for (int a = g.first; a < g.first + g.count; a++) {
             const bool on = a == sel;
             if (on) fill(r, x0 + pad - 6, y - 1, w - 2 * pad + 12, 17, kRowSel);
@@ -180,7 +180,7 @@ void draw_controls(int mode, int sel, int slot, bool waiting, const std::string&
                 frame(r, cx[1 + s], y - 1, bw, 15, hl ? kGlow : in.kind == Input::None ? Rgb{70, 50, 36} : kCapEdge);
                 text(r, cx[1 + s] + 8, y + 0.5f, label, 12, hl && waiting ? kTitle : in.kind == Input::None ? kNone : kInk);
             }
-            y += 17;
+            y += 16;
         }
     }
     const float fy = y0 + h - 40;
@@ -254,11 +254,11 @@ enum Row {
     R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT, R_CRT, R_FILTER,
     R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_BACK,
     // the Enhancements page: rows of enhancement settings (enh_of)
-    R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK,
+    R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_REWIND, R_ENH_BACK,
 };
 const std::vector<Row> kMainRows = {R_SAVE, R_LOAD, R_LOAD_AUTO, R_CHAPTER, R_RENDERER, R_RES, R_AA, R_MSAA, R_ASPECT,
                                     R_CRT, R_FILTER, R_DUMP_TEX, R_TEX_REPLACE, R_ENHANCE, R_BACK};
-const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_ENH_BACK};
+const std::vector<Row> kEnhRows = {R_FPS, R_FPS_COUNTER, R_DRAWDIST, R_GAME_FONT, R_FONT, R_MENU_SIZE, R_REWIND, R_ENH_BACK};
 
 // The enhancement setting a row shows (-1: none).
 int enh_of(Row r) {
@@ -270,6 +270,7 @@ int enh_of(Row r) {
         case R_FONT: return E_SMOOTH_FONT;
         case R_MENU_SIZE: return E_FONT_SCALE;
         case R_CRT: return E_CRT;
+        case R_REWIND: return E_REWIND;
         default: return -1;
     }
 }

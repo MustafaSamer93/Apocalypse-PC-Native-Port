@@ -699,7 +699,7 @@ void host_throttle_frame() {
 }
 
 void host_audio_push(const int16_t* stereo, int frames) {
-    if (!g_audio || g_turbo) return;
+    if (!g_audio || g_turbo || rewind_active()) return;  // (rewinding: silence)
     // Emulated time follows the display (vsync), which is never exactly the PS1's 59.94 Hz, so
     // audio is produced slightly faster or slower than it plays. Nudge the playback rate (<=0.5%,
     // inaudible) to hold the queue near 60 ms instead of letting it underrun (clicks) or

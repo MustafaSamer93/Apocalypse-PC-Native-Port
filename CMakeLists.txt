@@ -122,6 +122,7 @@ add_executable(repocalypse
     runtime/src/core/core.cpp
     runtime/src/core/interp.cpp
     runtime/src/core/memcard.cpp
+    runtime/src/core/rewind.cpp
     runtime/src/core/savestate.cpp
     # PS1 hardware
     runtime/src/hw/cdrom.cpp

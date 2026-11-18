@@ -80,6 +80,7 @@ const ActionInfo kActions[A_COUNT] = {
     {"bomb", "Smart bomb", 0, 3},
     {"pause", "Pause", B_START, -1},
     {"select", "Select", B_SELECT, -1},
+    {"rewind", "Rewind", 0, -1},  // (not the game's: savestate.cpp rewind_frame)
 };
 
 // The shoulder button (game config value: 1 L2, 2 R2, 4 L1, 8 R1) of a shoulder action; before the
@@ -248,7 +249,7 @@ bool playstation_pad() {
     return false;
 }
 
-// Scripted input (--press): a button held on port 0 for a frame range.
+// Scripted input (--press): a button held on port 0 for a frame range (bit 0: Rewind).
 struct ScriptedPress {
     uint16_t bit;
     uint64_t from, to;
@@ -336,6 +337,7 @@ void binds_default(int mode) {
         set(A_BOMB, key(SDL_SCANCODE_F), mouse(SDL_BUTTON_MIDDLE));
         set(A_PAUSE, key(SDL_SCANCODE_RETURN));
         set(A_SELECT, key(SDL_SCANCODE_BACKSPACE));
+        set(A_REWIND, key(SDL_SCANCODE_R));
     } else {  // the PS1 layout, shoulders as the game has them by default
         set(A_UP, button(SDL_GAMEPAD_BUTTON_DPAD_UP), axis(SDL_GAMEPAD_AXIS_LEFTY, -1));
         set(A_DOWN, button(SDL_GAMEPAD_BUTTON_DPAD_DOWN), axis(SDL_GAMEPAD_AXIS_LEFTY, 1));
@@ -499,6 +501,15 @@ PadState host_pad(int port, bool analog) {
     return s;
 }
 
+bool host_rewind_held() {
+    if (game_menu_up()) return false;
+    for (auto& sp : g_script)
+        if (!sp.bit && g_frame >= sp.from && g_frame < sp.to) return true;
+    for (const Input& in : g_binds[input_mode()][A_REWIND])
+        if (input_down(in)) return true;
+    return false;
+}
+
 void host_rumble(int port, uint8_t small_motor, uint8_t large_motor) {
     if (port != 0 || input_mode() != M_CONTROLLER) return;
     static uint8_t last_small = 0, last_large = 0;
@@ -519,7 +530,7 @@ bool host_parse_press_script(const char* spec) {
     static const struct { const char* name; uint16_t bit; } kNames[] = {
         {"SELECT", B_SELECT}, {"START", B_START}, {"UP", B_UP}, {"RIGHT", B_RIGHT}, {"DOWN", B_DOWN},
         {"LEFT", B_LEFT}, {"L2", B_L2}, {"R2", B_R2}, {"L1", B_L1}, {"R1", B_R1},
-        {"TRIANGLE", B_TRIANGLE}, {"CIRCLE", B_CIRCLE}, {"CROSS", B_CROSS}, {"SQUARE", B_SQUARE},
+        {"TRIANGLE", B_TRIANGLE}, {"CIRCLE", B_CIRCLE}, {"CROSS", B_CROSS}, {"SQUARE", B_SQUARE}, {"REWIND", 0},
     };
     const std::string s(spec);
     for (size_t pos = 0; pos < s.size();) {
@@ -529,13 +540,13 @@ bool host_parse_press_script(const char* spec) {
         pos = end + 1;
         const size_t at = item.find('@');
         if (at == std::string::npos) return false;
-        uint16_t bit = 0;
+        int bit = -1;
         for (auto& n : kNames)
             if (item.compare(0, at, n.name) == 0) bit = n.bit;
-        if (!bit) return false;
+        if (bit < 0) return false;
         uint64_t from = std::strtoull(item.c_str() + at + 1, nullptr, 10), len = 6;
         if (size_t plus = item.find('+'); plus != std::string::npos) len = std::strtoull(item.c_str() + plus + 1, nullptr, 10);
-        g_script.push_back({bit, from, from + len});
+        g_script.push_back({(uint16_t)bit, from, from + len});
     }
     return true;
 }

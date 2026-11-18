@@ -84,7 +84,7 @@ enum InputMode { M_KEYBOARD, M_CONTROLLER, M_COUNT };
 // config gives them; the rest to a fixed PS1 button.
 enum Action : uint8_t {
     A_UP, A_DOWN, A_LEFT, A_RIGHT, A_AIM, A_FIRE_UP, A_FIRE_DOWN, A_FIRE_LEFT, A_FIRE_RIGHT,
-    A_JUMP, A_CROUCH, A_WEAPON, A_BOMB, A_PAUSE, A_SELECT, A_COUNT
+    A_JUMP, A_CROUCH, A_WEAPON, A_BOMB, A_PAUSE, A_SELECT, A_REWIND, A_COUNT
 };
 // One input: a key (SDL scancode), mouse button (1-5), the mouse wheel (either way), a gamepad
 // button (SDL_GamepadButton), a gamepad axis pushed one way (SDL_GamepadAxis, dir +1/-1), or a stick

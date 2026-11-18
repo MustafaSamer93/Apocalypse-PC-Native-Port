@@ -337,6 +337,32 @@ void load_record_in_level(R3000* c) {
 
 bool state_read_autosave(uint8_t* record) { return card_read_auto(record) || file_read_auto(record); }
 
+void state_capture(std::vector<uint8_t>& out, R3000* c, uint32_t pc) {
+    StateIO s(false);
+    s.data().swap(out);  // (its memory reused)
+    s.data().clear();
+    g_state_cpu_vram = true;
+    serialize(s, c, pc);
+    g_state_cpu_vram = false;
+    out.swap(s.data());
+}
+
+// As a load (state_poll_load) without the file: the game resumes at the safe point.
+void state_restore(const std::vector<uint8_t>& data, R3000* c) {
+    StateIO s(data);
+    uint32_t pc = 0;
+    g_state_cpu_vram = true;
+    serialize(s, c, pc);
+    g_state_cpu_vram = false;
+    if (!s.ok()) log_msg(LogCat::Core, "rewind: a damaged state; the game state may be inconsistent");
+    sched_refresh(c);
+    host_audio_clear();
+    g_resume_pc = pc;
+    g_resume_pending = true;
+    game_menu_reset(true);
+    std::longjmp(g_resume_jmp, 1);
+}
+
 uint64_t g_level_render_frame = 0;
 
 // Loading replaces the whole machine and abandons whatever is executing, so unlike saving
@@ -353,6 +379,7 @@ void state_poll_load(R3000* c) {
     }
     memcard(0).flush();
     host_audio_clear();
+    rewind_clear();  // (its states lead to a different game)
     host_toast(slot == kAutoSlot       ? "Auto-save loaded"
                : slot >= kChapterBase ? "Chapter " + std::to_string(slot - kChapterBase + 1) + " loaded"
                                       : "State " + std::to_string(slot) + " loaded");
@@ -385,6 +412,10 @@ extern "C" void psx_safepoint(R3000* c, uint32_t pc) {
     state_poll_load(c);
     state_poll_restart(c);
     card_prepare(c);
+    // (a restore resumes at this safe point and never returns here)
+    rewind_frame(c, pc, g_level_render_frame && frame <= g_level_render_frame + 2 && g_restart_at == 0 && g_load_request < 0 &&
+                            g_after_load_lives < 0 && !bios_files_busy() && !gpu_movie_playing() && !movie_replacing() &&
+                            !g_host_menu_open && !sim60_in_render());
     if (g_autoload_request) {  // Settings -> Load auto-save
         g_autoload_request = false;
         if (frame < g_level_render_frame + 30) load_record_in_level(c);

@@ -520,6 +520,13 @@ static void call_psx(R3000* c, uint32_t addr, uint32_t a0) {
 
 bool bios_in_exception() { return g_in_exception; }
 
+bool bios_files_busy() {
+    if (!g_card_events.empty()) return true;
+    for (const auto& f : g_files)
+        if (f.used) return true;
+    return false;
+}
+
 void bios_take_interrupt(R3000* c) {
     if (g_in_exception) return;
     R3000 saved = *c;
