@@ -196,6 +196,33 @@ def make(src):
     return face(icon, a, kind) if kind else shaped(icon, a, name)
 
 
+def check_outline(src, out, name):
+    """Where Kenney's icon is see-through, ours adds only white marks, black edges and shading, and a
+    stick's ring line next to the button's body: no leftovers of the gap closing (once, bronze between a
+    label's letters and in the P of OPTIONS)."""
+    if face_kind(name):
+        return  # round plates: their shape is ours
+    a = binary(src.getchannel("A"))
+    body = Image.new("L", a.size, 0)  # the solid parts (not small loose marks: arrows, a label's letters)
+    for m in pieces(a):
+        if m.histogram()[255] >= N * N * 0.06:
+            body = ImageChops.lighter(body, m)
+    body = body.filter(ImageFilter.MaxFilter(13))
+    px = out.load()
+    stray = []
+    for y in range(N):
+        for x in range(N):
+            r, g, b, al = px[x, y]
+            if al < 200 or a.getpixel((x, y)):
+                continue
+            white, dark = min(r, g, b) > 225, r + g + b < 330
+            ring = r >= g >= b and r - b > 30 and body.getpixel((x, y))  # bronze, shaded or not, by a solid part
+            if not (white or dark or ring):
+                stray.append((x, y))
+    if len(stray) > 4:  # (a few anti-aliased pixels at an edge)
+        sys.exit(f"{name}: {len(stray)} pixels drawn where the icon is see-through, e.g. {stray[0]}")
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit(__doc__)
@@ -210,7 +237,9 @@ def main():
         out_dir = os.path.join(root, style)
         names = sorted(f for f in os.listdir(out_dir) if f.endswith(".png"))
         for f in names:
-            im = make(os.path.join(pack, folder, "Double", f))
+            src = os.path.join(pack, folder, "Double", f)
+            im = make(src)
+            check_outline(Image.open(src).convert("RGBA").resize((N, N), Image.LANCZOS), im, f[:-4])
             im.quantize(256, method=Image.Quantize.FASTOCTREE).save(os.path.join(out_dir, f), optimize=True)
         print(f"{style}: {len(names)} icons")
 
