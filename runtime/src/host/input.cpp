@@ -505,8 +505,10 @@ bool host_rewind_held() {
     if (game_menu_up()) return false;
     for (auto& sp : g_script)
         if (!sp.bit && g_frame >= sp.from && g_frame < sp.to) return true;
-    for (const Input& in : g_binds[input_mode()][A_REWIND])
-        if (input_down(in)) return true;
+    // (both: the key works with a controller plugged in, whose Rewind is unbound at first)
+    for (int m = 0; m < M_COUNT; m++)
+        for (const Input& in : g_binds[m][A_REWIND])
+            if (input_down(in)) return true;
     return false;
 }
 
