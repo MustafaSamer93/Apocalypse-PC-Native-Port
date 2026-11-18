@@ -104,7 +104,8 @@ def plate(mask, seed=3):
 
 def disc(n):
     big = Image.new("L", (n * 4, n * 4), 0)
-    ImageDraw.Draw(big).ellipse((8, 8, n * 4 - 8, n * 4 - 8), fill=255)
+    m = n * 4 * 0.07  # (a little smaller than the icon: the symbol keeps its size)
+    ImageDraw.Draw(big).ellipse((m, m, n * 4 - m, n * 4 - m), fill=255)
     return binary(big.resize((n, n), Image.LANCZOS))
 
 
@@ -123,7 +124,7 @@ def face_kind(name):
     return None
 
 
-LETTER_SCALE = 1.15  # the letters' size on a round plate (Kenney's are small)
+LETTER_SCALE = 1.3  # the letters' size on a round plate (Kenney's are small)
 letter_height = 0.0  # main(): the height that gives them, which the PlayStation shapes match
 
 
